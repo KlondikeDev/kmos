@@ -6,6 +6,7 @@
 #include <keyboard.h>
 #include <console.h>
 #include <panic.h>
+#include <cpuid.h>
 
 volatile int read_index = 0; 
 
@@ -20,11 +21,16 @@ void kernel_main(multiboot_info_t* mbi) {
 	framebuffer_init(mbi);
 	terminal_init();
 	init_serial();
-	terminal_printf(WHITE, BLACK, "Booting Kunix Millennium Operating System...\n");
+	terminal_printf(WHITE, BLACK, "Booting Kunix Millennium Operating System...\n\n");
+	cpuid_detect();
 	terminal_printf(CYAN, BLACK, "Upper RAM: %uKB\n", mbi->mem_upper);
 	terminal_printf(CYAN, BLACK, "Lower RAM: %uKB\n", mbi->mem_lower);
 	idt_init();
 	pit_init();
-	terminal_printf(CYAN, BLACK, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
+	terminal_printf(CYAN, BLACK, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n\n");
+
+	terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
 	while(1) { __asm__ volatile ("hlt"); }
 }
+
+// Happy 15th to me! 12:00 AM!
