@@ -1,25 +1,29 @@
-#include <types.h>
-#include <io.h>
+#include <boxes.h>
 #include <console.h>
+#include <io.h>
+#include <types.h>
 #include <klibc/string.h>
 
-#define BOX_TL "\xDA"  // top-left
-#define BOX_H  "\xC4"  // horizontal
-#define BOX_TR "\xBF"  // top-right
-#define BOX_V  "\xB3"  // vertical
-#define BOX_BL "\xC0"  // bottom-left
-#define BOX_BR "\xD9"  // bottom-right
+// CPUID functions:
+#define CHK_MAX_LEAF        0x80000000
+#define EXT_PROCESSOR_INFO  0x80000001
+#define PROCESSOR_BRAND_1   0x80000002
+#define PROCESSOR_BRAND_2   0x80000003
+#define PROCESSOR_BRAND_3   0x80000004
 
 bool extendedCPUID = true;
-uint32_t eax, ebx, ecx, edx;
+uint32_t max_extended_leaf = 0; 
 
+// Runs CPUID instruction
 void cpuid(uint32_t func, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {
     __asm__ volatile("cpuid"
         : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
         : "a"(func));
 }
 
+// Checks the CPU vendor and stores it in the vendor array.
 void cpuid_vendor(char* vendor) {
+    uint32_t eax, ebx, ecx, edx;
 
     cpuid(0, &eax, &ebx, &ecx, &edx);
 
@@ -29,10 +33,13 @@ void cpuid_vendor(char* vendor) {
     vendor[12] = '\0';
 }
 
+// Checks if Extended CPUID is enabled
 void cpuid_extended(void) {
-    cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
-    terminal_printf(SILVER, BLACK, BOX_V " Maximum extended CPUID leaf: %x           " BOX_V "\n", eax);
-    if(eax <= 0x80000000) {
+    uint32_t eax, ebx, ecx, edx;
+    cpuid(CHK_MAX_LEAF, &eax, &ebx, &ecx, &edx); // Checks the max CPUID leaf
+    max_extended_leaf = eax; // Stores maxiumum exteneded CPUID leaf
+    terminal_printf(SILVER, BLACK, BOX_V " Maximum extended CPUID leaf: %x           " BOX_V "\n", max_extended_leaf);
+    if(eax <= CHK_MAX_LEAF) {
         terminal_printf(SILVER, BLACK, "Extended CPUID not supported\n");
         extendedCPUID = false;
         return;
@@ -43,25 +50,27 @@ void cpuid_extended(void) {
 }
 
 void cpuid_brand(char* brand) {
-    if (eax < 0x80000004) {
+    uint32_t eax, ebx, ecx, edx;
+
+    if (max_extended_leaf < PROCESSOR_BRAND_3) {
         return;
     }
 
-    cpuid(0x80000002, &eax, &ebx, &ecx, &edx);
+    cpuid(PROCESSOR_BRAND_1, &eax, &ebx, &ecx, &edx);
 
     *(uint32_t *)(brand + 0) = eax;
     *(uint32_t *)(brand + 4) = ebx;
     *(uint32_t *)(brand + 8) = ecx;
     *(uint32_t *)(brand + 12) = edx;
 
-    cpuid(0x80000003, &eax, &ebx, &ecx, &edx);
+    cpuid(PROCESSOR_BRAND_2, &eax, &ebx, &ecx, &edx);
 
     *(uint32_t *)(brand + 16) = eax;
     *(uint32_t *)(brand + 20) = ebx;
     *(uint32_t *)(brand + 24) = ecx;
     *(uint32_t *)(brand + 28) = edx;
 
-    cpuid(0x80000004, &eax, &ebx, &ecx, &edx);
+    cpuid(PROCESSOR_BRAND_3, &eax, &ebx, &ecx, &edx);
 
     *(uint32_t *)(brand + 32) = eax;
     *(uint32_t *)(brand + 36) = ebx;
@@ -73,6 +82,7 @@ void cpuid_brand(char* brand) {
 }
 
 void cpuid_sse(void) {
+    uint32_t eax, ebx, ecx, edx;
     cpuid(1, &eax, &ebx, &ecx, &edx);
         if (edx & (1 << 25)){
             terminal_printf(SILVER, BLACK, BOX_V " SSE supported                                     " BOX_V "\n");

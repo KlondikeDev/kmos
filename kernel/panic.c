@@ -1,13 +1,9 @@
+#include <boxes.h>
 #include <console.h>
 #include <serial.h>
 #include <idt.h>
 
-#define BOX_TL "\xDA"  // top-left
-#define BOX_H  "\xC4"  // horizontal
-#define BOX_TR "\xBF"  // top-right
-#define BOX_V  "\xB3"  // vertical
-#define BOX_BL "\xC0"  // bottom-left
-#define BOX_BR "\xD9"  // bottom-right
+// Yes, this is highly fragile. But, it works for now. It WILL be fixed.
 
 void panic(const char* reason, registers_t* regs) {
     terminal_printf(WHITE, BLACK, "panic: %s. execution halted.\n\n", reason);

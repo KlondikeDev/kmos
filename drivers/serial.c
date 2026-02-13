@@ -1,6 +1,7 @@
 #include <io.h>
 #include <console.h>
 #include <serial.h>
+#include <klog.h>
 
 #define COM1 0x3f8          // COM1
 
@@ -19,13 +20,16 @@ int init_serial() {
 
    // Check if serial is faulty (i.e: not same byte as sent)
    if(inb(COM1 + 0) != 0xAE) {
-        terminal_printf(RED, YELLOW, "Serial port faulty!\n");
+        klog(LOG_WARN, "Serial faulty or not detected...");
         faulty = true;
    }
 
    // If serial is not faulty set it in normal operation mode
    // (not-loopback with IRQs enabled and OUT#1 and OUT#2 bits enabled)
-   outb(COM1 + 4, 0x0F);
+   if(!faulty){
+        outb(COM1 + 4, 0x0F);
+        klog(LOG_OKAY, "COM1 Enabled...");
+   }
    return 0;
 }
 

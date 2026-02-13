@@ -20,13 +20,14 @@ build(){
     i686-elf-gcc -Iinclude -Iinclude/klibc -c lib/memcpy.c -o memcpy.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
     i686-elf-gcc -Iinclude -Iinclude/klibc -c lib/string.c -o string.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
     i686-elf-gcc -Iinclude -Iinclude/klibc -c arch/x86/cpuid.c -o cpuid.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+    i686-elf-gcc -Iinclude -Iinclude/klibc -c kernel/klog.c -o klog.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
     i686-elf-as arch/x86/interrupts.s -o interrupts.o
     i686-elf-gcc -Iinclude -Iinclude/klibc -c kernel/kernel.c -o kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
 }
 
 link(){
     info "Linking binaries..."
-    i686-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.bin -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o string.o -lgcc
+    i686-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.bin -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o string.o klog.o -lgcc
 }
 
 setup(){
@@ -52,7 +53,12 @@ cleaning(){
 
 qemu(){
     info "Loading in QEMU..."
-    qemu-system-i386 -cdrom build/binaries/kunix-kodiak.iso -serial stdio
+    qemu-system-i386 \
+        -cdrom build/binaries/kunix-kodiak.iso \
+        -serial stdio \
+        -netdev user,id=net0 \
+        -device e1000,netdev=net0 \
+        -object filter-dump,id=f1,netdev=net0,file=network.pcap
 }
 
 main(){

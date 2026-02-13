@@ -7,6 +7,7 @@
 #include <console.h>
 #include <panic.h>
 #include <cpuid.h>
+#include <klog.h>
 
 volatile int read_index = 0; 
 
@@ -20,6 +21,7 @@ void kernel_main(multiboot_info_t* mbi) {
 	}
 	framebuffer_init(mbi);
 	terminal_init();
+    klog(LOG_OKAY, "Booting Kunix...");
 	init_serial();
 	terminal_printf(WHITE, BLACK, "Booting Kunix Millennium Operating System...\n\n");
 	cpuid_detect();

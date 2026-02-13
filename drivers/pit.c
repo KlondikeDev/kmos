@@ -18,4 +18,5 @@ void pit_init() {
     outb(DATA_PORT_0, (divisor >> 8) & 0xFF);   // High byte
 
     kserialout("PIT set to 250Hz, Square wave!\n");
+
 }
