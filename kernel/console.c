@@ -1,11 +1,11 @@
 #include <console.h>
-#include <console.h>
 #include <types.h>
 #include <serial.h>
 #include <font.h>
 #include <memcpy.h>
 #include <stdarg.h>
 #include <itoa.h>
+#include <string.h>
 
 // Defined as extern in console.h
 uint32_t kb_lower;
@@ -209,54 +209,75 @@ void draw_cursor(void) {
     }
 }
 
+void print_padded(const char* str, int width, char pad_char) {
+    int len = strlen(str);
+    int padding = width - len;
+    
+    if (padding > 0) {
+        for (int i = 0; i < padding; i++) {
+            terminal_putchar(pad_char);
+        }
+    }
+    
+    terminal_puts(str);
+}
+
 void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
     uint32_t old_bg = color_bg;
     uint32_t old_fg = color_fg;
-
     color_fg = fg;
     color_bg = bg;
+    
     va_list args;
     va_start(args, format);
 
     while (*format) {
-        if (*format == '%'){
+        if (*format == '%') {
             format++;
+            
+            char pad_char = ' ';
+            if (*format == '0') {
+                pad_char = '0';
+                format++;
+            }
+            
+            int width = 0;
+            while (*format >= '0' && *format <= '9') {
+                width = width * 10 + (*format - '0');
+                format++;
+            }
+            
             switch (*format) {
                 case 'd': {
                     char buffer[100];
-                    int32_t int_arg = va_arg(args, int);
-                    itoa(int_arg, buffer);
-                    terminal_puts(buffer);
+                    int32_t val = va_arg(args, int);
+                    itoa(val, buffer);
+                    print_padded(buffer, width, pad_char);
                     break;
                 }
-
                 case 'u': {
                     char buffer[100];
-                    uint32_t uint_arg = va_arg(args, unsigned int);
-                    utoa(uint_arg, buffer, 10);
-                    terminal_puts(buffer);
+                    uint32_t val = va_arg(args, unsigned int);
+                    utoa(val, buffer, 10);
+                    print_padded(buffer, width, pad_char);
                     break;
                 }
-
-                case 's': {
-                    char* str_arg = va_arg(args, char*);
-                    terminal_puts(str_arg);
-                    break;
-                }
-
                 case 'x': {
                     char buffer[100];
-                    uint32_t xint_arg = va_arg(args, unsigned int);
-                    utoa(xint_arg, buffer, 16);
-                    terminal_puts(buffer);
-                    break;                    
+                    uint32_t val = va_arg(args, unsigned int);
+                    utoa(val, buffer, 16);
+                    print_padded(buffer, width, pad_char);
+                    break;
                 }
-
+                case 's': {
+                    char* str = va_arg(args, char*);
+                    print_padded(str, width, ' ');
+                    break;
+                }
                 case '%': {
                     terminal_putchar('%');
                     break;
                 }
-
                 default: {
                     terminal_putchar('%');
                     terminal_putchar(*format);

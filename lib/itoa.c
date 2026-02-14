@@ -44,14 +44,17 @@ void utoa(u32 value, char* buffer, int base) {
 
     // Special handling for hex (base 16) with 0x prefix and padding
     if (base == 16) {
-        buffer[i++] = '0';
-        buffer[i++] = 'x';
 
-        // 8 hex digits for 32-bit values
+        int started = 0;
         for (int digit = 7; digit >= 0; digit--) {
-            buffer[i++] = digits[(value >> (digit * 4)) & 0xF];
+            int nibble = (value >> (digit * 4)) & 0xF;
+            if (nibble != 0 || started || digit == 0) {
+                buffer[i++] = digits[nibble];
+                started = 1;
+            }
         }
-
+    
+    
         buffer[i] = '\0';
         return;
     }

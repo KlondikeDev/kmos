@@ -15,4 +15,4 @@ extern kernel_logs_t log_messages[4];
 #define LOG_DEBUG (&log_messages[2])
 #define LOG_ERROR (&log_messages[3])
 
-void klog(kernel_logs_t* log, const char* msg);
+void klog(kernel_logs_t* log, const char* format, ...);

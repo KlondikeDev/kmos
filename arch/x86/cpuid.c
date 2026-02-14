@@ -38,7 +38,7 @@ void cpuid_extended(void) {
     uint32_t eax, ebx, ecx, edx;
     cpuid(CHK_MAX_LEAF, &eax, &ebx, &ecx, &edx); // Checks the max CPUID leaf
     max_extended_leaf = eax; // Stores maxiumum exteneded CPUID leaf
-    terminal_printf(SILVER, BLACK, BOX_V " Maximum extended CPUID leaf: %x           " BOX_V "\n", max_extended_leaf);
+    terminal_printf(SILVER, BLACK, BOX_V " Maximum extended CPUID leaf: 0x%x           " BOX_V "\n", max_extended_leaf);
     if(eax <= CHK_MAX_LEAF) {
         terminal_printf(SILVER, BLACK, "Extended CPUID not supported\n");
         extendedCPUID = false;
