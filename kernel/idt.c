@@ -357,6 +357,14 @@ void isr_handler(registers_t* regs) {
         case 16:
             panic("FLOATING POINT EXCEPTION", regs);
             break;
+        case 129:
+            if ((regs->cs & 0x3) != 0) {
+                __asm__ volatile("int $13");
+                return;
+            } else {
+                panic("MANUALLY INITIATED PANIC VIA INT 0x81", regs);
+            }
+            break;
         default:
             panic("UNKNOWN ERROR", regs);
             break;

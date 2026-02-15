@@ -16,6 +16,7 @@
 #include <cpuid.h>
 #include <klog.h>
 #include <pci.h>
+#include <shell.h>
 
 volatile int read_index = 0;
 
@@ -42,6 +43,7 @@ void kernel_main(multiboot_info_t* mbi) {
 	terminal_printf(CYAN, BLACK, "Lower RAM: %uKB\n\n", mbi->mem_lower);
 
 	terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
+	shell_init();
 	while(1) { __asm__ volatile ("hlt"); }
 }
 

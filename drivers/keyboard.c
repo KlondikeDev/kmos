@@ -2,6 +2,7 @@
 #include <types.h>
 #include <keyboard.h>
 #include <io.h>
+#include <shell.h>
 
 // I should start using defines more. I just avoid them for no reason. I actually quite like them.
 #define DATA_PORT 0x60
@@ -9,6 +10,7 @@
 char input_buffer[4096];
 volatile int index = 0;
 volatile bool shiftDown = false;
+volatile uint32_t prompt_x = 0;
 
 // I will admit, these arrays were copied from somewhere. I can't remember where.
 // I copied them from an OLD OS project that I did, and in the old project, I copied them from somewhere!
@@ -99,8 +101,7 @@ void read_key() {
         shiftDown = true;
     } else if (scancode == 0xAA || scancode == 0xB6) { // Left or Right Shift released
         shiftDown = false;
-    } else if (scancode < 0x80) { // Only process key presses (make codes)
-        // A key was pressed
+    } else if (scancode < 0x80) {
         char key;
         if (shiftDown){
             key = keymap_shift[scancode];
@@ -108,7 +109,26 @@ void read_key() {
             key = keymap[scancode];
         }
 
-        input_buffer[index] = key;
-        index++;
+        if (key == 0) {
+            return;
+        }
+
+        if (key == '\n') {
+            input_buffer[index] = '\0';
+            shell_process_command(input_buffer);
+            index = 0;
+            return;
+        } else if (key == '\b') {
+            if (index > 0) {
+                index--;
+            }
+            terminal_putchar(key);
+            return;
+        } else if (index < 4095) {
+            input_buffer[index] = key;
+            index++;
+        }
+    
+        terminal_putchar(key);
     }
 }

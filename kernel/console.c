@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <itoa.h>
 #include <string.h>
+#include <keyboard.h> 
 
 // Defined as extern in console.h
 uint32_t kb_lower;
@@ -125,7 +126,7 @@ void terminal_putchar(unsigned char c) {
         cursor_x = 0;
         cursor_y++;
 
-        if(cursor_y > characters_tall) {
+        if(cursor_y >= characters_tall) {
             terminal_scroll();
             cursor_y = characters_tall - 1;
         }
@@ -147,19 +148,18 @@ void terminal_putchar(unsigned char c) {
     }
 
     if (c == '\b') {
-        if(cursor_x > 0){
+        if (cursor_x > prompt_x) {
             cursor_x--;
-
-           uint32_t pixel_x = cursor_x * FONT_WIDTH;
-           uint32_t pixel_y = cursor_y * FONT_HEIGHT;
+        
+            uint32_t pixel_x = cursor_x * FONT_WIDTH;
+            uint32_t pixel_y = cursor_y * FONT_HEIGHT;
             draw_char(pixel_x, pixel_y, ' ', color_fg, color_bg);
         }
-
         return;
     }
 
-   uint32_t pixel_x = cursor_x * FONT_WIDTH;
-   uint32_t pixel_y = cursor_y * FONT_HEIGHT;
+    uint32_t pixel_x = cursor_x * FONT_WIDTH;
+    uint32_t pixel_y = cursor_y * FONT_HEIGHT;
     draw_char(pixel_x, pixel_y, c, color_fg, color_bg);
 
     cursor_x++;
@@ -183,16 +183,18 @@ void terminal_puts(const char* str) {
 }
 
 void terminal_scroll(void) {
-   uint32_t source = framebuffer_addr + (FONT_HEIGHT * fb_pitch);
-   uint32_t dest = framebuffer_addr;
-   uint32_t size = (characters_tall - 1) * FONT_HEIGHT * fb_pitch;
+    uint32_t fb_addr = (uint32_t)framebuffer_addr;
+    uint32_t source = fb_addr + (FONT_HEIGHT * fb_pitch);
+    uint32_t dest = fb_addr;
+    uint32_t size = (characters_tall - 1) * FONT_HEIGHT * fb_pitch;
+    
     memcpy((void*)dest, (void*)source, size);
 
-   uint32_t old_x = cursor_x;
+    uint32_t old_x = cursor_x;
 
     for (uint32_t i = 0; i < characters_wide; i++) {
-       uint32_t pixel_x = i * FONT_WIDTH;
-       uint32_t pixel_y = (characters_tall - 1) * FONT_HEIGHT;
+        uint32_t pixel_x = i * FONT_WIDTH;
+        uint32_t pixel_y = (characters_tall - 1) * FONT_HEIGHT;
         draw_char(pixel_x, pixel_y, ' ', color_bg, color_bg);
     }
 

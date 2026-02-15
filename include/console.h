@@ -1,6 +1,9 @@
 #pragma once
 #include <types.h>
 
+extern uint32_t cursor_x;
+extern uint32_t cursor_y;
+
 // Multiboot info structure
 typedef struct multiboot_info {
     uint32_t flags;              // 0
