@@ -43,7 +43,7 @@ void shell_process_command(const char* cmd) {
         terminal_printf(SILVER, BLACK, "Upper RAM: %uKB\n", kb_upper);
 	    terminal_printf(SILVER, BLACK, "Lower RAM: %uKB\n\n", kb_lower);
 
-        terminal_printf(SILVER, BLACK, "Kunix 0.01-kodiak (i386)\n");
+        terminal_printf(SILVER, BLACK, "Kunix 0.01-kodiak (x86_64)\n");
         terminal_putchar('\n');
     } else if(strcmp(cmd, "panic") == 0){
         __asm__ volatile("int $0x81");

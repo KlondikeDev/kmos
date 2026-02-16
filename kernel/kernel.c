@@ -3,7 +3,7 @@
 #define KUNIX_NAME     "kunix"
 #define KUNIX_VERSION  "0.01"
 #define KUNIX_CODENAME "kodiak"
-#define KUNIX_ARCH     "i386"
+#define KUNIX_ARCH     "x86_64"
 
 #include <types.h>
 #include <io.h>
@@ -24,27 +24,44 @@ volatile int read_index = 0;
 
 // Kernel Entry point!
 void kernel_main(multiboot_info_t* mbi) {
-	if (!(mbi->flags & MULTIBOOT_FLAG_FRAMEBUFFER)) {
-		kserialout("FAILED TO RECEIVE FRAMEBUFFER FROM GNU GRUB. Halt.\n");
-		while(1) { __asm__ volatile ("hlt"); }
-	}
-	framebuffer_init(mbi);
-	terminal_init();
+    init_serial();
+
+    // Enable Machine Check Exceptions (MCE)
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1 << 6);
+    __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
+    
+    framebuffer_init(mbi);
+    terminal_init();
+    
     klog(LOG_OKAY, "Booting Kunix Millennium Operating System...\n");
     klog(LOG_DEBUG, "Kernel Built at %s on %s: %s-%s (%s)\n", KUNIX_BUILD_TIME, KUNIX_BUILD_DATE, KUNIX_NAME, KUNIX_CODENAME, KUNIX_ARCH);
+    
     idt_init();
-	pit_init();
+    __asm__ volatile("int $18");
+    pit_init();
     klog(LOG_OKAY, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
-	init_serial();
+    
     pci_list_devices();
     terminal_printf(BLACK, BLACK, "\n");
-	cpuid_detect();
-	terminal_printf(CYAN, BLACK, "Upper RAM: %uKB\n", mbi->mem_upper);
-	terminal_printf(CYAN, BLACK, "Lower RAM: %uKB\n\n", mbi->mem_lower);
+    
+    cpuid_detect();
+    
+    terminal_printf(CYAN, BLACK, "Upper RAM: %uKB\n", mbi->mem_upper);
+    terminal_printf(CYAN, BLACK, "Lower RAM: %uKB\n\n", mbi->mem_lower);
 
-	terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
-	shell_init();
-	while(1) { __asm__ volatile ("hlt"); }
+    terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
+    
+    shell_init();
+    
+	while(1) {
+		__asm__ volatile ("hlt");
+		if (command_ready) {
+			command_ready = false;
+			shell_process_command(input_buffer);
+		}
+	}
 }
 
 // Happy 15th to me! 12:00 AM!

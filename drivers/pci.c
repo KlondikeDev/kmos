@@ -11,7 +11,7 @@
 
 
 uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset) {
-    uint32_t address = (1 << 31) | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC);
+    uint32_t address = (1u << 31) | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC);
 
     outl(PCI_CONFIG_ADDRESS, address);
 

@@ -1,6 +1,6 @@
 #pragma once
 
-typedef char* va_list;
-#define va_start(ap, arg) (ap = (va_list)&arg)
-#define va_arg(ap, type) (*(type*)(ap += sizeof(type)))
-#define va_end(ap) (ap = (va_list)0)
+typedef __builtin_va_list va_list;
+#define va_start __builtin_va_start
+#define va_arg   __builtin_va_arg
+#define va_end   __builtin_va_end

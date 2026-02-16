@@ -2,8 +2,8 @@
     .globl isr\num
 isr\num:
     cli
-    pushl $0
-    pushl $\num
+    pushq $0
+    pushq $\num
     jmp isr_common_stub
 .endm
 
@@ -11,10 +11,9 @@ isr\num:
     .globl isr\num
 isr\num:
     cli
-    pushl $\num
+    pushq $\num
     jmp isr_common_stub
 .endm
-
 
 ISR_NOERRCODE 0
 ISR_NOERRCODE 1
@@ -24,28 +23,20 @@ ISR_NOERRCODE 4
 ISR_NOERRCODE 5
 ISR_NOERRCODE 6
 ISR_NOERRCODE 7
-
 ISR_ERRCODE   8
-
 ISR_NOERRCODE 9
-
 ISR_ERRCODE   10
 ISR_ERRCODE   11
 ISR_ERRCODE   12
 ISR_ERRCODE   13
 ISR_ERRCODE   14
-
 ISR_NOERRCODE 15
 ISR_NOERRCODE 16
-
 ISR_ERRCODE   17
-
 ISR_NOERRCODE 18
 ISR_NOERRCODE 19
 ISR_NOERRCODE 20
-
 ISR_ERRCODE   21
-
 ISR_NOERRCODE 22
 ISR_NOERRCODE 23
 ISR_NOERRCODE 24
@@ -284,38 +275,52 @@ ISR_NOERRCODE 255
 .extern isr_handler
 
 isr_common_stub:
-    pusha
+    # Push all registers
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
 
-    movw %ds, %ax
-    pushl %eax
-
-    movw $0x10, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-
-    movl %esp, %eax
-    pushl %eax
+    movq %rsp, %rdi        # First argument = pointer to register struct
     call isr_handler
-    addl $4, %esp
 
-    popl %eax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
+    # Pop all registers
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
 
-    popa
-    addl $8, %esp
-    iret
+    addq $16, %rsp      # Remove error code and int number
+    iretq
 
 .macro IRQ num, int_num
     .globl irq\num
 irq\num:
     cli
-    pushl $0                # Dummy error code
-    pushl $\int_num         # Push interrupt number (32-47)
+    pushq $0
+    pushq $\int_num
     jmp irq_common_stub
 .endm
 
@@ -339,29 +344,42 @@ IRQ 15, 47
 .extern irq_handler
 
 irq_common_stub:
-    pusha
-    
-    movw %ds, %ax
-    pushl %eax
-    
-    movw $0x10, %ax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-    
-    movl %esp, %eax
-    pushl %eax
-    call irq_handler        # Calls C function
-    addl $4, %esp
-    
-    popl %eax
-    movw %ax, %ds
-    movw %ax, %es
-    movw %ax, %fs
-    movw %ax, %gs
-    
-    popa
-    addl $8, %esp
-    iret
+    # Push all registers
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+
+    movq %rsp, %rdi
+    call irq_handler
+
+    popq %rax
+    popq %rcx
+    popq %rdx
+    popq %rbx
+    popq %rbp
+    popq %rsi
+    popq %rdi
+    popq %r8
+    popq %r9
+    popq %r10
+    popq %r11
+    popq %r12
+    popq %r13
+    popq %r14
+    popq %r15
+
+    addq $16, %rsp
+    iretq
     

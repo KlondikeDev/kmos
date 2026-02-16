@@ -13,10 +13,10 @@ uint32_t kb_lower;
 uint32_t kb_upper;
 uint32_t fb_addr_low;
 uint32_t fb_addr_high;
-uint64_t framebuffer_addr;
-uint32_t fb_pitch;
-uint32_t fb_width;
-uint32_t fb_height;
+volatile uint64_t framebuffer_addr;
+volatile uint32_t fb_pitch;
+volatile uint32_t fb_width;
+volatile uint32_t fb_height;
 uint16_t fb_bpp;
 uint16_t fb_type;
 uint16_t fb_red_field_pos;
@@ -40,6 +40,44 @@ uint32_t color_bg = BLACK;
 // Initalizes framebuffer
 void framebuffer_init(multiboot_info_t* mbi) {
     kserialout("Initalizing framebuffer\n");
+    
+    if (!mbi) {
+        kserialout("ERROR: mbi is NULL!\n");
+        while(1) { __asm__ volatile("hlt"); }
+    }
+
+    // Check if framebuffer info is present (bit 12)
+    if (!(mbi->flags & (1 << 12))) {
+        kserialout("ERROR: No framebuffer info from GRUB!\n");
+        while(1) { __asm__ volatile("hlt"); }
+    }
+    
+    char buf[20];
+    utoa(mbi->flags, buf, 16);
+    kserialout("mbi->flags: 0x");
+    kserialout(buf);
+    kserialout("\n");
+
+    utoa(mbi->flags, buf, 16);
+    kserialout("mbi->flags: 0x");
+    kserialout(buf);
+    kserialout("\n");
+    
+    // CRITICAL: Print actual framebuffer address
+    utoa(mbi->framebuffer_addr, buf, 16);
+    kserialout("Actual FB addr: 0x");
+    kserialout(buf);
+    kserialout("\n");
+    
+    utoa(mbi->framebuffer_width, buf, 10);
+    kserialout("FB width: ");
+    kserialout(buf);
+    kserialout("\n");
+    
+    utoa(mbi->framebuffer_height, buf, 10);
+    kserialout("FB height: ");
+    kserialout(buf);
+    kserialout("\n");
     
     // Setup definitions
     kb_lower             = mbi->mem_lower;
@@ -82,7 +120,7 @@ void put_pixel(uint32_t x,uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
     }
 
    uint32_t offset = (y * fb_pitch) + (x * (fb_bpp / 8));
-    uint8_t *pixel = (uint8_t*)(uint32_t)(framebuffer_addr + offset);
+    uint8_t *pixel = (uint8_t*)(framebuffer_addr + offset);
 
     // Handle different color orders
     if (fb_red_field_pos == 0) {
@@ -183,9 +221,8 @@ void terminal_puts(const char* str) {
 }
 
 void terminal_scroll(void) {
-    uint32_t fb_addr = (uint32_t)framebuffer_addr;
-    uint32_t source = fb_addr + (FONT_HEIGHT * fb_pitch);
-    uint32_t dest = fb_addr;
+    uint64_t source = framebuffer_addr + (FONT_HEIGHT * fb_pitch);
+    uint64_t dest = framebuffer_addr;
     uint32_t size = (characters_tall - 1) * FONT_HEIGHT * fb_pitch;
     
     memcpy((void*)dest, (void*)source, size);
@@ -248,26 +285,47 @@ void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
                 width = width * 10 + (*format - '0');
                 format++;
             }
-            
+
+            int is_long = 0;
+            if (*format == 'l') {
+                is_long = 1;
+                format++;
+            }
+
             switch (*format) {
                 case 'd': {
                     char buffer[100];
-                    int32_t val = va_arg(args, int);
-                    itoa(val, buffer);
+                    if (is_long) {
+                        i64 val = va_arg(args, i64);
+                        itoa64(val, buffer);
+                    } else {
+                        int32_t val = va_arg(args, int);
+                        itoa(val, buffer);
+                    }
                     print_padded(buffer, width, pad_char);
                     break;
                 }
                 case 'u': {
                     char buffer[100];
-                    uint32_t val = va_arg(args, unsigned int);
-                    utoa(val, buffer, 10);
+                    if (is_long) {
+                        u64 val = va_arg(args, u64);
+                        utoa64(val, buffer, 10);
+                    } else {
+                        uint32_t val = va_arg(args, unsigned int);
+                        utoa(val, buffer, 10);
+                    }
                     print_padded(buffer, width, pad_char);
                     break;
                 }
                 case 'x': {
                     char buffer[100];
-                    uint32_t val = va_arg(args, unsigned int);
-                    utoa(val, buffer, 16);
+                    if (is_long) {
+                        u64 val = va_arg(args, u64);
+                        utoa64(val, buffer, 16);
+                    } else {
+                        uint32_t val = va_arg(args, unsigned int);
+                        utoa(val, buffer, 16);
+                    }
                     print_padded(buffer, width, pad_char);
                     break;
                 }

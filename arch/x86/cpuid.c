@@ -3,6 +3,7 @@
 #include <io.h>
 #include <types.h>
 #include <klibc/string.h>
+#include <memcpy.h>
 
 // CPUID functions:
 #define CHK_MAX_LEAF        0x80000000
@@ -16,9 +17,15 @@ uint32_t max_extended_leaf = 0;
 
 // Runs CPUID instruction
 void cpuid(uint32_t func, uint32_t* eax, uint32_t* ebx, uint32_t* ecx, uint32_t* edx) {
+    uint64_t rax, rbx, rcx, rdx;
     __asm__ volatile("cpuid"
-        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
-        : "a"(func));
+        : "=a"(rax), "=b"(rbx), "=c"(rcx), "=d"(rdx)
+        : "a"((uint64_t)func)
+        : );
+    *eax = (uint32_t)rax;
+    *ebx = (uint32_t)rbx;
+    *ecx = (uint32_t)rcx;
+    *edx = (uint32_t)rdx;
 }
 
 // Checks the CPU vendor and stores it in the vendor array.
@@ -58,24 +65,24 @@ void cpuid_brand(char* brand) {
 
     cpuid(PROCESSOR_BRAND_1, &eax, &ebx, &ecx, &edx);
 
-    *(uint32_t *)(brand + 0) = eax;
-    *(uint32_t *)(brand + 4) = ebx;
-    *(uint32_t *)(brand + 8) = ecx;
-    *(uint32_t *)(brand + 12) = edx;
+    memcpy(brand + 0, &eax, 4);
+    memcpy(brand + 4, &ebx, 4);
+    memcpy(brand + 8, &ecx, 4);
+    memcpy(brand + 12, &edx, 4);
 
     cpuid(PROCESSOR_BRAND_2, &eax, &ebx, &ecx, &edx);
 
-    *(uint32_t *)(brand + 16) = eax;
-    *(uint32_t *)(brand + 20) = ebx;
-    *(uint32_t *)(brand + 24) = ecx;
-    *(uint32_t *)(brand + 28) = edx;
+    memcpy(brand + 16, &eax, 4);
+    memcpy(brand + 20, &ebx, 4);
+    memcpy(brand + 24, &ecx, 4);
+    memcpy(brand + 28, &edx, 4);
 
     cpuid(PROCESSOR_BRAND_3, &eax, &ebx, &ecx, &edx);
 
-    *(uint32_t *)(brand + 32) = eax;
-    *(uint32_t *)(brand + 36) = ebx;
-    *(uint32_t *)(brand + 40) = ecx;
-    *(uint32_t *)(brand + 44) = edx;
+    memcpy(brand + 32, &eax, 4);
+    memcpy(brand + 36, &ebx, 4);
+    memcpy(brand + 40, &ecx, 4);
+    memcpy(brand + 44, &edx, 4);
 
     brand[47] = '\0';
 

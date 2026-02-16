@@ -278,11 +278,9 @@ extern void irq15(void);
 
 void idt_init();
 
-
 typedef struct {
-    uint32_t ds;
-    uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax;
-    uint32_t int_no, err_code;
-    uint32_t eip, cs, eflags;
-    // ...
+    uint64_t rax, rcx, rdx, rbx, rbp, rsi, rdi;
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t int_no, err_code;
+    uint64_t rip, cs, eflags;
 } registers_t;
