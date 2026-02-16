@@ -39,7 +39,6 @@ void kernel_main(multiboot_info_t* mbi) {
     klog(LOG_DEBUG, "Kernel Built at %s on %s: %s-%s (%s)\n", KUNIX_BUILD_TIME, KUNIX_BUILD_DATE, KUNIX_NAME, KUNIX_CODENAME, KUNIX_ARCH);
     
     idt_init();
-    __asm__ volatile("int $18");
     pit_init();
     klog(LOG_OKAY, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
     
