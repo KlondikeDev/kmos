@@ -8,6 +8,7 @@
 #include <idt.h>
 #include <io.h>
 #include <types.h>
+#include <security.h>
 
 void shell_init(void) {
     terminal_printf(WHITE, BLACK, "\nType 'help' for commands\n\n");
@@ -32,6 +33,7 @@ void shell_process_command(const char* cmd) {
         terminal_printf(SILVER, BLACK, "sysinfo - Displays system information\n");
         terminal_printf(SILVER, BLACK, "reboot  - Reboots the system\n");
         terminal_printf(SILVER, BLACK, "pci     - Lists PCI devices\n");
+        terminal_printf(SILVER, BLACK, "testssp - Tests stack-smashing protection\n");
         terminal_printf(SILVER, BLACK, "panic   - Initiates kernel panic\n\n");
     } else if(strcmp(cmd, "clear") == 0) {
         terminal_clear();
@@ -55,6 +57,9 @@ void shell_process_command(const char* cmd) {
     } else if(strncmp(cmd, "echo ", 5) == 0){
         const char* args = cmd + 5;
         terminal_printf(WHITE, BLACK, "%s\n", args);
+    } else if (strcmp(cmd, "testssp") == 0) {
+            test_ssp();
+            return;
     } else {
         terminal_printf(GREY, BLACK, "command not found: %s\n", cmd);
     }
