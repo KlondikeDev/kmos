@@ -7,6 +7,7 @@
 uint64_t __stack_chk_guard = 0xCA5CADECA5CADEAA;
 
 void watchdog_violation(const char* reason) {
+    terminal_printf(WHITE, BLACK, "WATCHDOG VIOLATION:\n");
     klog(LOG_ERROR, "%s\n", reason);
     terminal_printf(BLACK, WHITE, "This instance of the Kunix Millennium Operating System may be compromised. Please reboot your system.\n");
     
