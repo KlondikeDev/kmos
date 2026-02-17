@@ -22,8 +22,12 @@ volatile int read_index = 0;
 
 #define MULTIBOOT_FLAG_FRAMEBUFFER (1 << 12)
 
+#define KERNEL_VIRTUAL_BASE 0xFFFFFFFF80000000
+#define PHYS_TO_VIRT(addr) ((typeof(addr))((uint64_t)(addr) + KERNEL_VIRTUAL_BASE))
+
 // Kernel Entry point!
-void kernel_main(multiboot_info_t* mbi) {
+void kernel_main(multiboot_info_t* mbi_phys) {
+    multiboot_info_t* mbi = PHYS_TO_VIRT(mbi_phys);
     init_serial();
 
     // Enable Machine Check Exceptions (MCE)

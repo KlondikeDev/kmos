@@ -271,14 +271,18 @@ void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
     va_start(args, format);
 
     while (*format) {
-        if (*format == '%') {
+    if (*format == '%') {
+        format++;
+        
+        if (*format == '-') {
             format++;
-            
-            char pad_char = ' ';
-            if (*format == '0') {
-                pad_char = '0';
-                format++;
-            }
+        }
+        
+        char pad_char = ' ';
+        if (*format == '0') {
+            pad_char = '0';
+            format++;
+        }
             
             int width = 0;
             while (*format >= '0' && *format <= '9') {

@@ -4,6 +4,7 @@
 .set FLAGS,    ALIGN | MEMINFO | VIDEO
 .set MAGIC,    0x1BADB002
 .set CHECKSUM, -(MAGIC + FLAGS)
+.set KERNEL_VIRTUAL_BASE, 0xFFFFFFFF80000000
 
 .section .multiboot
 .align 4
@@ -16,11 +17,13 @@
 .long 0  # height
 .long 32 # depth
 
-.section .bss
+.section .boot.bss, "aw", @nobits
 .align 4096
 boot_pml4:
     .skip 4096
-boot_pdpt:
+boot_pdpt_low:
+    .skip 4096
+boot_pdpt_high:
     .skip 4096
 boot_pd:
     .skip 4096
@@ -28,30 +31,34 @@ boot_pd_high:
     .skip 4096
 
 .align 16
-stack_bottom:
+boot_stack_bottom:
 .skip 65536
+boot_stack_top:
+
+.section .boot.data, "aw", @progbits
+.align 16
+boot_gdt64:
+    .quad 0
+    .quad 0x00AF9A000000FFFF
+    .quad 0x00AF92000000FFFF
+    .quad 0x00AFFA000000FFFF
+    .quad 0x00AFF2000000FFFF
+boot_gdt64_ptr:
+    .word boot_gdt64_ptr - boot_gdt64 - 1
+    .quad boot_gdt64
+
+.section .bss
+.align 16
+stack_bottom:
+    .skip 65536
 stack_top:
 
-.section .data
-.align 16
-gdt64:
-    .quad 0                                          # Null descriptor
-    .quad 0x00AF9A000000FFFF                        # 64-bit code (ring 0)
-    .quad 0x00AF92000000FFFF                        # 64-bit data (ring 0)
-    .quad 0x00AFFA000000FFFF                        # 64-bit code (ring 3)
-    .quad 0x00AFF2000000FFFF                        # 64-bit data (ring 3)
-gdt64_ptr:
-    .word gdt64_ptr - gdt64 - 1
-    .quad gdt64
-
-.section .text
+.section .text._start, "ax"
 .code32
 .global _start
 .type _start, @function
 _start:
-    mov $stack_top, %esp
-    
-    # Save multiboot pointer to ESI (won't be clobbered)
+    mov $boot_stack_top, %esp
     mov %ebx, %esi
     
     # Check CPUID support
@@ -79,71 +86,81 @@ _start:
     test $(1 << 29), %edx
     jz no_long_mode
     
-    # Clear page tables (4 tables × 4096 bytes = 4096 dwords)
+    # Clear page tables
     mov $boot_pml4, %edi
-    mov $0, %eax
-    mov $4096, %ecx
+    xor %eax, %eax
+    mov $5120, %ecx
     rep stosl
     
-    # Build page tables
-    mov $boot_pdpt, %eax
+    # PML4[0] → boot_pdpt_low (identity)
+    mov $boot_pdpt_low, %eax
     or $3, %eax
     mov %eax, boot_pml4
     
-    # PDPT[0] → boot_pd (0-1GB)
+    # PML4[511] → boot_pdpt_high (higher-half -2GB)
+    mov $boot_pdpt_high, %eax
+    or $3, %eax
+    mov %eax, boot_pml4 + (511 * 8)
+    
+    # PDPT_LOW[0] → boot_pd (0-1GB)
     mov $boot_pd, %eax
     or $3, %eax
-    mov %eax, boot_pdpt
+    mov %eax, boot_pdpt_low
     
-    # PDPT[3] → boot_pd_high (3-4GB) - SEPARATE TABLE
+    # PDPT_LOW[3] → boot_pd_high (framebuffer 3-4GB)
     mov $boot_pd_high, %eax
     or $3, %eax
-    mov %eax, boot_pdpt + (3 * 8)
+    mov %eax, boot_pdpt_low + (3 * 8)
     
-    # Identity map first 64MB (kernel + stack)
+    # PDPT_HIGH[510] → boot_pd (kernel at -2GB)
+    mov $boot_pd, %eax
+    or $3, %eax
+    mov %eax, boot_pdpt_high + (510 * 8)
+    
+    # PDPT_HIGH[511] → boot_pd_high (framebuffer in high half)
+    mov $boot_pd_high, %eax
+    or $3, %eax
+    mov %eax, boot_pdpt_high + (511 * 8)
+    
+    # Identity map first 64MB
     mov $0x83, %eax
-    mov $32, %ecx                    # 32 entries × 2MB = 64MB
+    mov $32, %ecx
     mov $boot_pd, %edi
-fill_pd_low:
+1:
     mov %eax, (%edi)
     add $0x200000, %eax
     add $8, %edi
-    loop fill_pd_low
+    loop 1b
     
-    # Identity map 0xE0000000-0xFFFFFFFF (512MB) in boot_pd_high
+    # Map framebuffer
     mov $0xE0000083, %eax
-    mov $boot_pd_high + (256 * 8), %edi    # Entry 256
-    mov $256, %ecx                          # 256 entries = 512MB
-fill_pd_high:
+    mov $boot_pd_high + (256 * 8), %edi
+    mov $256, %ecx
+2:
     mov %eax, (%edi)
     add $0x200000, %eax
     add $8, %edi
-    loop fill_pd_high
+    loop 2b
     
-    # Load page tables
+    # Enable paging
     mov $boot_pml4, %eax
     mov %eax, %cr3
     
-    # Enable PAE
     mov %cr4, %eax
     or $(1 << 5), %eax
     mov %eax, %cr4
     
-    # Set LME bit
     mov $0xC0000080, %ecx
     rdmsr
     or $(1 << 8), %eax
     wrmsr
     
-    # Enable paging
     mov %cr0, %eax
     or $(1 << 31), %eax
     mov %eax, %cr0
     
-    # Load 64-bit GDT
-    lgdt gdt64_ptr
+    lgdt boot_gdt64_ptr
     
-    # Far jump to 64-bit code
     pushl $0x08
     pushl $start64
     lret
@@ -155,9 +172,7 @@ no_long_mode:
 
 .code64
 start64:
-    mov $stack_top, %rsp
-
-    # Set data segments to 0x10 (NOT 0!)
+    # Set segments
     mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
@@ -166,16 +181,23 @@ start64:
     mov %ax, %fs
     mov %ax, %gs
     
-    # Align stack
+    # Jump to higher-half
+    movabs $higher_half, %rax
+    jmp *%rax
+
+higher_half:
+    # Now at -2GB, set up high stack
+    movabs $stack_top, %rsp
     and $0xFFFFFFFFFFFFFFF0, %rsp
     
-    # Pass multiboot pointer (saved in esi) to kernel_main
+    # Pass multiboot pointer
     mov %esi, %edi
     
+    # Call kernel
     call kernel_main
-
+    
     cli
-hang:
+3:
     hlt
-    jmp hang
-	
+    jmp 3b
+    

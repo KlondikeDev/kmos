@@ -362,7 +362,7 @@ void isr_handler(registers_t* regs) {
             panic("FLOATING POINT EXCEPTION", regs);
             break;
         case 18:
-            terminal_printf(WHITE, BLACK, "MAJOR HARDWARE FAILURE REPORTED!\n");
+            terminal_printf(WHITE, BLACK, "MAJOR HARDWARE FAILURE REPORTED!\n"); // Not really needed, but cool looking I guess. Might be kinda fearmongering.
             panic("MACHINE CHECK EXCEPTION", regs);
             break;
         case 129:
