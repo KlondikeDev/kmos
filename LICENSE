@@ -18,10 +18,12 @@ I.	“This License” refers to the Kunix License in its entirety.
 
 II.	“Copyright” also means copyright-like laws that apply to other kinds of works.
 
-III.	To “modify” a work means to copy from or adapt all or part of the work in a fashion requiring copyright permission, other than the making of an exact copy.
+III. 	To “modify” a work means to copy from or adapt all or part of the work in a fashion requiring copyright permission, other than the making of an exact copy.
 	The resulting work is called a “modified version” of the earlier work or a work “based on” the earlier work.
 
 IV.	"Source" or "Source Code" refers to the software before compilation into a binary object or executable.
+
+V.	"End-user" refers to anybody who recives a copy of this software.
 
 Permission is hereby granted to any person obtaining a copy of this software to use, copy, modify, and distribute it, subject to the following conditions:
 
@@ -34,7 +36,7 @@ II.	All source code of this software must be released to the end-user upon distr
 III.	Using this software or source code in a different project is permitted as long as the following conditions are met:
 		1. Portions of this software under the Kunix License retain this license.
 		2. The other project retains the following copyright notice in all derivatives, in a conspicuous location or "licenses" page.
-		3. If distributed as part of a larger work, the complete source code of the entire work must be made avalible under terms no more restrictive than this license.
+		3. If distributed as part of a larger work, the complete source code of the entire work must be made available under the verbatim terms and conditions of the Kunix License.
 		
 IV.	The following copyright notice must be retained in a conspicuous location on any verbatim copy of the software or source code, derivative or modified versions of this software, or final binaries. When making modifications, retain all existing copyright notices and add your own 
 	for your contributions.

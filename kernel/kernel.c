@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Joseph Jones
+// Licensed under the Kunix License v1.0 or later
+// See LICENSE for details
+
 #define KUNIX_BUILD_DATE __DATE__
 #define KUNIX_BUILD_TIME __TIME__
 #define KUNIX_NAME     "kunix"

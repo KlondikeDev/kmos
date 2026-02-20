@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Joseph Jones
+// Licensed under the Kunix License v1.0 or later
+// See LICENSE for details
+
 #pragma once // Prevents Recompilation Errors
 
 // These are ideally self-explanatory, but they provide the integer and char types (or shorthand for them).

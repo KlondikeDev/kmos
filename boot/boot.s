@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Joseph Jones
+# Licensed under the Kunix License v1.0 or later
+# See LICENSE for details
+
 .set ALIGN,    1<<0
 .set MEMINFO,  1<<1
 .set VIDEO,    1<<2
