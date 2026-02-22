@@ -21,17 +21,18 @@
 #include <klog.h>
 #include <pci.h>
 #include <shell.h>
+#include <limine.h>
+#include <memory.h>
 
-volatile int read_index = 0;
+static volatile LIMINE_BASE_REVISION(3);
 
-#define MULTIBOOT_FLAG_FRAMEBUFFER (1 << 12)
-
-#define KERNEL_VIRTUAL_BASE 0xFFFFFFFF80000000
-#define PHYS_TO_VIRT(addr) ((typeof(addr))((uint64_t)(addr) + KERNEL_VIRTUAL_BASE))
+volatile struct limine_framebuffer_request fb_request = {
+    .id = LIMINE_FRAMEBUFFER_REQUEST,
+    .revision = 0
+};
 
 // Kernel Entry point!
-void kernel_main(multiboot_info_t* mbi_phys) {
-    multiboot_info_t* mbi = PHYS_TO_VIRT(mbi_phys);
+void kernel_main(void) {
     init_serial();
 
     // Enable Machine Check Exceptions (MCE)
@@ -40,7 +41,7 @@ void kernel_main(multiboot_info_t* mbi_phys) {
     cr4 |= (1 << 6);
     __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
     
-    framebuffer_init(mbi);
+    framebuffer_init();
     terminal_init();
     
     klog(LOG_OKAY, "Booting Kunix Millennium Operating System...\n");
@@ -54,9 +55,8 @@ void kernel_main(multiboot_info_t* mbi_phys) {
     terminal_printf(BLACK, BLACK, "\n");
     
     cpuid_detect();
-    
-    terminal_printf(CYAN, BLACK, "Upper RAM: %uKB\n", mbi->mem_upper);
-    terminal_printf(CYAN, BLACK, "Lower RAM: %uKB\n\n", mbi->mem_lower);
+
+    terminal_printf(CYAN, BLACK, "Usable RAM: %uMB\n\n", get_usable_ram() / 1024 / 1024);
 
     terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
     keyboard_init();

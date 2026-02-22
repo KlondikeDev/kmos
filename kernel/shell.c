@@ -13,6 +13,7 @@
 #include <io.h>
 #include <types.h>
 #include <security.h>
+#include <memory.h>
 
 void shell_init(void) {
     terminal_printf(WHITE, BLACK, "\nType 'help' for commands\n\n");
@@ -46,9 +47,7 @@ void shell_process_command(const char* cmd) {
     } else if(strcmp(cmd, "sysinfo") == 0) {
         terminal_putchar('\n');
         cpuid_detect();
-        terminal_printf(SILVER, BLACK, "Upper RAM: %uKB\n", kb_upper);
-	    terminal_printf(SILVER, BLACK, "Lower RAM: %uKB\n\n", kb_lower);
-
+        terminal_printf(CYAN, BLACK, "Usable RAM: %uMB\n\n", get_usable_ram() / 1024 / 1024);
         terminal_printf(SILVER, BLACK, "Kunix 0.01-kodiak (x86_64)\n");
         terminal_putchar('\n');
     } else if(strcmp(cmd, "panic") == 0){

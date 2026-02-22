@@ -12,6 +12,9 @@
 #include <string.h>
 #include <keyboard.h>
 #include <memset.h> 
+#include <limine.h>
+
+extern volatile struct limine_framebuffer_request fb_request;
 
 // Defined as extern in console.h
 uint32_t kb_lower;
@@ -47,62 +50,25 @@ static uint32_t dirty_top = UINT32_MAX;
 static uint32_t dirty_bottom = 0;
 
 // Initalizes framebuffer
-void framebuffer_init(multiboot_info_t* mbi) {
-    kserialout("Initalizing framebuffer\n");
-    
-    if (!mbi) {
-        kserialout("ERROR: mbi is NULL!\n");
+void framebuffer_init(void) {
+    if (!fb_request.response || fb_request.response->framebuffer_count < 1) {
+        kserialout("ERROR: No framebuffer from Limine!\n");
         while(1) { __asm__ volatile("hlt"); }
     }
 
-    // Check if framebuffer info is present (bit 12)
-    if (!(mbi->flags & (1 << 12))) {
-        kserialout("ERROR: No framebuffer info from GRUB!\n");
-        while(1) { __asm__ volatile("hlt"); }
-    }
-    
-    char buf[20];
-    utoa(mbi->flags, buf, 16);
-    kserialout("mbi->flags: 0x");
-    kserialout(buf);
-    kserialout("\n");
+    struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
 
-    utoa(mbi->flags, buf, 16);
-    kserialout("mbi->flags: 0x");
-    kserialout(buf);
-    kserialout("\n");
-    
-    // CRITICAL: Print actual framebuffer address
-    utoa(mbi->framebuffer_addr, buf, 16);
-    kserialout("Actual FB addr: 0x");
-    kserialout(buf);
-    kserialout("\n");
-    
-    utoa(mbi->framebuffer_width, buf, 10);
-    kserialout("FB width: ");
-    kserialout(buf);
-    kserialout("\n");
-    
-    utoa(mbi->framebuffer_height, buf, 10);
-    kserialout("FB height: ");
-    kserialout(buf);
-    kserialout("\n");
-    
-    // Setup definitions
-    kb_lower             = mbi->mem_lower;
-    kb_upper             = mbi->mem_upper;
-    framebuffer_addr     = mbi->framebuffer_addr;
-    fb_pitch             = mbi->framebuffer_pitch;
-    fb_width             = mbi->framebuffer_width;
-    fb_height            = mbi->framebuffer_height;
-    fb_bpp               = mbi->framebuffer_bpp;
-    fb_type              = mbi->framebuffer_type;
-    fb_red_field_pos     = mbi->color_info[0];
-    fb_red_mask_size     = mbi->color_info[1];
-    fb_green_field_pos   = mbi->color_info[2];
-    fb_green_mask_size   = mbi->color_info[3];
-    fb_blue_field_pos    = mbi->color_info[4];
-    fb_blue_mask_size    = mbi->color_info[5];
+    framebuffer_addr     = (uint64_t)fb->address;
+    fb_pitch             = fb->pitch;
+    fb_width             = fb->width;
+    fb_height            = fb->height;
+    fb_bpp               = fb->bpp;
+    fb_red_field_pos     = fb->red_mask_shift;
+    fb_green_field_pos   = fb->green_mask_shift;
+    fb_blue_field_pos    = fb->blue_mask_shift;
+    fb_red_mask_size     = fb->red_mask_size;
+    fb_green_mask_size   = fb->green_mask_size;
+    fb_blue_mask_size    = fb->blue_mask_size;
 }
 
 static void mark_dirty(uint32_t y_pixel) {
@@ -136,16 +102,16 @@ void put_pixel(uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
 
     // Handle different color orders
     if (fb_red_field_pos == 0) {
-        // BGR order (red at position 0 means it's at byte 0, which is actually blue)
-        pixel[0] = b;
-        pixel[1] = g;
-        pixel[2] = r;
-        pixel[3] = 0xFF;
-    } else {
-        // RGB order
+        // RGB: red at bit 0
         pixel[0] = r;
         pixel[1] = g;
         pixel[2] = b;
+        pixel[3] = 0xFF;
+    } else {
+        // BGR: red at bit 16
+        pixel[0] = b;
+        pixel[1] = g;
+        pixel[2] = r;
         pixel[3] = 0xFF;
     }
 }

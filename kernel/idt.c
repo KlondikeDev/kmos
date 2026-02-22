@@ -36,7 +36,7 @@ void idt_set_gate(uint8_t num, uint64_t base) {
     idt[num].base_low = base & 0xFFFF;
     idt[num].base_mid = (base >> 16) & 0xFFFF;
     idt[num].base_high = (base >> 32) & 0xFFFFFFFF;
-    idt[num].selector = 0x08;  // Kernel code segment
+    idt[num].selector = 0x28;  // Kernel code segment
     idt[num].ist = 0;
     idt[num].flags = 0x8E;     // Present, Ring 0, 64-bit interrupt gate
     idt[num].reserved = 0;
