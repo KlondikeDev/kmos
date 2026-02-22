@@ -59,7 +59,7 @@ void kernel_main(multiboot_info_t* mbi_phys) {
     terminal_printf(CYAN, BLACK, "Lower RAM: %uKB\n\n", mbi->mem_lower);
 
     terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
-    
+    keyboard_init();
     shell_init();
     
 	while(1) {

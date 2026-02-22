@@ -10,7 +10,8 @@
 #include <stdarg.h>
 #include <itoa.h>
 #include <string.h>
-#include <keyboard.h> 
+#include <keyboard.h>
+#include <memset.h> 
 
 // Defined as extern in console.h
 uint32_t kb_lower;
@@ -40,6 +41,10 @@ uint32_t color_bg = BLACK;
 
 #define FONT_HEIGHT 16
 #define FONT_WIDTH 8
+
+static uint8_t shadow[1920 * 1080 * 4];
+static uint32_t dirty_top = UINT32_MAX;
+static uint32_t dirty_bottom = 0;
 
 // Initalizes framebuffer
 void framebuffer_init(multiboot_info_t* mbi) {
@@ -100,6 +105,12 @@ void framebuffer_init(multiboot_info_t* mbi) {
     fb_blue_mask_size    = mbi->color_info[5];
 }
 
+static void mark_dirty(uint32_t y_pixel) {
+    if (y_pixel < dirty_top) dirty_top = y_pixel;
+    if (y_pixel + FONT_HEIGHT > dirty_bottom) dirty_bottom = y_pixel + FONT_HEIGHT;
+}
+
+
 void terminal_init(void) {
     characters_wide = fb_width / FONT_WIDTH;
     characters_tall = fb_height / FONT_HEIGHT;
@@ -111,20 +122,17 @@ void terminal_init(void) {
 }
 
 void terminal_clear(void) {
-    for(uint32_t y = 0; y < fb_height; y++){
-        for(uint32_t x = 0; x < fb_width; x++){
-            put_pixel(x, y, 0, 0, 0); // Fill background with black.
-        }
-    }
+    memset(shadow, 0, fb_height * fb_pitch);
+    dirty_top = 0;
+    dirty_bottom = fb_height;
+    terminal_flush();
 }
 
-void put_pixel(uint32_t x,uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
-    if (x >= fb_width || y >= fb_height){
-        return;
-    }
 
-   uint32_t offset = (y * fb_pitch) + (x * (fb_bpp / 8));
-    uint8_t *pixel = (uint8_t*)(framebuffer_addr + offset);
+void put_pixel(uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
+    if (x >= fb_width || y >= fb_height) return;
+    uint32_t offset = (y * fb_pitch) + (x * (fb_bpp / 8));
+    uint8_t *pixel = (uint8_t*)(shadow + offset);
 
     // Handle different color orders
     if (fb_red_field_pos == 0) {
@@ -143,6 +151,7 @@ void put_pixel(uint32_t x,uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void draw_char(uint32_t x,uint32_t y, unsigned char c,uint32_t fg_color,uint32_t bg_color) {
+    mark_dirty(y);
     uint8_t *glyph = font8x16[(uint16_t)c];  // Get character's bitmap
     
     for (int row = 0; row < FONT_HEIGHT; row++) {
@@ -225,14 +234,13 @@ void terminal_puts(const char* str) {
 }
 
 void terminal_scroll(void) {
-    uint64_t source = framebuffer_addr + (FONT_HEIGHT * fb_pitch);
-    uint64_t dest = framebuffer_addr;
+    uint64_t source = (uint64_t)shadow + (FONT_HEIGHT * fb_pitch);
+    uint64_t dest = (uint64_t)shadow;
     uint32_t size = (characters_tall - 1) * FONT_HEIGHT * fb_pitch;
     
     memcpy((void*)dest, (void*)source, size);
 
     uint32_t old_x = cursor_x;
-
     for (uint32_t i = 0; i < characters_wide; i++) {
         uint32_t pixel_x = i * FONT_WIDTH;
         uint32_t pixel_y = (characters_tall - 1) * FONT_HEIGHT;
@@ -241,6 +249,9 @@ void terminal_scroll(void) {
 
     cursor_x = old_x;
     cursor_y = characters_tall - 1;
+    dirty_top = 0;
+    dirty_bottom = fb_height;
+    terminal_flush();
 }
 
 void draw_cursor(void) {
@@ -360,4 +371,14 @@ void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
     va_end(args);
     color_bg = old_bg;
     color_fg = old_fg;
+    terminal_flush();
+}
+
+void terminal_flush(void) {
+    if (dirty_top == UINT32_MAX) return;
+    uint32_t offset = dirty_top * fb_pitch;
+    uint32_t size = (dirty_bottom - dirty_top) * fb_pitch;
+    memcpy((void*)(framebuffer_addr + offset), shadow + offset, size);
+    dirty_top = UINT32_MAX;
+    dirty_bottom = 0;
 }

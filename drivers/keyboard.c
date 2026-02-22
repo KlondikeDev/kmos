@@ -97,6 +97,19 @@ char keymap_shift[128] = {
     0, /* All other keys are undefined */
 };
 
+// I didn't even know you needed this.
+void keyboard_init() {
+    while (inb(0x64) & 0x02);
+    outb(0x64, 0xAE);
+    
+    while (inb(0x64) & 0x02);
+    outb(0x60, 0xF4);
+    
+    if (inb(0x64) & 0x01) {
+        inb(0x60);
+    }
+}
+
 void read_key() {
     int scancode = inb(DATA_PORT);
 
@@ -127,6 +140,7 @@ void read_key() {
                 index--;
             }
             terminal_putchar(key);
+            terminal_flush();
             return;
         } else if (index < 4095) {
             input_buffer[index] = key;
@@ -134,5 +148,6 @@ void read_key() {
         }
     
         terminal_putchar(key);
+        terminal_flush();
     }
 }

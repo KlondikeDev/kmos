@@ -74,6 +74,7 @@ void terminal_clear(void);
 void draw_cursor(void);
 void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...);
 void print_padded(const char* str, int width, char pad_char);
+void terminal_flush(void);
 
 #define WHITE   0xFFFFFF
 #define BLACK   0x000000

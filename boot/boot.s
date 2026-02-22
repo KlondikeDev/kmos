@@ -33,6 +33,8 @@ boot_pd:
     .skip 4096
 boot_pd_high:
     .skip 4096
+boot_pd_mmio:
+    .skip 4096
 
 .align 16
 boot_stack_bottom:
@@ -64,7 +66,7 @@ stack_top:
 _start:
     mov $boot_stack_top, %esp
     mov %ebx, %esi
-    
+
     # Check CPUID support
     pushfl
     pop %eax
@@ -78,93 +80,108 @@ _start:
     popfl
     cmp %eax, %ecx
     je no_long_mode
-    
+
     # Check long mode
     mov $0x80000000, %eax
     cpuid
     cmp $0x80000001, %eax
     jb no_long_mode
-    
+
     mov $0x80000001, %eax
     cpuid
     test $(1 << 29), %edx
     jz no_long_mode
-    
-    # Clear page tables
+
+    # Clear page tables (6 tables now)
     mov $boot_pml4, %edi
     xor %eax, %eax
-    mov $5120, %ecx
+    mov $6144, %ecx
     rep stosl
-    
+
     # PML4[0] → boot_pdpt_low (identity)
     mov $boot_pdpt_low, %eax
     or $3, %eax
     mov %eax, boot_pml4
-    
+
     # PML4[511] → boot_pdpt_high (higher-half -2GB)
     mov $boot_pdpt_high, %eax
     or $3, %eax
     mov %eax, boot_pml4 + (511 * 8)
-    
-    # PDPT_LOW[0] → boot_pd (0-1GB)
+
+    # PDPT_LOW[0] → boot_pd (0–1GB, kernel + identity)
     mov $boot_pd, %eax
     or $3, %eax
     mov %eax, boot_pdpt_low
-    
-    # PDPT_LOW[3] → boot_pd_high (framebuffer 3-4GB)
+
+    # PDPT_LOW[2] → boot_pd_mmio (0x80000000–0xBFFFFFFF)
+    mov $boot_pd_mmio, %eax
+    or $3, %eax
+    mov %eax, boot_pdpt_low + (2 * 8)
+
+    # PDPT_LOW[3] → boot_pd_high (0xC0000000–0xFFFFFFFF)
     mov $boot_pd_high, %eax
     or $3, %eax
     mov %eax, boot_pdpt_low + (3 * 8)
-    
+
     # PDPT_HIGH[510] → boot_pd (kernel at -2GB)
     mov $boot_pd, %eax
     or $3, %eax
     mov %eax, boot_pdpt_high + (510 * 8)
-    
-    # PDPT_HIGH[511] → boot_pd_high (framebuffer in high half)
+
+    # PDPT_HIGH[511] → boot_pd_high (high-half MMIO mirror)
     mov $boot_pd_high, %eax
     or $3, %eax
     mov %eax, boot_pdpt_high + (511 * 8)
-    
-    # Identity map first 64MB
+
+    # Identity map first 64MB (0x0–0x3FFFFFF), write-back
     mov $0x83, %eax
-    mov $32, %ecx
     mov $boot_pd, %edi
+    mov $32, %ecx
 1:
     mov %eax, (%edi)
     add $0x200000, %eax
     add $8, %edi
     loop 1b
-    
-    # Map framebuffer
-    mov $0xE0000083, %eax
-    mov $boot_pd_high + (256 * 8), %edi
-    mov $256, %ecx
+
+    # Map 0x80000000–0xBFFFFFFF (boot_pd_mmio, 512 entries, uncached)
+    mov $0x8000009B, %eax
+    mov $boot_pd_mmio, %edi
+    mov $512, %ecx
 2:
     mov %eax, (%edi)
     add $0x200000, %eax
     add $8, %edi
     loop 2b
-    
+
+    # Map 0xC0000000–0xFFFFFFFF (boot_pd_high, 512 entries, uncached)
+    mov $0xC000009B, %eax
+    mov $boot_pd_high, %edi
+    mov $512, %ecx
+3:
+    mov %eax, (%edi)
+    add $0x200000, %eax
+    add $8, %edi
+    loop 3b
+
     # Enable paging
     mov $boot_pml4, %eax
     mov %eax, %cr3
-    
+
     mov %cr4, %eax
     or $(1 << 5), %eax
     mov %eax, %cr4
-    
+
     mov $0xC0000080, %ecx
     rdmsr
     or $(1 << 8), %eax
     wrmsr
-    
+
     mov %cr0, %eax
     or $(1 << 31), %eax
     mov %eax, %cr0
-    
+
     lgdt boot_gdt64_ptr
-    
+
     pushl $0x08
     pushl $start64
     lret
@@ -176,7 +193,6 @@ no_long_mode:
 
 .code64
 start64:
-    # Set segments
     mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
@@ -184,24 +200,20 @@ start64:
     xor %ax, %ax
     mov %ax, %fs
     mov %ax, %gs
-    
-    # Jump to higher-half
+
     movabs $higher_half, %rax
     jmp *%rax
 
 higher_half:
-    # Now at -2GB, set up high stack
     movabs $stack_top, %rsp
     and $0xFFFFFFFFFFFFFFF0, %rsp
-    
-    # Pass multiboot pointer
+
     mov %esi, %edi
-    
-    # Call kernel
+
     call kernel_main
-    
+
     cli
-3:
+4:
     hlt
-    jmp 3b
+    jmp 4b
     
