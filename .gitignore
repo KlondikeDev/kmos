@@ -3,5 +3,6 @@
 *.pcap
 *.log
 *.o
+*.elf
 /build/*
 /build

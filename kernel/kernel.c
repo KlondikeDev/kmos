@@ -5,7 +5,7 @@
 #define KUNIX_BUILD_DATE __DATE__
 #define KUNIX_BUILD_TIME __TIME__
 #define KUNIX_NAME     "kunix"
-#define KUNIX_VERSION  "0.01"
+#define KUNIX_VERSION  "0.02"
 #define KUNIX_CODENAME "kodiak"
 #define KUNIX_ARCH     "x86_64"
 
@@ -23,6 +23,7 @@
 #include <shell.h>
 #include <limine.h>
 #include <memory.h>
+#include <cpuinit.h>
 
 static volatile LIMINE_BASE_REVISION(3);
 
@@ -34,15 +35,10 @@ volatile struct limine_framebuffer_request fb_request = {
 // Kernel Entry point!
 void kernel_main(void) {
     init_serial();
-
-    // Enable Machine Check Exceptions (MCE)
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1 << 6);
-    __asm__ volatile("mov %0, %%cr4" :: "r"(cr4));
     
     framebuffer_init();
     terminal_init();
+    cpu_init();
     
     klog(LOG_OKAY, "Booting Kunix Millennium Operating System...\n");
     klog(LOG_DEBUG, "Kernel Built at %s on %s: %s-%s (%s)\n", KUNIX_BUILD_TIME, KUNIX_BUILD_DATE, KUNIX_NAME, KUNIX_CODENAME, KUNIX_ARCH);
@@ -58,8 +54,11 @@ void kernel_main(void) {
 
     terminal_printf(CYAN, BLACK, "Usable RAM: %uMB\n\n", get_usable_ram() / 1024 / 1024);
 
-    terminal_printf(WHITE, BLACK, "kunix-kodiak v0.01 - Towards a New Digital Millennium!\n");
+    terminal_printf(SILVER, BLACK, "kunix-kodiak v0.02 - Insane Membrane\n\n");
+    terminal_printf(SILVER, BLACK, "Copyright (C) 2025, 2026\nJoseph Jones - Released under the terms of the Kunix License v1.0 or later.\n\n");
+    terminal_printf(SILVER, BLACK, "For more information on how to use Kunix, see the wiki:\nhttps://wiki.kunix.org\n");
     keyboard_init();
+
     shell_init();
     
 	while(1) {
