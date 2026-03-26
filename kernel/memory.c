@@ -5,9 +5,21 @@
 #include <types.h>
 #include <limine.h>
 #include <memory.h>
+#include <memset.h>
+
+#define PAGE_SIZE 4096
+
+static uint8_t *bitmap;
+static uint64_t total_pages;
+static uint64_t hhdm_offset;
 
 volatile struct limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST,
+    .revision = 0
+};
+
+volatile struct limine_hhdm_request hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST,
     .revision = 0
 };
 
@@ -21,4 +33,56 @@ uint64_t get_usable_ram(void) {
         }
     }
     return total;
+}
+
+void pmm_init(void) {
+    hhdm_offset = hhdm_request.response->offset;
+    uint64_t max_end = 0;
+    struct limine_memmap_response *memmap = memmap_request.response;
+    for (uint64_t i = 0; i < memmap->entry_count; i++) {
+        struct limine_memmap_entry *entry = memmap->entries[i];
+        uint64_t end = entry->base + entry->length;
+        if (end > max_end) {
+            max_end = end;
+        }
+    }
+    total_pages = max_end / PAGE_SIZE;
+    uint64_t bitmap_size = total_pages / 8;
+    for (uint64_t i = 0; i < memmap->entry_count; i++) {
+        struct limine_memmap_entry *entry = memmap->entries[i];
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size) {
+            bitmap = (uint8_t*)(entry->base + hhdm_offset);
+            break;
+        }
+    }
+    memset(bitmap, 0xFF, bitmap_size);
+    for (uint64_t i = 0; i < memmap->entry_count; i++) {
+        struct limine_memmap_entry *entry = memmap->entries[i];
+        uint64_t start = entry->base / PAGE_SIZE;
+        uint64_t count = entry->length / PAGE_SIZE;
+        for (uint64_t j = start; j < start + count; j++) {
+            bitmap[j / 8] &= ~(1 << (j % 8));
+        }
+    }
+    uint64_t phys = (uint64_t)bitmap - hhdm_offset;
+    uint64_t bstart = phys / PAGE_SIZE;
+    uint64_t bcount = (bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for(uint64_t k = bstart; k < bstart + bcount; k++) {
+        bitmap[k / 8] |= (1 << (k % 8));
+    }
+}
+
+void* pmm_alloc(void) {
+    for (uint64_t i = 0; i < total_pages; i++) {
+        if (!(bitmap[i / 8] & (1 << (i % 8)))) {
+            bitmap[i / 8] |= (1 << (i % 8));
+            return (void *)(i * PAGE_SIZE);
+        }
+    }
+    return NULL;
+}
+
+void pmm_free(uint64_t addr) {
+    uint64_t i = addr / PAGE_SIZE;
+    bitmap[i / 8] &= ~(1 << (i % 8));
 }

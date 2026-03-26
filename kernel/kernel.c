@@ -35,7 +35,7 @@ volatile struct limine_framebuffer_request fb_request = {
 // Kernel Entry point!
 void kernel_main(void) {
     init_serial();
-    
+    pmm_init();
     framebuffer_init();
     terminal_init();
     cpu_init();
