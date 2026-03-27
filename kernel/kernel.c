@@ -36,8 +36,8 @@ volatile struct limine_framebuffer_request fb_request = {
 void kernel_main(void) {
     init_serial();
     pmm_init();
-    framebuffer_init();
-    terminal_init();
+    framebuffer_init(); // Kunix, city of light!
+    terminal_init();    // Kunix, city of night!
     cpu_init();
     
     klog(LOG_OKAY, "Booting Kunix Millennium Operating System...\n");

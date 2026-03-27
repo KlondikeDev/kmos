@@ -8,7 +8,7 @@
 #include <idt.h>
 
 void panic(const char* reason, registers_t* regs) {
-    terminal_printf(WHITE, BLACK, "panic: %s. execution halted.\n\n", reason);
+    terminal_printf(WHITE, BLACK, "\npanic: %s. execution halted.\n\n", reason);
     terminal_printf(WHITE, BLACK, BOX_TL " registers: " BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_H BOX_TR "\n");
     terminal_printf(WHITE, BLACK, BOX_V " rax=0x%016lx rbx=0x%016lx rcx=0x%016lx rdx=0x%016lx " BOX_V "\n", regs->rax, regs->rbx, regs->rcx, regs->rdx);
     terminal_printf(WHITE, BLACK, BOX_V " rsi=0x%016lx rdi=0x%016lx rbp=0x%016lx                        " BOX_V "\n", regs->rsi, regs->rdi, regs->rbp);

@@ -47,13 +47,17 @@ void pmm_init(void) {
         }
     }
     total_pages = max_end / PAGE_SIZE;
-    uint64_t bitmap_size = total_pages / 8;
+    uint64_t bitmap_size = (total_pages + 7) / 8;
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
-        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size) {
-            bitmap = (uint8_t*)(entry->base + hhdm_offset);
+        uint64_t aligned = (entry->base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size + (aligned - entry->base)) {
+            bitmap = (uint8_t*)(aligned + hhdm_offset);
             break;
         }
+    }
+    if (!bitmap) {
+        __asm__ volatile("int $0x82");
     }
     memset(bitmap, 0xFF, bitmap_size);
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
@@ -61,7 +65,9 @@ void pmm_init(void) {
         uint64_t start = entry->base / PAGE_SIZE;
         uint64_t count = entry->length / PAGE_SIZE;
         for (uint64_t j = start; j < start + count; j++) {
-            bitmap[j / 8] &= ~(1 << (j % 8));
+            if (entry->type == LIMINE_MEMMAP_USABLE) {
+                bitmap[j / 8] &= ~(1 << (j % 8));
+            }
         }
     }
     uint64_t phys = (uint64_t)bitmap - hhdm_offset;
@@ -72,10 +78,13 @@ void pmm_init(void) {
     }
 }
 
+static uint64_t last_free_hint = 0;
+
 void* pmm_alloc(void) {
-    for (uint64_t i = 0; i < total_pages; i++) {
+    for (uint64_t i = last_free_hint; i < total_pages; i++) {
         if (!(bitmap[i / 8] & (1 << (i % 8)))) {
             bitmap[i / 8] |= (1 << (i % 8));
+            last_free_hint = i + 1;
             return (void *)(i * PAGE_SIZE);
         }
     }
@@ -85,4 +94,7 @@ void* pmm_alloc(void) {
 void pmm_free(uint64_t addr) {
     uint64_t i = addr / PAGE_SIZE;
     bitmap[i / 8] &= ~(1 << (i % 8));
+    if (addr % PAGE_SIZE != 0) {
+        __asm__ volatile("int $0x82");
+    }
 }
