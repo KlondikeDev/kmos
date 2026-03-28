@@ -92,9 +92,68 @@ void* pmm_alloc(void) {
 }
 
 void pmm_free(uint64_t addr) {
-    uint64_t i = addr / PAGE_SIZE;
-    bitmap[i / 8] &= ~(1 << (i % 8));
     if (addr % PAGE_SIZE != 0) {
         __asm__ volatile("int $0x82");
     }
+    uint64_t i = addr / PAGE_SIZE;
+    bitmap[i / 8] &= ~(1 << (i % 8));
+}
+
+void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
+    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
+    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
+    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t* pml4 = (uint64_t* )(cr3 + hhdm_offset);
+    if (!(pml4[pml4_idx] & 1)) {
+        void *page = pmm_alloc();
+        memset((void *)((uint64_t)page + hhdm_offset), 0, PAGE_SIZE);
+        pml4[pml4_idx] = (uint64_t)page | 3;
+    }
+
+    uint64_t *pdpt = (uint64_t *)((pml4[pml4_idx] & ~0xFFF) + hhdm_offset);
+    if (!(pdpt[pdpt_idx] & 1)) {
+        void *pd = pmm_alloc();
+        memset((void *)((uint64_t)pd + hhdm_offset), 0, PAGE_SIZE);
+        pdpt[pdpt_idx] = (uint64_t)pd | 3;
+    }
+
+    uint64_t *pd = (uint64_t *)((pdpt[pdpt_idx] & ~0xFFF) + hhdm_offset);
+    if (!(pd[pd_idx] & 1)) {
+        void *pt = pmm_alloc();
+        memset((void *)((uint64_t)pt + hhdm_offset), 0, PAGE_SIZE);
+        pd[pd_idx] = (uint64_t)pt | 3;
+    }
+
+    uint64_t *pt = (uint64_t *)((pd[pd_idx] & ~0xFFF) + hhdm_offset);
+    pt[pt_idx] = phys | flags;
+}
+
+void vmm_unmap(uint64_t virt) {
+    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
+    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
+    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t* pml4 = (uint64_t* )(cr3 + hhdm_offset);
+    if (!(pml4[pml4_idx] & 1)) {
+        return;
+    }
+
+    uint64_t *pdpt = (uint64_t *)((pml4[pml4_idx] & ~0xFFF) + hhdm_offset);
+    if (!(pdpt[pdpt_idx] & 1)) {
+        return;
+    }
+
+    uint64_t *pd = (uint64_t *)((pdpt[pdpt_idx] & ~0xFFF) + hhdm_offset);
+    if (!(pd[pd_idx] & 1)) {
+        return;
+    }
+
+    uint64_t *pt = (uint64_t *)((pd[pd_idx] & ~0xFFF) + hhdm_offset);
+    pt[pt_idx] = 0;
+    __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
 }
