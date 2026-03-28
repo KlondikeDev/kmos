@@ -157,3 +157,56 @@ void vmm_unmap(uint64_t virt) {
     pt[pt_idx] = 0;
     __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
 }
+
+struct block_header {
+    uint64_t size;
+    uint64_t free;
+    struct block_header* next_block;
+};
+
+uint64_t heap_base_addr;
+struct block_header* genesis_block_ptr;
+
+void heap_init(void) {
+    heap_base_addr = 0xFFFF900000000000;
+    void* phys = pmm_alloc();
+    vmm_map(heap_base_addr, (uint64_t)phys, 3);
+
+    genesis_block_ptr = (struct block_header* )heap_base_addr;
+
+    genesis_block_ptr->size = PAGE_SIZE - sizeof(struct block_header);
+    genesis_block_ptr->free = 1;
+    genesis_block_ptr->next_block = NULL;
+}
+
+void* kmalloc(uint64_t size) {
+    struct block_header *current = genesis_block_ptr;
+
+    while(current != NULL) {
+        if (current->free == 1 && current->size >= size) {
+            current->free = 0;
+            if (current->size >= size + sizeof(struct block_header) + 1) {
+                struct block_header *split = (struct block_header *)((uint64_t)(current + 1) + size);
+                split->size = current->size - size - sizeof(struct block_header);
+                split->free = 1;
+                split->next_block = current->next_block;
+                current->next_block = split;
+                current->size = size;
+                return (void *)(current + 1);
+            }
+            return (void *)(current + 1);
+        }
+        current = current->next_block;
+    }
+
+    return NULL;
+}
+
+void kfree(void* addr) {
+    struct block_header *block = (struct block_header *)addr - 1;
+    block->free = 1;
+    while (block->next_block != NULL && block->next_block->free == 1) {
+        block->size += sizeof(struct block_header) + block->next_block->size;
+        block->next_block = block->next_block->next_block;
+    }
+}
