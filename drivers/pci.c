@@ -58,7 +58,6 @@ uint32_t pci_read_bar(pci_device_t* dev, uint8_t bar_num) {
 }
 
 void pci_list_devices(void) {
-    
     for(int i = 0; i < 256; i++){
         for(int j = 0; j < 32; j++){
             for(int k = 0; k < 8; k++){
