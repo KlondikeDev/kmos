@@ -9,6 +9,8 @@
 KMOS (Kunix Millennium Operating System), codename **Kodiak**, is a from-scratch monolithic kernel (designed to eventually be Unix-like) for x86_64, developed under the [Klondike Software Project](https://kunix.org). It is written in C and licensed under the Kunix License.
 
 ---
+[![KMOS Demo](https://img.youtube.com/vi/stRZd9a7R0s/maxresdefault.jpg)](https://www.youtube.com/watch?v=stRZd9a7R0s)
+---
 
 ## Status
 
