@@ -1,0 +1,72 @@
+The Kunix License v1.0
+
+Everyone is permitted to copy and distribute copies of this license document, but changing it is not allowed.
+
+==========================
+
+PREAMBLE:
+
+I. 	This Software is Charityware.
+
+II.	While not legally required, we strongly encourage all users, especially commercial users, to support our conservation mission by donating to the World Wildlife Fund (WWF) at <https://protect.worldwildlife.org/>.
+
+TERMS AND CONDITIONS:
+
+0. Definitions.
+
+I.	“This License” refers to the Kunix License in its entirety.
+
+II.	“Copyright” also means copyright-like laws that apply to other kinds of works.
+
+III. 	To “modify” a work means to copy from or adapt all or part of the work in a fashion requiring copyright permission, other than the making of an exact copy.
+	The resulting work is called a “modified version” of the earlier work or a work “based on” the earlier work.
+
+IV.	"Source" or "Source Code" refers to the software before compilation into a binary object or executable.
+
+V.	"End-user" refers to anybody who receives a copy of this software.
+
+Permission is hereby granted to any person obtaining a copy of this software to use, copy, modify, and distribute it, subject to the following conditions:
+
+1. Distribution.
+
+I.	Anybody distributing this software must retain this license on the verbatim or modified copy of this software.
+
+II.	All source code of this software must be released to the end-user upon distribution, either alongside the binary, or with a publicly accessible URL to the complete source code, or a written offer valid for three years to provide source code upon request.
+
+III.	Using this software or source code in a different project is permitted as long as the following conditions are met:
+		1. Portions of this software under the Kunix License retain this license.
+		2. The other project retains the copyright notice in all derivatives, in a conspicuous location or "licenses" page.
+		3. If distributed as part of a larger work, the complete source code of the entire work must be made available under the verbatim terms and conditions of the Kunix License.
+		
+IV.	The following copyright notice must be retained in a conspicuous location on any verbatim copy of the software or source code, derivative or modified versions of this software, or final binaries. When making modifications, retain all existing copyright notices and add your own 
+	for your contributions.
+
+2. Patent License.
+
+I.	Each contributor grants to all end-users a perpetual, worldwide, 
+	royalty-free, irrevocable license under any patent claims licensable 
+	by that contributor, to make, use, sell, and distribute the software 
+	and derivative works thereof.
+
+II.	If any person or entity initiates patent litigation against any 
+	party alleging that this software, or a contribution incorporated 
+	within it, constitutes patent infringement, then all patent licenses 
+	granted to that person or entity under this License shall terminate 
+	as of the date such litigation is filed.
+
+END TERMS AND CONDITIONS
+
+Copyright (c) 2026 Joseph Jones
+
+While not required by this license, users are encouraged to donate to the World Wildlife Fund.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+kunix-syscall-exception:
+This copyright does not cover user programs that use kernel services via system calls - which is considered normal usage of the kernel, and does not fall under the definition of a "derivative work".
+
+---
+
+This software is licensed under the Kunix License version v1.0 or later.
