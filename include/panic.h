@@ -6,4 +6,5 @@
 
 #include "idt.h"
 
+// Excuse me sir, I think there's someone you've confused me for!
 void panic(const char* reason, registers_t* regs);

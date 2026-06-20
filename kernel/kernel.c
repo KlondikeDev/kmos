@@ -24,7 +24,10 @@
 #include <limine.h>
 #include <memory.h>
 #include <cpuinit.h>
+#include <ata.h>
+#include <fat32.h>
 
+// Limine nuke!
 static volatile LIMINE_BASE_REVISION(3);
 
 volatile struct limine_framebuffer_request fb_request = {
@@ -40,7 +43,11 @@ void kernel_main(void) {
     framebuffer_init(); // Kunix, city of light!
     terminal_init();    // Kunix, city of night!
     cpu_init();
-    
+    if(faulty == true) {
+        klog(LOG_WARN, "Serial port faulty or not present...\n");
+    } else {
+        klog(LOG_OKAY, "COM1 Enabled at port 0x%x\n", COM1);
+    }
     klog(LOG_OKAY, "Booting Kunix Millennium Operating System...\n");
     klog(LOG_DEBUG, "Kernel Built at %s on %s: %s-%s (%s)\n", KUNIX_BUILD_TIME, KUNIX_BUILD_DATE, KUNIX_NAME, KUNIX_CODENAME, KUNIX_ARCH);
     
@@ -49,6 +56,9 @@ void kernel_main(void) {
     klog(LOG_OKAY, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
     
     pci_list_devices();
+    identify_drive(0xA0);
+    fat32_init();
+
     terminal_printf(BLACK, BLACK, "\n");
     
     cpuid_detect();

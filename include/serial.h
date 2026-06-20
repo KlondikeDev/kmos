@@ -7,3 +7,6 @@
 int init_serial();
 void kserialout(const char* str);
 void kserialputchar(char c);
+extern volatile bool faulty;
+
+#define COM1 0x3f8          // COM1

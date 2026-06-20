@@ -97,6 +97,7 @@ void pmm_free(uint64_t addr) {
     }
     uint64_t i = addr / PAGE_SIZE;
     bitmap[i / 8] &= ~(1 << (i % 8));
+    if (i < last_free_hint) last_free_hint = i;
 }
 
 void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -129,6 +130,7 @@ void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
 
     uint64_t *pt = (uint64_t *)((pd[pd_idx] & ~0xFFF) + hhdm_offset);
     pt[pt_idx] = phys | flags;
+    __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
 }
 
 void vmm_unmap(uint64_t virt) {
@@ -166,6 +168,8 @@ struct block_header {
 
 uint64_t heap_base_addr;
 struct block_header* genesis_block_ptr;
+static struct block_header* heap_tail;   // last block in the chain
+static uint64_t heap_end;                // next unmapped virtual address
 
 void heap_init(void) {
     heap_base_addr = 0xFFFF900000000000;
@@ -177,6 +181,41 @@ void heap_init(void) {
     genesis_block_ptr->size = PAGE_SIZE - sizeof(struct block_header);
     genesis_block_ptr->free = 1;
     genesis_block_ptr->next_block = NULL;
+
+    heap_tail = genesis_block_ptr;
+    heap_end = heap_base_addr + PAGE_SIZE;
+}
+
+// Map more pages at the end of the heap and append them as one free block.
+static struct block_header* heap_grow(uint64_t need) {
+    uint64_t pages = (need + sizeof(struct block_header) + PAGE_SIZE - 1) / PAGE_SIZE;
+    struct block_header* blk = (struct block_header*)heap_end;
+    for (uint64_t i = 0; i < pages; i++) {
+        vmm_map(heap_end, (uint64_t)pmm_alloc(), 3);
+        heap_end += PAGE_SIZE;
+    }
+    blk->size = pages * PAGE_SIZE - sizeof(struct block_header);
+    blk->free = 1;
+    blk->next_block = NULL;
+    heap_tail->next_block = blk;
+    heap_tail = blk;
+    return blk;
+}
+
+// Carve `size` bytes out of an already-suitable free block, splitting the
+// remainder off as a new free block when there's room for one.
+static void* heap_carve(struct block_header* block, uint64_t size) {
+    block->free = 0;
+    if (block->size >= size + sizeof(struct block_header) + 1) {
+        struct block_header *split = (struct block_header *)((uint64_t)(block + 1) + size);
+        split->size = block->size - size - sizeof(struct block_header);
+        split->free = 1;
+        split->next_block = block->next_block;
+        block->next_block = split;
+        block->size = size;
+        if (split->next_block == NULL) heap_tail = split;
+    }
+    return (void *)(block + 1);
 }
 
 void* kmalloc(uint64_t size) {
@@ -184,28 +223,21 @@ void* kmalloc(uint64_t size) {
 
     while(current != NULL) {
         if (current->free == 1 && current->size >= size) {
-            current->free = 0;
-            if (current->size >= size + sizeof(struct block_header) + 1) {
-                struct block_header *split = (struct block_header *)((uint64_t)(current + 1) + size);
-                split->size = current->size - size - sizeof(struct block_header);
-                split->free = 1;
-                split->next_block = current->next_block;
-                current->next_block = split;
-                current->size = size;
-                return (void *)(current + 1);
-            }
-            return (void *)(current + 1);
+            return heap_carve(current, size);
         }
         current = current->next_block;
     }
 
-    return NULL;
+    struct block_header *grown = heap_grow(size);
+    if (grown == NULL) return NULL;
+    return heap_carve(grown, size);
 }
 
 void kfree(void* addr) {
     struct block_header *block = (struct block_header *)addr - 1;
     block->free = 1;
     while (block->next_block != NULL && block->next_block->free == 1) {
+        if (block->next_block == heap_tail) heap_tail = block;
         block->size += sizeof(struct block_header) + block->next_block->size;
         block->next_block = block->next_block->next_block;
     }

@@ -1,0 +1,32 @@
+A statement on the usage of Large Language Models (LLMs) in the development of the Kunix Millennium Operating System (KMOS):
+
+As of 3:40 PM (PST) on June 16, 2026, the usage of LLMs in the development of KMOS has hereby been AUTHORIZED by kernel contributor "jdj", so long as the following conditions are met:
+
+Section I - Anthropic Claude:
+    1. The usage of Anthropic Claude models is hereby AUTHORIZED so long as the models:
+        1.1: Are not of the "Haiku" series.
+        1.2: The models have a suffix of "4.5" or higher.
+        1.3: The contributor has a complete understanding of the code that is being contributed.
+
+Section II - OpenAI Codex/ChatGPT:
+    1. The agentic usage of OpenAI models is hereby PROHIBITED throughout KMOS, and interface through an inference provider may only be utilized for changes under 10 lines, or changes without substantial effects on the kernel. (e.g. bug fixes, changing "signed" to "unsigned" or vice versa)
+
+Section III - Alibaba Qwen:
+    1. The usage of Alibaba Qwen models is hereby AUTHORIZED so long as the models:
+        1.1: Are of the "3" series or higher.
+        1.2: Have over 9 billion parameters.
+        1.3: Are hosted locally on the contributor's own hardware.
+        1.4: The contributor has a complete understanding of the code that is being contributed.
+        1.5: The code comments are not in Traditional or Simplified Chinese.
+
+-- jdj
+
+Appendix 1:
+
+As of 5:28 PM on June 17, 2026, an additional clause has been APPROVED by kernel contributor "jdj":
+
+Files with over 50% LLM-generated code must include a disclaimer at the beginning of the file, repeated verbatim as follows:
+
+"This file has been generated in whole or in part by a Large Language Model"
+
+-- jdj

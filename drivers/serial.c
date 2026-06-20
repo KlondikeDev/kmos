@@ -3,11 +3,7 @@
 // See LICENSE for details
 
 #include <io.h>
-#include <console.h>
 #include <serial.h>
-#include <klog.h>
-
-#define COM1 0x3f8          // COM1
 
 volatile bool faulty = false;
 
@@ -24,7 +20,6 @@ int init_serial() {
 
    // Check if serial is faulty (i.e: not same byte as sent)
    if(inb(COM1 + 0) != 0xAE) {
-        klog(LOG_WARN, "Serial faulty or not detected...\n");
         faulty = true;
    }
 
@@ -32,7 +27,6 @@ int init_serial() {
    // (not-loopback with IRQs enabled and OUT#1 and OUT#2 bits enabled)
    if(!faulty){
         outb(COM1 + 4, 0x0F);
-        klog(LOG_OKAY, "COM1 Enabled at port 0x%x\n", COM1);
    }
    return 0;
 }

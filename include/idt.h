@@ -6,6 +6,7 @@
 
 #include "types.h"
 
+// Long, long list. But, it is needed. Probably could have just made a macro -- but where's the fun in that?
 extern void isr0(void);
 extern void isr1(void);
 extern void isr2(void);
@@ -282,6 +283,7 @@ extern void irq15(void);
 
 void idt_init();
 
+// This is the values that are in the registers, after they get pushed to the stack. Fancy.
 typedef struct {
     uint64_t rax, rcx, rdx, rbx, rbp, rsi, rdi;
     uint64_t r8, r9, r10, r11, r12, r13, r14, r15;

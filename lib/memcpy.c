@@ -4,6 +4,8 @@
 
 #include <types.h>
 
+// This... copies stuff. Big shock.
+
 void* memcpy(void* dest, const void* src, size_t n) {
     char* csrc = (char*)src;
     char* cdest = (char*)dest;

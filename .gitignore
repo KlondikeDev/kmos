@@ -6,3 +6,4 @@
 *.elf
 /build/*
 /build
+.claude/

@@ -14,6 +14,16 @@ u8 inb(u16 port) {
     return ret;
 }
 
+void outw(u16 port, u16 val) {
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+u16 inw(u16 port) {
+    u16 ret;
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
 void outl(uint16_t port, uint32_t val) {
     __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
 }

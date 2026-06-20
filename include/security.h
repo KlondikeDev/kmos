@@ -4,5 +4,6 @@
 
 #pragma once
 
+// You know, I hope that this will suffice for a lot of issues in the future.
 void watchdog_violation(const char* reason);
 void test_ssp(void);

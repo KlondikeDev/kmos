@@ -11,7 +11,8 @@
 #include <itoa.h>
 #include <string.h>
 #include <keyboard.h>
-#include <memset.h> 
+#include <memset.h>
+#include <io.h>
 #include <limine.h>
 
 extern volatile struct limine_framebuffer_request fb_request;
@@ -200,6 +201,7 @@ void terminal_puts(const char* str) {
 }
 
 void terminal_scroll(void) {
+    uint64_t irq = irq_save();
     uint64_t source = (uint64_t)shadow + (FONT_HEIGHT * fb_pitch);
     uint64_t dest = (uint64_t)shadow;
     uint32_t size = (characters_tall - 1) * FONT_HEIGHT * fb_pitch;
@@ -218,6 +220,7 @@ void terminal_scroll(void) {
     dirty_top = 0;
     dirty_bottom = fb_height;
     terminal_flush();
+    irq_restore(irq);
 }
 
 void draw_cursor(void) {
@@ -341,10 +344,15 @@ void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
 }
 
 void terminal_flush(void) {
-    if (dirty_top == UINT32_MAX) return;
+    uint64_t irq = irq_save();
+    if (dirty_top == UINT32_MAX) {
+        irq_restore(irq);
+        return;
+    }
     uint32_t offset = dirty_top * fb_pitch;
     uint32_t size = (dirty_bottom - dirty_top) * fb_pitch;
     memcpy((void*)(framebuffer_addr + offset), shadow + offset, size);
     dirty_top = UINT32_MAX;
     dirty_bottom = 0;
+    irq_restore(irq);
 }

@@ -8,8 +8,12 @@
 #include <security.h>
 
 // Canary!
+
+// TODO: Replace with randomly generated canary for safety.
+
 uint64_t __stack_chk_guard = 0xCA5CADECA5CADEAA;
 
+// Watchdog violations are for... whatever security issue there is. If there's a non-panic security issue, and the system is comprimised, it should trigger a watchdog violation.
 void watchdog_violation(const char* reason) {
     terminal_printf(WHITE, BLACK, "WATCHDOG VIOLATION:\n");
     klog(LOG_ERROR, "%s\n", reason);

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Joseph Jones
+// Licensed under the Kunix License v1.0 or later
+// See LICENSE for details
+
 #pragma once
 #include <types.h>
 uint64_t get_usable_ram(void);
@@ -10,3 +14,5 @@ void heap_init(void);
 void *kmalloc(uint64_t size);
 void kfree(void *addr);
 extern volatile struct limine_memmap_request memmap_request;
+
+// Niche. Well, anyway, this file needs cleaning. TODO.
