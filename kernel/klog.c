@@ -45,7 +45,12 @@ void klog(kernel_logs_t* log, const char* format, ...) {
                 width = width * 10 + (*format - '0');
                 format++;
             }
-            
+
+            if (*format == '\0') {   // format ends in '%': don't run past the terminator
+                terminal_putchar('%');
+                break;
+            }
+
             switch (*format) {
                 case 'd': {
                     char buffer[100];
@@ -89,5 +94,6 @@ void klog(kernel_logs_t* log, const char* format, ...) {
     }
 
     va_end(args);
+    terminal_flush();   // body text goes through terminal_putchar, which never flushes
 
 }

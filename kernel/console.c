@@ -70,6 +70,13 @@ void framebuffer_init(void) {
     fb_red_mask_size     = fb->red_mask_size;
     fb_green_mask_size   = fb->green_mask_size;
     fb_blue_mask_size    = fb->blue_mask_size;
+
+    // The shadow buffer is statically sized; on a framebuffer larger than
+    // 1920x1080x32 clamp the drawable height rather than overflow .bss.
+    if ((uint64_t)fb_height * fb_pitch > sizeof(shadow)) {
+        kserialout("WARNING: framebuffer exceeds console shadow buffer, clamping height\n");
+        fb_height = sizeof(shadow) / fb_pitch;
+    }
 }
 
 static void mark_dirty(uint32_t y_pixel) {
@@ -278,6 +285,11 @@ void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
             if (*format == 'l') {
                 is_long = 1;
                 format++;
+            }
+
+            if (*format == '\0') {   // format ends in '%': don't run past the terminator
+                terminal_putchar('%');
+                break;
             }
 
             switch (*format) {

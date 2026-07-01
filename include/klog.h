@@ -7,7 +7,7 @@
 #include <types.h>
 
 typedef struct {
-    char status_msg[5];
+    char status_msg[6];   // longest tag "DEBUG" + NUL
     int severity;
     int color;
 } kernel_logs_t;

@@ -111,7 +111,20 @@ void keyboard_init() {
 }
 
 void read_key() {
+    static bool extended = false;   // saw an 0xE0 prefix byte
     int scancode = inb(DATA_PORT);
+
+    // Extended keys (arrows, right-ctrl, keypad-/, ...) arrive as 0xE0 + code,
+    // some with fake-shift bytes (0xE0 0x2A / 0xE0 0xAA) that must not touch
+    // shiftDown. We don't use any of them, so swallow the byte after 0xE0.
+    if (scancode == 0xE0) {
+        extended = true;
+        return;
+    }
+    if (extended) {
+        extended = false;
+        return;
+    }
 
     // Checks for shift
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift pressed

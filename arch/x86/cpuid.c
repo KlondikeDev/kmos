@@ -64,6 +64,7 @@ void cpuid_brand(char* brand) {
     uint32_t eax, ebx, ecx, edx;
 
     if (max_extended_leaf < PROCESSOR_BRAND_3) {
+        brand[0] = '\0';   // leave a valid (empty) string for the caller
         return;
     }
 
@@ -88,7 +89,7 @@ void cpuid_brand(char* brand) {
     memcpy(brand + 40, &ecx, 4);
     memcpy(brand + 44, &edx, 4);
 
-    brand[47] = '\0';
+    brand[48] = '\0';   // brand string is 48 chars; terminator goes after it
 
 }
 

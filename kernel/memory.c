@@ -76,6 +76,9 @@ void pmm_init(void) {
     for(uint64_t k = bstart; k < bstart + bcount; k++) {
         bitmap[k / 8] |= (1 << (k % 8));
     }
+    // Keep page 0 reserved so pmm_alloc can never return an address
+    // equal to NULL, which callers treat as allocation failure.
+    bitmap[0] |= 1;
 }
 
 static uint64_t last_free_hint = 0;
@@ -110,6 +113,7 @@ void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t* pml4 = (uint64_t* )(cr3 + hhdm_offset);
     if (!(pml4[pml4_idx] & 1)) {
         void *page = pmm_alloc();
+        if (!page) __asm__ volatile("int $0x82");
         memset((void *)((uint64_t)page + hhdm_offset), 0, PAGE_SIZE);
         pml4[pml4_idx] = (uint64_t)page | 3;
     }
@@ -117,6 +121,7 @@ void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *pdpt = (uint64_t *)((pml4[pml4_idx] & ~0xFFF) + hhdm_offset);
     if (!(pdpt[pdpt_idx] & 1)) {
         void *pd = pmm_alloc();
+        if (!pd) __asm__ volatile("int $0x82");
         memset((void *)((uint64_t)pd + hhdm_offset), 0, PAGE_SIZE);
         pdpt[pdpt_idx] = (uint64_t)pd | 3;
     }
@@ -124,6 +129,7 @@ void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *pd = (uint64_t *)((pdpt[pdpt_idx] & ~0xFFF) + hhdm_offset);
     if (!(pd[pd_idx] & 1)) {
         void *pt = pmm_alloc();
+        if (!pt) __asm__ volatile("int $0x82");
         memset((void *)((uint64_t)pt + hhdm_offset), 0, PAGE_SIZE);
         pd[pd_idx] = (uint64_t)pt | 3;
     }
@@ -174,6 +180,7 @@ static uint64_t heap_end;                // next unmapped virtual address
 void heap_init(void) {
     heap_base_addr = 0xFFFF900000000000;
     void* phys = pmm_alloc();
+    if (!phys) __asm__ volatile("int $0x82");
     vmm_map(heap_base_addr, (uint64_t)phys, 3);
 
     genesis_block_ptr = (struct block_header* )heap_base_addr;
@@ -191,7 +198,9 @@ static struct block_header* heap_grow(uint64_t need) {
     uint64_t pages = (need + sizeof(struct block_header) + PAGE_SIZE - 1) / PAGE_SIZE;
     struct block_header* blk = (struct block_header*)heap_end;
     for (uint64_t i = 0; i < pages; i++) {
-        vmm_map(heap_end, (uint64_t)pmm_alloc(), 3);
+        void* phys = pmm_alloc();
+        if (!phys) return NULL;   // kmalloc reports this as allocation failure
+        vmm_map(heap_end, (uint64_t)phys, 3);
         heap_end += PAGE_SIZE;
     }
     blk->size = pages * PAGE_SIZE - sizeof(struct block_header);
@@ -234,6 +243,7 @@ void* kmalloc(uint64_t size) {
 }
 
 void kfree(void* addr) {
+    if (addr == NULL) return;
     struct block_header *block = (struct block_header *)addr - 1;
     block->free = 1;
     while (block->next_block != NULL && block->next_block->free == 1) {
