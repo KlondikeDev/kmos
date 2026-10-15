@@ -62,7 +62,9 @@
 #define SYS_SIGPROCMASK 38   // (how, set) -> old mask
 #define SYS_UNAME       39   // (kutsname_t*)
 #define SYS_MEMINFO     40   // (kmeminfo_t*)
-#define SYS_COUNT       41
+#define SYS_TIME        41   // () -> seconds since 1970 (UTC)
+#define SYS_RENAME      42   // (oldpath, newpath)
+#define SYS_COUNT       43
 
 // ioctl requests on the terminal.
 #define TIOCGMODE 1          // -> TTY_MODE_* bits

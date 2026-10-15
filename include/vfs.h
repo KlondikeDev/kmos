@@ -55,6 +55,10 @@ typedef struct {
     i32 (*create)(const vnode_t* dir, const char* name, u32 type, vnode_t* out);
     i32 (*unlink)(const vnode_t* dir, const char* name);    // files and empty dirs
     i32 (*truncate)(vnode_t* node, u64 size);
+    // Move olddir/oldname to newdir/newname (same filesystem), replacing a
+    // file already at the destination.
+    i32 (*rename)(const vnode_t* olddir, const char* oldname,
+                  const vnode_t* newdir, const char* newname);
 } vfs_ops_t;
 
 typedef struct mount {
@@ -83,6 +87,7 @@ i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out);
 i32 vfs_create(const char* path, u32 type, vnode_t* out);
 i32 vfs_unlink(const char* path, bool want_dir);
 i32 vfs_truncate(vnode_t* node, u64 size);
+i32 vfs_rename(const char* oldpath, const char* newpath);
 
 // Change the current process's working directory.
 i32 vfs_chdir(const char* path);

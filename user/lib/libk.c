@@ -65,6 +65,7 @@ int pipe(int fds[2])                       { return (int)check(syscall3(SYS_PIPE
 int mkdir(const char* p, int mode)         { (void)mode; return (int)check(syscall3(SYS_MKDIR, (long)p, 0, 0)); }
 int unlink(const char* p)                  { return (int)check(syscall3(SYS_UNLINK, (long)p, 0, 0)); }
 int rmdir(const char* p)                   { return (int)check(syscall3(SYS_RMDIR, (long)p, 0, 0)); }
+int rename(const char* a, const char* b)   { return (int)check(syscall3(SYS_RENAME, (long)a, (long)b, 0)); }
 int ftruncate(int fd, off_t len)           { return (int)check(syscall3(SYS_FTRUNCATE, fd, len, 0)); }
 int chdir(const char* p)                   { return (int)check(syscall3(SYS_CHDIR, (long)p, 0, 0)); }
 int readdir_fd(int fd, struct kdirent* e)  { return (int)check(syscall3(SYS_READDIR, fd, (long)e, 0)); }
@@ -104,6 +105,39 @@ long getcpl(void)                      { return syscall3(SYS_GETCPL, 0, 0, 0); }
 int procinfo(unsigned long i, procinfo_t* p) { return (int)check(syscall3(SYS_PROCINFO, (long)i, (long)p, 0)); }
 int uname(struct utsname* u)           { return (int)check(syscall3(SYS_UNAME, (long)u, 0, 0)); }
 int meminfo(struct meminfo* m)         { return (int)check(syscall3(SYS_MEMINFO, (long)m, 0, 0)); }
+
+time_t time(time_t* out) {
+    time_t t = syscall3(SYS_TIME, 0, 0, 0);
+    if (out) *out = t;
+    return t;
+}
+
+// Civil-from-days (Howard Hinnant): no tables, no loops over years.
+struct tm* gmtime_r(const time_t* t, struct tm* out) {
+    long days = *t / 86400, secs = *t % 86400;
+    if (secs < 0) { secs += 86400; days--; }
+    out->tm_hour = (int)(secs / 3600);
+    out->tm_min = (int)(secs / 60 % 60);
+    out->tm_sec = (int)(secs % 60);
+    out->tm_wday = (int)((days % 7 + 11) % 7);       // 1970-01-01 was a Thursday
+    long z = days + 719468;
+    long era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned long doe = (unsigned long)(z - era * 146097);
+    unsigned long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    long y = (long)yoe + era * 400;
+    unsigned long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    unsigned long mp = (5 * doy + 2) / 153;
+    unsigned long d = doy - (153 * mp + 2) / 5 + 1;
+    unsigned long m = mp < 10 ? mp + 3 : mp - 9;
+    y += m <= 2;
+    out->tm_mday = (int)d;
+    out->tm_mon = (int)m - 1;
+    out->tm_year = (int)(y - 1900);
+    // Day of the year, counting from March-based doy back to January.
+    int leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    out->tm_yday = (int)(mp >= 10 ? doy - 306 : doy + 59 + leap);
+    return out;
+}
 
 int execve(const char* path, char* const argv[], char* const envp[]) {
     return (int)check(syscall3(SYS_EXECVE, (long)path, (long)argv, (long)envp));
@@ -228,6 +262,7 @@ const char* strerror(int e) {
         case EFAULT:       return "bad address";
         case EBUSY:        return "device or resource busy";
         case EEXIST:       return "file exists";
+        case EXDEV:        return "cross-device link";
         case ENODEV:       return "no such device";
         case ENOTDIR:      return "not a directory";
         case EISDIR:       return "is a directory";

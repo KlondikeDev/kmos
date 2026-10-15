@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <pit.h>
+#include <rtc.h>
 #include <memory.h>
 #include <memcpy.h>
 #include <memset.h>
@@ -428,6 +429,15 @@ static i64 sys_meminfo(u64 out) {
     return 0;
 }
 
+static i64 sys_rename(u64 oldpath, u64 newpath) {
+    char from[VFS_PATH_MAX], to[VFS_PATH_MAX];
+    i32 r = copy_path(from, oldpath);
+    if (r < 0) return r;
+    r = copy_path(to, newpath);
+    if (r < 0) return r;
+    return vfs_rename(from, to);
+}
+
 // ---- dispatch ----
 
 void syscall_dispatch(registers_t* regs) {
@@ -486,6 +496,8 @@ void syscall_dispatch(registers_t* regs) {
         case SYS_SIGPROCMASK: r = sys_sigprocmask(a, b); break;
         case SYS_UNAME:       r = sys_uname(a); break;
         case SYS_MEMINFO:     r = sys_meminfo(a); break;
+        case SYS_TIME:        r = (i64)rtc_now(); break;
+        case SYS_RENAME:      r = sys_rename(a, b); break;
         default:
             r = -ENOSYS;
             break;

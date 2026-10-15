@@ -249,6 +249,31 @@ i32 vfs_unlink(const char* path, bool want_dir) {
     return dir.mnt->ops->unlink(&dir, name);
 }
 
+i32 vfs_rename(const char* oldpath, const char* newpath) {
+    vnode_t olddir, newdir, node;
+    char oldname[VFS_NAME_MAX], newname[VFS_NAME_MAX];
+    i32 r = vfs_lookup_parent(oldpath, &olddir, oldname);
+    if (r < 0) return r;
+    r = vfs_lookup_parent(newpath, &newdir, newname);
+    if (r < 0) return r;
+    r = olddir.mnt->ops->lookup(&olddir, oldname, &node);
+    if (r < 0) return r;
+    node.mnt = olddir.mnt;
+    if (olddir.mnt != newdir.mnt) return -EXDEV;      // across filesystems: copy instead
+    if (vnode_is_open(&node)) return -EBUSY;          // its locator is about to change
+
+    vnode_t existing;
+    if (newdir.mnt->ops->lookup(&newdir, newname, &existing) == 0) {
+        existing.mnt = newdir.mnt;
+        if (existing.type == VN_DIR) return node.type == VN_DIR ? -ENOTEMPTY : -EISDIR;
+        if (node.type == VN_DIR) return -ENOTDIR;
+        if (existing.mnt->ops == node.mnt->ops && existing.id == node.id && existing.aux == node.aux) return 0;
+        if (vnode_is_open(&existing)) return -EBUSY;
+    }
+    if (!olddir.mnt->ops->rename) return -EROFS;
+    return olddir.mnt->ops->rename(&olddir, oldname, &newdir, newname);
+}
+
 i32 vfs_truncate(vnode_t* node, u64 size) {
     if (node->type == VN_DIR) return -EISDIR;
     if (node->type != VN_REG) return 0;                  // devices ignore it

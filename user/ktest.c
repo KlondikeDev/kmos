@@ -432,6 +432,37 @@ static void test_writes(void) {
     CHECK("rmdir refuses a non-empty directory", rmdir("/KTDIR") < 0 && errno == ENOTEMPTY);
     CHECK("unlink inside it", unlink("/KTDIR/INNER.TXT") == 0);
     CHECK("rmdir an empty directory", rmdir("/KTDIR") == 0 && stat("/KTDIR", &st) < 0);
+    // rename: within a directory, into another, over a file, and a
+    // directory move that must repoint its "..".
+    unlink("/RN1.TXT"); unlink("/RN2.TXT"); unlink("/RNDIR/RN3.TXT"); rmdir("/RNDIR/SUB"); rmdir("/RNDIR"); rmdir("/RNSUB");
+    fd = open("/RN1.TXT", O_WRONLY | O_CREAT);
+    write(fd, "renamed", 7);
+    close(fd);
+    CHECK("rename a file", rename("/RN1.TXT", "/RN2.TXT") == 0 && stat("/RN1.TXT", &st) < 0 &&
+                           stat("/RN2.TXT", &st) == 0 && st.st_size == 7);
+    mkdir("/RNDIR", 0755);
+    CHECK("rename into another directory", rename("/RN2.TXT", "/RNDIR/RN3.TXT") == 0 &&
+                                           stat("/RNDIR/RN3.TXT", &st) == 0 && st.st_size == 7);
+    fd = open("/RN1.TXT", O_WRONLY | O_CREAT);
+    write(fd, "xx", 2);
+    close(fd);
+    CHECK("rename replaces an existing file", rename("/RN1.TXT", "/RNDIR/RN3.TXT") == 0 &&
+                                              stat("/RNDIR/RN3.TXT", &st) == 0 && st.st_size == 2);
+    mkdir("/RNSUB", 0755);
+    CHECK("move a directory", rename("/RNSUB", "/RNDIR/SUB") == 0 && stat("/RNDIR/SUB", &st) == 0);
+    chdir("/RNDIR/SUB");
+    char where[64] = {0};
+    chdir("..");
+    getcwd(where, sizeof(where));
+    struct stat probe;
+    CHECK("its \"..\" now leads to the new parent", stat("RN3.TXT", &probe) == 0);
+    chdir("/");
+    CHECK("a directory cannot move into itself", rename("/RNDIR", "/RNDIR/SUB/X") < 0 && errno == EINVAL);
+    CHECK("rename across filesystems is EXDEV", rename("/RNDIR/RN3.TXT", "/dev/x") < 0 && errno == EXDEV);
+    unlink("/RNDIR/RN3.TXT"); rmdir("/RNDIR/SUB"); rmdir("/RNDIR");
+
+    CHECK("the clock is set (after 2025)", time(NULL) > 1735689600L);
+
     CHECK("names longer than 8.3 are refused", open("/a-very-long-name.text", O_WRONLY | O_CREAT) < 0);
     CHECK("UFS2 is read-only", open("/ufs/new.txt", O_WRONLY | O_CREAT) < 0 && errno == EROFS);
 }

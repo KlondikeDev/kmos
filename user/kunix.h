@@ -72,6 +72,8 @@ typedef int           pid_t;
 #define SYS_SIGPROCMASK 38
 #define SYS_UNAME       39
 #define SYS_MEMINFO     40
+#define SYS_TIME        41
+#define SYS_RENAME      42
 
 long syscall3(long n, long a, long b, long c);
 
@@ -93,6 +95,7 @@ extern int errno;
 #define EFAULT       14
 #define EBUSY        16
 #define EEXIST       17
+#define EXDEV        18
 #define ENODEV       19
 #define ENOTDIR      20
 #define EISDIR       21
@@ -166,6 +169,7 @@ int pipe(int fds[2]);
 int mkdir(const char* path, int mode);
 int unlink(const char* path);
 int rmdir(const char* path);
+int rename(const char* oldpath, const char* newpath);
 int ftruncate(int fd, off_t len);
 int chdir(const char* path);
 char* getcwd(char* buf, size_t len);
@@ -241,6 +245,15 @@ struct meminfo {
     unsigned long heap_free;
 };
 int meminfo(struct meminfo* m);
+
+typedef long time_t;
+time_t time(time_t* out);             // seconds since 1970, UTC
+struct tm {
+    int tm_sec, tm_min, tm_hour;      // 0-59, 0-59, 0-23
+    int tm_mday, tm_mon, tm_year;     // 1-31, 0-11, years since 1900
+    int tm_wday, tm_yday;             // 0-6 (Sunday = 0), 0-365
+};
+struct tm* gmtime_r(const time_t* t, struct tm* out);
 
 // ---- signals ----
 #define SIGHUP   1

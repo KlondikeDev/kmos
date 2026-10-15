@@ -39,6 +39,7 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/signal.c -o signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/syscall.c -o syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/tty.c -o tty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/rtc.c -o rtc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/devfs.c -o devfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-as arch/x86/usermode.s -o usermode_asm.o
     x86_64-elf-as arch/x86/switch.s -o switch.o
@@ -48,7 +49,7 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 

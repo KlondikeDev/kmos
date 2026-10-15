@@ -12,6 +12,7 @@
 #include <vfs.h>
 #include <errno.h>
 #include <memset.h>
+#include <rtc.h>
 
 _Static_assert(sizeof(bpb_t) == 512, "bpb_t must be exactly one sector");
 _Static_assert(sizeof(dirent_t) == 32, "dirent_t must be exactly 32 bytes");
@@ -453,6 +454,18 @@ static i64 fat_read(vnode_t* node, u64 off, void* buf, u64 len) {
 // cluster changes. Only 8.3 names can be created; there is no long-name
 // support yet.
 
+// The current time in FAT's packed format: years from 1980, 2-second steps.
+// Returned packed into one value (date << 16 | time), since dirent_t is a
+// packed struct and its fields cannot safely be written through pointers.
+static uint32_t fat_now(void) {
+    rtc_date_t d;
+    rtc_to_date(rtc_now(), &d);
+    uint32_t y = d.year < 1980 ? 0 : d.year - 1980;
+    uint32_t date = (y << 9) | (d.month << 5) | d.day;
+    uint32_t time = (d.hour << 11) | (d.min << 5) | (d.sec / 2);
+    return (date << 16) | time;
+}
+
 static uint32_t alloc_hint = 2;
 
 static bool fat_set(uint32_t cluster, uint32_t value) {
@@ -553,6 +566,9 @@ static i32 dirent_sync(const vnode_t* node) {
     e->cluster_hi = (uint16_t)(node->id >> 16);
     e->cluster_lo = (uint16_t)(node->id & 0xFFFF);
     if (node->type != VN_DIR) e->size = (uint32_t)node->size;
+    uint32_t now = fat_now();
+    e->write_date = e->access_date = (uint16_t)(now >> 16);
+    e->write_time = (uint16_t)now;
     return write_sectors(lba, buf) ? 0 : -EIO;
 }
 
@@ -622,8 +638,9 @@ static void make_entry(dirent_t* e, const uint8_t name[11], uint8_t attr, uint32
     e->attr = attr;
     e->cluster_hi = (uint16_t)(cluster >> 16);
     e->cluster_lo = (uint16_t)(cluster & 0xFFFF);
-    // 2026-10-15 00:00: FAT dates count years from 1980.
-    e->create_date = e->write_date = e->access_date = (uint16_t)(((2026 - 1980) << 9) | (10 << 5) | 15);
+    uint32_t now = fat_now();
+    e->create_date = e->write_date = e->access_date = (uint16_t)(now >> 16);
+    e->create_time = e->write_time = (uint16_t)now;
 }
 
 static i32 fat_create(const vnode_t* dir, const char* name, uint32_t type, vnode_t* out) {
@@ -813,8 +830,86 @@ static i32 fat_unlink(const vnode_t* dir, const char* name) {
     return 0;
 }
 
+// Is `cluster` the directory `dir` or one of its ancestors? Walks up the
+// ".." entries from dir to the root.
+static bool is_ancestor(uint32_t cluster, uint32_t dir) {
+    for (int depth = 0; depth < 256; depth++) {
+        if (dir == cluster) return true;
+        if (dir == root_cluster) return false;
+        // ".." is filtered out of normal lookups; it is always slot 1.
+        uint8_t buf[512];
+        if (!read_sectors(cluster_to_lba(dir), buf)) return false;
+        dirent_t* e = (dirent_t*)buf + 1;
+        if (e->name[0] != '.' || e->name[1] != '.') return false;
+        uint32_t up = ((uint32_t)e->cluster_hi << 16) | e->cluster_lo;
+        dir = up ? up : root_cluster;                         // 0 means the root
+    }
+    return true;                                              // absurdly deep: refuse
+}
+
+static i32 fat_rename(const vnode_t* olddir, const char* oldname,
+                      const vnode_t* newdir, const char* newname) {
+    uint8_t short_name[11];
+    i32 r = to_83(newname, short_name);
+    if (r < 0) return r;
+
+    uint32_t from = (uint32_t)olddir->id, to = (uint32_t)newdir->id;
+    find_ctx_t f = { .want = oldname };
+    r = dir_slots(from, find_slot, &f);
+    if (r < 0) return r;
+    if (!f.found) return -ENOENT;
+    bool is_dir = f.entry.attr & FAT_ATTR_DIRECTORY;
+    uint32_t moving = ((uint32_t)f.entry.cluster_hi << 16) | f.entry.cluster_lo;
+    if (is_dir && to != from && is_ancestor(moving, to)) return -EINVAL;  // into itself
+
+    // Replace an existing file at the destination (the VFS vetted it).
+    find_ctx_t g = { .want = newname };
+    if (dir_slots(to, find_slot, &g) == 1 && g.found) {
+        if (to == from && g.slot == f.slot) return 0;         // same entry
+        r = fat_unlink(newdir, newname);
+        if (r < 0) return r;
+    }
+
+    // New entry first, so a crash in between leaves two names, not none.
+    uint32_t slot;
+    r = free_slot(to, &slot);
+    if (r < 0) return r;
+    dirent_t e = f.entry;
+    for (int i = 0; i < 11; i++) e.name[i] = short_name[i];
+    r = write_slot(to, slot, &e);
+    if (r < 0) return r;
+
+    // The old slot may have moved if free_slot grew the same directory, but
+    // slots only ever get appended, so f.slot still names the old entry.
+    if (!mark_deleted(from, f.slot)) return -EIO;
+    for (uint32_t s = f.slot; s > 0; s--) {                  // and its long name
+        uint32_t lba, index;
+        uint8_t buf[512];
+        if (!slot_location(from, s - 1, &lba, &index) || !read_sectors(lba, buf)) break;
+        dirent_t* lfn = (dirent_t*)buf + index;
+        if (lfn->attr != FAT_ATTR_LONG_NAME || lfn->name[0] == FAT_DIRENT_DELETED) break;
+        lfn->name[0] = FAT_DIRENT_DELETED;
+        if (!write_sectors(lba, buf)) break;
+    }
+
+    // A directory that changed parents must have its ".." repointed.
+    if (is_dir && to != from && cluster_valid(moving)) {
+        uint32_t lba, index;
+        uint8_t buf[512];
+        if (slot_location(moving, 1, &lba, &index) && read_sectors(lba, buf)) {
+            dirent_t* dd = (dirent_t*)buf + index;
+            uint32_t parent = to == root_cluster ? 0 : to;
+            dd->cluster_hi = (uint16_t)(parent >> 16);
+            dd->cluster_lo = (uint16_t)(parent & 0xFFFF);
+            write_sectors(lba, buf);
+        }
+    }
+    return 0;
+}
+
 const vfs_ops_t fat32_vfs_ops = {
     .type = "fat32",
+    .rename = fat_rename,
     .root = fat_root,
     .lookup = fat_lookup,
     .read = fat_read,

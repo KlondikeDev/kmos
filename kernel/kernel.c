@@ -33,6 +33,7 @@
 #include <usermode.h>
 #include <file.h>
 #include <tty.h>
+#include <rtc.h>
 #include <devfs.h>
 
 // Limine nuke!
@@ -71,6 +72,7 @@ void kernel_main(void) {
     idt_init();
     pit_init();
     klog(LOG_OKAY, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
+    rtc_init();
     
     pci_list_devices();
     identify_drive(0xA0);
