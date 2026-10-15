@@ -22,9 +22,13 @@ void vmm_switch(uint64_t space);
 void vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap_in(uint64_t space, uint64_t virt);
 uint64_t vmm_get_pte(uint64_t space, uint64_t virt);  // 0 if not mapped
+bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out);  // fork
 void heap_init(void);
 void *kmalloc(uint64_t size);
 void kfree(void *addr);
+uint64_t pmm_total_pages(void);
+uint64_t pmm_count_free(void);
+void heap_stats(uint64_t* used, uint64_t* free_bytes);
 extern volatile struct limine_memmap_request memmap_request;
 
 // Niche. Well, anyway, this file needs cleaning. TODO.

@@ -38,36 +38,19 @@
 // Hard caps, so a hostile or broken program cannot eat all of memory.
 #define USER_MAX_PAGES    1024             // per process: 4 MiB
 #define USER_MAX_IMAGE    (1 * MB)         // largest executable we will read
-#define USER_MAX_ARGS     16
-#define USER_MAX_ARGBYTES 1024             // all argv strings together
-
-// Syscall numbers, passed in rax through int 0x80. Arguments go in rdi, rsi,
-// rdx; the result comes back in rax (negative means failure). Must match
-// user/kunix.h.
-#define SYS_EXIT     0
-#define SYS_WRITE    1
-#define SYS_GETCPL   2
-#define SYS_READ     3
-#define SYS_READFILE 4
-#define SYS_SPAWN    5    // (path, argv) -> pid
-#define SYS_WAIT     6    // (pid or -1, &status) -> pid
-#define SYS_GETPID   7
-#define SYS_SBRK     8    // (increment) -> old break
-#define SYS_YIELD    9
-#define SYS_SLEEP    10   // (milliseconds)
-#define SYS_READDIR  11   // (path, index, dirent*) -> 1 found, 0 end, -1 error
-#define SYS_CHDIR    12   // (path)
-#define SYS_GETCWD   13   // (buf, len)
-#define SYS_PROCINFO 14   // (index, proc_info_t*) -> 1 found, 0 end
+#define USER_MAX_ARGS     32               // each of argv and envp
+#define USER_MAX_ARGBYTES 4096             // all their strings together
 
 #define SYSCALL_VECTOR 0x80
 
-// What SYS_READDIR fills in. Must match user/kunix.h.
+// argv/envp gathered into kernel memory, ready to be laid out on a new stack.
 typedef struct {
-    char name[VFS_NAME_MAX];
-    u8   is_dir;
-    u32  size;
-} user_dirent_t;
+    u32 argc;
+    const char* argv[USER_MAX_ARGS];
+    u32 envc;
+    const char* envp[USER_MAX_ARGS];
+    char strings[USER_MAX_ARGBYTES];
+} user_args_t;
 
 extern char user_program_start[];
 extern char user_program_end[];
@@ -88,16 +71,24 @@ bool user_copy_to(process_t* p, u64 virt, const void* src, u64 len);
 // *current* address space -- and writable, if `write` is set.
 bool user_range_ok(u64 addr, u64 len, bool write);
 
+// Copy a NUL-terminated string out of the current address space, checking
+// every byte's page. False if it is unmapped or longer than max.
+bool copy_string_from_user(char* dst, u64 src, u64 max);
+
 // ---- starting programs ----
 
-// Load an ELF from disk into a new process. argv may be NULL. Returns the
-// new pid, or -1 if it could not be started.
-i32 usermode_spawn(const char* path, u32 argc, const char* const* argv, i32 ppid);
+// Load an ELF from disk into a new child of `parent` (NULL = the kernel
+// task). args may be NULL. Returns the new pid, or -errno.
+i32 usermode_spawn(const char* path, const user_args_t* args, process_t* parent);
+
+// execve: replace the current process's image. On success rewrites *regs
+// to enter the new program and returns 0; on failure nothing has changed.
+i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs);
 
 // Load a flat, position-independent blob (one page at most) as a process.
-i32 usermode_spawn_blob(const char* name, const char* start, const char* end, i32 ppid);
+i32 usermode_spawn_blob(const char* name, const char* start, const char* end);
 
-// For the kernel shell: start a process and idle until it is gone.
+// For the kernel shell: idle until the process is gone.
 void usermode_run_and_wait(i32 pid);
 
 // Hand-written payloads in arch/x86/usermode.s, run from the kernel shell.

@@ -6,16 +6,14 @@
 #include <types.h>
 #include <keyboard.h>
 #include <io.h>
-#include <proc.h>
+#include <tty.h>
 
 // I should start using defines more. I just avoid them for no reason. I actually quite like them.
 #define DATA_PORT 0x60
 
-char input_buffer[4096];
-volatile int index = 0;
 volatile bool shiftDown = false;
+volatile bool ctrlDown = false;
 volatile uint32_t prompt_x = 0;
-volatile bool command_ready = false;
 
 // I will admit, these arrays were copied from somewhere. I can't remember where.
 // I copied them from an OLD OS project that I did, and in the old project, I copied them from somewhere!
@@ -127,11 +125,15 @@ void read_key() {
         return;
     }
 
-    // Checks for shift
+    // Checks for shift and control
     if (scancode == 0x2A || scancode == 0x36) { // Left or Right Shift pressed
         shiftDown = true;
     } else if (scancode == 0xAA || scancode == 0xB6) { // Left or Right Shift released
         shiftDown = false;
+    } else if (scancode == 0x1D) {              // Left Ctrl pressed
+        ctrlDown = true;
+    } else if (scancode == 0x9D) {              // Left Ctrl released
+        ctrlDown = false;
     } else if (scancode < 0x80) {
         char key;
         if (shiftDown){
@@ -144,25 +146,13 @@ void read_key() {
             return;
         }
 
-        if (key == '\n') {
-            input_buffer[index] = '\0';
-            command_ready = true;
-            index = 0;
-            sched_wake_input();     // a process may be blocked in read()
-            return;
-        } else if (key == '\b') {
-            if (index > 0) {
-                index--;
-            }
-            terminal_putchar(key);
-            terminal_flush();
-            return;
-        } else if (index < 4095) {
-            input_buffer[index] = key;
-            index++;
+        // Ctrl+letter is the ASCII control code: Ctrl+C = 0x03, Ctrl+D = 0x04.
+        if (ctrlDown) {
+            if (key >= 'a' && key <= 'z') key = (char)(key - 'a' + 1);
+            else if (key >= 'A' && key <= 'Z') key = (char)(key - 'A' + 1);
         }
-    
-        terminal_putchar(key);
-        terminal_flush();
+
+        // Editing, echo and line handling all belong to the terminal now.
+        tty_input(key);
     }
 }

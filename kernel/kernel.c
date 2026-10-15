@@ -31,6 +31,9 @@
 #include <gdt.h>
 #include <proc.h>
 #include <usermode.h>
+#include <file.h>
+#include <tty.h>
+#include <devfs.h>
 
 // Limine nuke!
 static volatile LIMINE_BASE_REVISION(3);
@@ -77,6 +80,19 @@ void kernel_main(void) {
     if (identify_drive(0xB0) && ufs2_mount(1)) {
         vfs_mount("/ufs", &ufs2_vfs_ops);
     }
+    vfs_mount("/dev", &devfs_vfs_ops);
+    tty_init();
+
+    // Give the kernel task stdin/stdout/stderr on the terminal. Every
+    // process inherits descriptors from its parent, so this is where the
+    // whole system's 0, 1 and 2 come from.
+    file_t* console;
+    if (file_open("/dev/tty", O_RDWR, &console) == 0) {
+        process_t* k = proc_current();
+        fd_install(k, console, 0);
+        file_ref(console); fd_install(k, console, 1);
+        file_ref(console); fd_install(k, console, 2);
+    }
 
     terminal_printf(BLACK, BLACK, "\n");
     
@@ -95,17 +111,21 @@ void kernel_main(void) {
     // Interrupts stay off until the log line is out, so the shell's banner
     // cannot overtake it.
     u64 flags = irq_save();
-    i32 init_pid = usermode_spawn("/SH.ELF", 0, NULL, 0);
+    i32 init_pid = usermode_spawn("/BIN/SH.ELF", NULL, NULL);
     if (init_pid < 0) {
-        klog(LOG_WARN, "No /SH.ELF on disk, starting the kernel shell\n");
+        klog(LOG_WARN, "No /BIN/SH.ELF on disk, starting the kernel shell\n");
     } else {
-        klog(LOG_OKAY, "Started /SH.ELF as pid %u\n", (u32)init_pid);
+        // It leads its own process group; make that the terminal's
+        // foreground, so Ctrl+C reaches it and whatever it runs.
+        tty_set_foreground(init_pid);
+        klog(LOG_OKAY, "Started /BIN/SH.ELF as pid %u\n", (u32)init_pid);
     }
     irq_restore(flags);
 
     // From here on this is PID 0, the kernel task. It only runs when no
     // process is ready, so this loop doubles as the idle loop.
     bool kernel_shell = false;
+    static char line[TTY_LINE_MAX];
 	while(1) {
 		__asm__ volatile ("hlt");
 		sched_reap_orphans();
@@ -113,12 +133,12 @@ void kernel_main(void) {
 
 		if (!kernel_shell) {
 			kernel_shell = true;
-			command_ready = false;
+			tty_set_mode(TTY_MODE_CANON | TTY_MODE_ECHO | TTY_MODE_ISIG);
+			while (tty_kernel_getline(line, sizeof(line))) { }   // drop stale input
 			shell_init();
 		}
-		if (command_ready) {
-			command_ready = false;
-			shell_process_command(input_buffer);
+		if (tty_kernel_getline(line, sizeof(line))) {
+			shell_process_command(line);
 		}
 	}
 }

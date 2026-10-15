@@ -95,6 +95,18 @@ void* pmm_alloc(void) {
     return NULL;
 }
 
+uint64_t pmm_total_pages(void) {
+    return total_pages;
+}
+
+uint64_t pmm_count_free(void) {
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < total_pages; i++) {
+        if (!(bitmap[i / 8] & (1 << (i % 8)))) n++;
+    }
+    return n;
+}
+
 void pmm_free(uint64_t addr) {
     if (addr % PAGE_SIZE != 0) {
         __asm__ volatile("int $0x82");
@@ -203,6 +215,42 @@ void vmm_destroy_space(uint64_t space) {
         pmm_free(pml4[i] & 0x000FFFFFFFFFF000ULL);
     }
     pmm_free(space);
+}
+
+// Copy every user page of src into dst (fork). Eager: each frame is
+// duplicated now rather than shared copy-on-write. Returns false if memory
+// runs out; dst then holds a partial copy for the caller to destroy.
+bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out) {
+    uint64_t* pml4 = table_virt(src);
+    uint32_t pages = 0;
+    for (int i = 0; i < 256; i++) {
+        if (!(pml4[i] & 1)) continue;
+        uint64_t* pdpt = table_virt(pml4[i] & 0x000FFFFFFFFFF000ULL);
+        for (int j = 0; j < 512; j++) {
+            if (!(pdpt[j] & 1)) continue;
+            uint64_t* pd = table_virt(pdpt[j] & 0x000FFFFFFFFFF000ULL);
+            for (int k = 0; k < 512; k++) {
+                if (!(pd[k] & 1)) continue;
+                uint64_t* pt = table_virt(pd[k] & 0x000FFFFFFFFFF000ULL);
+                for (int l = 0; l < 512; l++) {
+                    uint64_t pte = pt[l];
+                    if (!(pte & 1)) continue;
+                    void* frame = pmm_alloc();
+                    if (!frame) return false;
+                    uint64_t from = pte & 0x000FFFFFFFFFF000ULL;
+                    uint64_t* a = table_virt(from);
+                    uint64_t* b = table_virt((uint64_t)frame);
+                    for (int w = 0; w < PAGE_SIZE / 8; w++) b[w] = a[w];
+                    uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                                    ((uint64_t)k << 21) | ((uint64_t)l << 12);
+                    vmm_map_in(dst, virt, (uint64_t)frame, pte & ~0x000FFFFFFFFFF000ULL);
+                    pages++;
+                }
+            }
+        }
+    }
+    *pages_out = pages;
+    return true;
 }
 
 void vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -324,6 +372,14 @@ void* kmalloc(uint64_t size) {
     struct block_header *grown = heap_grow(size);
     if (grown == NULL) return NULL;
     return heap_carve(grown, size);
+}
+
+void heap_stats(uint64_t* used, uint64_t* free_bytes) {
+    *used = *free_bytes = 0;
+    for (struct block_header* b = genesis_block_ptr; b; b = b->next_block) {
+        if (b->free) *free_bytes += b->size;
+        else *used += b->size;
+    }
 }
 
 void kfree(void* addr) {

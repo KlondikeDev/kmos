@@ -14,11 +14,15 @@
 #include <console.h>
 #include <keyboard.h>
 #include <klog.h>
+#include <serial.h>
 #include <panic.h>
 #include <idt.h>
 #include <io.h>
 #include <elf.h>
 #include <vfs.h>
+#include <file.h>
+#include <signal.h>
+#include <errno.h>
 #include <klibc/string.h>
 
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
@@ -106,113 +110,182 @@ bool user_range_ok(u64 addr, u64 len, bool write) {
     return true;
 }
 
+bool copy_string_from_user(char* dst, u64 src, u64 max) {
+    for (u64 i = 0; i < max; i++) {
+        if (!user_range_ok(src + i, 1, false)) return false;
+        dst[i] = *(const char*)(src + i);
+        if (dst[i] == '\0') return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
-// Starting processes
+// Loading images
 // ---------------------------------------------------------------------------
 
-// Map the stack and lay argv out at the top of it, System V style:
+// Map the stack and lay out argv and envp at the top of it, System V style:
 //
-//   USER_STACK_TOP -> | argv strings ...           |
-//                     | argv[argc] = NULL          |
-//                     | argv[argc-1] ... argv[0]   | <- argv, initial rsp
+//   USER_STACK_TOP -> | the strings ...                          |
+//                     | envp[0] ... envp[envc-1], NULL           | <- envp
+//                     | argv[0] ... argv[argc-1], NULL           | <- argv, rsp
 //
-// main(argc, argv) gets them in rdi/rsi straight from the forged frame.
-static bool setup_stack(process_t* p, u32 argc, const char* const* argv,
-                        u64* sp_out, u64* argv_out) {
+// main(argc, argv, envp) gets them in rdi/rsi/rdx from the entry frame.
+static bool setup_stack(process_t* p, const user_args_t* a, u64* sp_out,
+                        u64* argv_out, u64* envp_out) {
     for (u64 page = USER_STACK_BOTTOM; page < USER_STACK_TOP; page += USER_PAGE_SIZE) {
         if (!user_map(p, page, PF_R | PF_W)) return false;
     }
 
     u64 sp = USER_STACK_TOP;
-    u64 ptrs[USER_MAX_ARGS + 1];
-    for (int i = (int)argc - 1; i >= 0; i--) {
-        u64 len = strlen(argv[i]) + 1;
+    u64 ptrs[USER_MAX_ARGS + 1 + USER_MAX_ARGS + 1];
+    u32 n = 0;
+    for (u32 i = 0; i < a->argc; i++) {
+        u64 len = strlen(a->argv[i]) + 1;
         sp -= len;
-        if (!user_copy_to(p, sp, argv[i], len)) return false;
-        ptrs[i] = sp;
+        if (!user_copy_to(p, sp, a->argv[i], len)) return false;
+        ptrs[n++] = sp;
     }
-    ptrs[argc] = 0;
+    ptrs[n++] = 0;
+    for (u32 i = 0; i < a->envc; i++) {
+        u64 len = strlen(a->envp[i]) + 1;
+        sp -= len;
+        if (!user_copy_to(p, sp, a->envp[i], len)) return false;
+        ptrs[n++] = sp;
+    }
+    ptrs[n++] = 0;
 
-    sp -= (argc + 1) * sizeof(u64);
+    sp -= n * sizeof(u64);
     sp &= ~0xFULL;                   // the ABI wants rsp 16-aligned at entry
-    if (!user_copy_to(p, sp, ptrs, (argc + 1) * sizeof(u64))) return false;
+    if (!user_copy_to(p, sp, ptrs, n * sizeof(u64))) return false;
 
     *sp_out = sp;
     *argv_out = sp;
+    *envp_out = sp + (a->argc + 1) * sizeof(u64);
     return true;
 }
 
-i32 usermode_spawn(const char* path, u32 argc, const char* const* argv, i32 ppid) {
-    const char* default_argv[1] = { path };
-    if (argc == 0 || !argv) {
-        argc = 1;
-        argv = default_argv;
-    }
-    if (argc > USER_MAX_ARGS) return -1;
+// Read an executable and map it, plus a stack carrying args, into p's
+// address space (whatever p->space currently is).
+static i32 load_into(process_t* p, const char* path, const user_args_t* args,
+                     registers_t* frame) {
+    vnode_t node;
+    i32 r = vfs_lookup(path, &node);
+    if (r < 0) return r;
+    if (node.type != VN_REG) return -EACCES;
+    if (node.size > USER_MAX_IMAGE) return -E2BIG;
 
-    u8* image = kmalloc(USER_MAX_IMAGE);
-    if (!image) {
-        klog(LOG_ERROR, "usermode: out of memory reading '%s'\n", path);
-        return -1;
-    }
-    i32 size = vfs_read_file(path, image, USER_MAX_IMAGE);
+    u8* image = kmalloc(node.size ? node.size : 1);
+    if (!image) return -ENOMEM;
+    i64 size = vfs_read(&node, 0, image, node.size);
     if (size < 0) {
         kfree(image);
-        return -1;
-    }
-    if ((u64)size == USER_MAX_IMAGE) {
-        // vfs_read_file stops at the cap, so a full buffer means truncation.
-        kfree(image);
-        klog(LOG_ERROR, "usermode: '%s' is larger than %u bytes\n", path, USER_MAX_IMAGE);
-        return -1;
+        return (i32)size;
     }
 
-    // Name the process after the last path component.
-    const char* name = path;
-    for (const char* c = path; *c; c++) if (*c == '/') name = c + 1;
-
-    process_t* p = proc_alloc(name, ppid);
-    if (!p) {
-        kfree(image);
-        return -1;
-    }
-
-    u64 entry, image_end, sp, uargv;
+    u64 entry, image_end, sp, uargv, uenvp;
     bool ok = elf_load(p, image, (u64)size, &entry, &image_end);
     kfree(image);                    // segments are copied out; the file is done
-    if (!ok || !setup_stack(p, argc, argv, &sp, &uargv)) {
-        proc_free(p);
-        return -1;
-    }
+    if (!ok) return -ENOEXEC;
+    if (!setup_stack(p, args, &sp, &uargv, &uenvp)) return -ENOMEM;
 
     p->brk_base = p->brk = image_end;
-    klog(LOG_DEBUG, "usermode: pid %u '%s' entry 0x%lx, %u pages\n",
-         (u32)p->pid, p->name, entry, p->user_pages);
-    proc_start(p, entry, sp, argc, uargv);
+    memset(frame, 0, sizeof(*frame));
+    frame->rip = entry;
+    frame->rsp = sp;
+    frame->eflags = 0x202;
+    // execve hands this frame straight to iretq, so it must be complete.
+    frame->cs = GDT_USER_CS_RPL3;
+    frame->ss = GDT_USER_DS_RPL3;
+    frame->rdi = args->argc;
+    frame->rsi = uargv;
+    frame->rdx = uenvp;
+    return 0;
+}
+
+static void set_name(process_t* p, const char* path) {
+    const char* name = path;
+    for (const char* c = path; *c; c++) if (*c == '/') name = c + 1;
+    u32 i = 0;
+    for (; name[i] && i < PROC_NAME_LEN - 1; i++) p->name[i] = name[i];
+    p->name[i] = '\0';
+}
+
+i32 usermode_spawn(const char* path, const user_args_t* args, process_t* parent) {
+    user_args_t defaults = { .argc = 1, .argv = { path }, .envc = 0 };
+    if (!args || args->argc == 0) args = &defaults;
+
+    process_t* p = proc_alloc(path, parent);
+    if (!p) return -ENOMEM;
+    set_name(p, path);
+
+    registers_t frame;
+    i32 r = load_into(p, path, args, &frame);
+    if (r < 0) {
+        proc_free(p);
+        return r;
+    }
+    kserialoutf("usermode: pid %u '%s' entry 0x%lx, %u pages\n",
+         (u32)p->pid, p->name, frame.rip, p->user_pages);
+    proc_start_frame(p, &frame);
     return p->pid;
 }
 
-i32 usermode_spawn_blob(const char* name, const char* start, const char* end, i32 ppid) {
-    u64 len = (u64)(end - start);
-    if (len == 0 || len > USER_PAGE_SIZE) {
-        klog(LOG_ERROR, "usermode: '%s' is %lu bytes, does not fit in one page\n", name, len);
-        return -1;
+i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) {
+    process_t* p = proc_current();
+
+    // Build the new image in a fresh address space, so that if anything
+    // fails the caller is still intact and just gets an error back.
+    u64 old_space = p->space;
+    u32 old_pages = p->user_pages;
+    u64 old_brk_base = p->brk_base, old_brk = p->brk;
+    u64 new_space = vmm_create_space();
+    if (!new_space) return -ENOMEM;
+    p->space = new_space;
+    p->user_pages = 0;
+
+    registers_t frame;
+    i32 r = load_into(p, path, args, &frame);
+    if (r < 0) {
+        vmm_destroy_space(new_space);
+        p->space = old_space;
+        p->user_pages = old_pages;
+        p->brk_base = old_brk_base;
+        p->brk = old_brk;
+        return r;
     }
 
-    process_t* p = proc_alloc(name, ppid);
-    if (!p) return -1;
+    // Point of no return: the old image goes away.
+    vmm_switch(new_space);
+    vmm_destroy_space(old_space);
+    set_name(p, path);
+    fd_close_on_exec(p);
+    for (int s = 0; s < NSIG; s++) {
+        if (p->sig_handler[s] != SIG_IGN) p->sig_handler[s] = SIG_DFL;
+    }
+    p->sig_restorer = 0;
+    proc_fpu_reset();
+    *regs = frame;
+    return 0;
+}
 
-    u64 sp, uargv;
-    const char* argv[1] = { name };
+i32 usermode_spawn_blob(const char* name, const char* start, const char* end) {
+    u64 len = (u64)(end - start);
+    if (len == 0 || len > USER_PAGE_SIZE) return -E2BIG;
+
+    process_t* p = proc_alloc(name, NULL);
+    if (!p) return -ENOMEM;
+
+    u64 sp, uargv, uenvp;
+    user_args_t args = { .argc = 1, .argv = { name }, .envc = 0 };
     // Read-only and executable: no rewriting its own text.
     if (!user_map(p, USER_CODE_BASE, PF_R | PF_X) ||
         !user_copy_to(p, USER_CODE_BASE, start, len) ||
-        !setup_stack(p, 1, argv, &sp, &uargv)) {
+        !setup_stack(p, &args, &sp, &uargv, &uenvp)) {
         proc_free(p);
-        return -1;
+        return -ENOMEM;
     }
     p->brk_base = p->brk = USER_CODE_BASE + USER_PAGE_SIZE;
-    proc_start(p, USER_CODE_BASE, sp, 1, uargv);
+    proc_start(p, USER_CODE_BASE, sp, 1, uargv, uenvp);
     return p->pid;
 }
 
@@ -228,7 +301,7 @@ void usermode_run_and_wait(i32 pid) {
 
 static void run_blob(const char* name, const char* start, const char* end) {
     u64 flags = irq_save();
-    i32 pid = usermode_spawn_blob(name, start, end, 0);
+    i32 pid = usermode_spawn_blob(name, start, end);
     irq_restore(flags);
     usermode_run_and_wait(pid);
 }
@@ -246,202 +319,6 @@ void usermode_fault_demo(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Syscalls
-// ---------------------------------------------------------------------------
-
-// Ring 3 may hand us any pointer at all. Faulting on a bad one would be a
-// kernel-mode page fault, i.e. a panic, so every buffer is proved to be
-// mapped user-accessible -- with the right permissions -- before it is
-// touched. Syscalls run in the caller's address space, so once checked, a
-// user pointer can be used directly.
-
-// Copy a NUL-terminated string out of user memory, one byte at a time so
-// every page it crosses gets checked. Fails if it does not end within `max`.
-static bool copy_string_from_user(char* dst, u64 src, u64 max) {
-    for (u64 i = 0; i < max; i++) {
-        if (!user_range_ok(src + i, 1, false)) return false;
-        dst[i] = *(const char*)(src + i);
-        if (dst[i] == '\0') return true;
-    }
-    return false;
-}
-
-static i64 sys_write(u64 fd, u64 buf, u64 len) {
-    if (fd != 1 && fd != 2) return -1;                       // stdout/stderr
-    if (!user_range_ok(buf, len, false)) {
-        klog(LOG_WARN, "usermode: rejected write of %lu bytes from 0x%lx\n", len, buf);
-        return -1;
-    }
-    const char* p = (const char*)buf;
-    for (u64 i = 0; i < len; i++) {
-        terminal_putchar((unsigned char)p[i]);
-    }
-    terminal_flush();
-    return (i64)len;
-}
-
-// Reads one line from the keyboard, without the trailing newline. The
-// keyboard IRQ collects keys into input_buffer and raises command_ready on
-// Enter, waking whoever is blocked here.
-static i64 sys_read(u64 fd, u64 buf, u64 len) {
-    if (fd != 0) return -1;                                  // stdin only
-    if (!user_range_ok(buf, len, true)) {
-        klog(LOG_WARN, "usermode: rejected read of %lu bytes into 0x%lx\n", len, buf);
-        return -1;
-    }
-
-    if (!command_ready) {
-        if (index == 0) prompt_x = cursor_x;   // backspace may not eat the prompt
-        terminal_flush();
-        while (!command_ready) {
-            sched_block(WAIT_INPUT);
-        }
-    }
-    command_ready = false;
-    terminal_putchar('\n');          // the keyboard does not echo Enter
-    terminal_flush();
-
-    u64 n = strlen(input_buffer);
-    if (n > len) n = len;
-    memcpy((void*)buf, input_buffer, n);
-    return (i64)n;
-}
-
-static i64 sys_readfile(u64 path, u64 buf, u64 len) {
-    char kpath[256];
-    if (!copy_string_from_user(kpath, path, sizeof(kpath))) return -1;
-    if (len > 0xFFFFFFFFULL) len = 0xFFFFFFFFULL;            // the VFS takes a u32
-    if (!user_range_ok(buf, len, true)) {
-        klog(LOG_WARN, "usermode: rejected readfile of %lu bytes into 0x%lx\n", len, buf);
-        return -1;
-    }
-    return vfs_read_file(kpath, (void*)buf, (uint32_t)len);
-}
-
-static i64 sys_spawn(u64 path, u64 argv) {
-    char kpath[256];
-    if (!copy_string_from_user(kpath, path, sizeof(kpath))) return -1;
-
-    // Pull argv into the kernel: the pointers, then the strings they name.
-    char strings[USER_MAX_ARGBYTES];
-    const char* kargv[USER_MAX_ARGS];
-    u32 argc = 0;
-    u64 used = 0;
-    if (argv) {
-        for (;;) {
-            if (!user_range_ok(argv + argc * 8, 8, false)) return -1;
-            u64 s = *(const u64*)(argv + argc * 8);
-            if (!s) break;
-            if (argc == USER_MAX_ARGS) return -1;
-            if (!copy_string_from_user(strings + used, s, sizeof(strings) - used)) return -1;
-            kargv[argc++] = strings + used;
-            used += strlen(strings + used) + 1;
-        }
-    }
-    return usermode_spawn(kpath, argc, kargv, proc_current()->pid);
-}
-
-static i64 sys_wait(u64 pid, u64 status_ptr) {
-    if (status_ptr && !user_range_ok(status_ptr, sizeof(i64), true)) return -1;
-    i64 status = 0;
-    i32 r = proc_wait((i32)pid, &status);
-    if (r >= 0 && status_ptr) *(i64*)status_ptr = status;
-    return r;
-}
-
-static i64 sys_sbrk(i64 increment) {
-    process_t* p = proc_current();
-    u64 old = p->brk;
-    if (increment == 0) return (i64)old;
-    if (increment < 0) return -1;                            // no shrinking yet
-    u64 new_brk = old + (u64)increment;
-    if (new_brk < old || new_brk > USER_LOAD_LIMIT) return -1;
-
-    u64 first = (old + USER_PAGE_SIZE - 1) & PAGE_MASK;
-    for (u64 page = first; page < new_brk; page += USER_PAGE_SIZE) {
-        if (!user_map(p, page, PF_R | PF_W)) return -1;
-    }
-    p->brk = new_brk;
-    return (i64)old;
-}
-
-static i64 sys_sleep(u64 ms) {
-    if (ms == 0) return 0;
-    u64 n = (ms * 250 + 999) / 1000;                         // PIT runs at 250 Hz
-    if (n > 0xFFFFFFFFULL) n = 0xFFFFFFFFULL;
-    sched_sleep((u32)n);
-    return 0;
-}
-
-static i64 sys_readdir(u64 path, u64 index, u64 out) {
-    char kpath[256] = ".";
-    if (path && !copy_string_from_user(kpath, path, sizeof(kpath))) return -1;
-    if (kpath[0] == '\0') { kpath[0] = '.'; kpath[1] = '\0'; }
-    if (!user_range_ok(out, sizeof(user_dirent_t), true)) return -1;
-
-    user_dirent_t d;
-    memset(&d, 0, sizeof(d));
-    bool is_dir;
-    i32 r = vfs_readdir(kpath, (u32)index, d.name, &d.size, &is_dir);
-    if (r == 1) {
-        d.is_dir = is_dir;
-        memcpy((void*)out, &d, sizeof(d));
-    }
-    return r;
-}
-
-static i64 sys_chdir(u64 path) {
-    char kpath[256];
-    if (!copy_string_from_user(kpath, path, sizeof(kpath))) return -1;
-    return vfs_chdir(kpath) ? 0 : -1;
-}
-
-static i64 sys_getcwd(u64 buf, u64 len) {
-    const char* cwd = vfs_pwd();
-    u64 n = strlen(cwd) + 1;
-    if (n > len || !user_range_ok(buf, n, true)) return -1;
-    memcpy((void*)buf, cwd, n);
-    return (i64)(n - 1);
-}
-
-static i64 sys_procinfo(u64 index, u64 out) {
-    if (!user_range_ok(out, sizeof(proc_info_t), true)) return -1;
-    proc_info_t info;
-    if (!proc_info((u32)index, &info)) return 0;
-    memcpy((void*)out, &info, sizeof(info));
-    return 1;
-}
-
-void syscall_dispatch(registers_t* regs) {
-    u64 a = regs->rdi, b = regs->rsi, c = regs->rdx;
-    i64 r;
-
-    switch (regs->rax) {
-        case SYS_EXIT:     proc_exit((i64)a);                    // does not return
-        case SYS_WRITE:    r = sys_write(a, b, c); break;
-        case SYS_GETCPL:   r = (i64)(regs->cs & 3); break;       // CPL = low bits of CS
-        case SYS_READ:     r = sys_read(a, b, c); break;
-        case SYS_READFILE: r = sys_readfile(a, b, c); break;
-        case SYS_SPAWN:    r = sys_spawn(a, b); break;
-        case SYS_WAIT:     r = sys_wait(a, b); break;
-        case SYS_GETPID:   r = proc_current()->pid; break;
-        case SYS_SBRK:     r = sys_sbrk((i64)a); break;
-        case SYS_YIELD:    schedule(); r = 0; break;
-        case SYS_SLEEP:    r = sys_sleep(a); break;
-        case SYS_READDIR:  r = sys_readdir(a, b, c); break;
-        case SYS_CHDIR:    r = sys_chdir(a); break;
-        case SYS_GETCWD:   r = sys_getcwd(a, b); break;
-        case SYS_PROCINFO: r = sys_procinfo(a, b); break;
-        default:
-            klog(LOG_WARN, "usermode: pid %u called unknown syscall %lu\n",
-                 (u32)proc_current()->pid, regs->rax);
-            r = -1;
-            break;
-    }
-    regs->rax = (u64)r;
-}
-
-// ---------------------------------------------------------------------------
 // Faults
 // ---------------------------------------------------------------------------
 
@@ -449,12 +326,21 @@ void usermode_fault(const char* reason, registers_t* regs) {
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
     process_t* p = proc_current();
+    i32 sig = signal_for_fault(regs->int_no);
 
-    terminal_printf(RED, BLACK, "\n%s (pid %u): %s\n", p->name, (u32)p->pid, reason);
-    terminal_printf(SILVER, BLACK,
-        "  rip=0x%016lx rsp=0x%016lx err=0x%lx cr2=0x%016lx\n",
-        regs->rip, regs->rsp, regs->err_code, cr2);
+    // A fault cannot be ignored or blocked: retrying the instruction would
+    // just fault again forever. Like Linux, force the default in that case.
+    if (p->sig_handler[sig] == SIG_IGN || (p->sig_mask & (1u << sig))) {
+        p->sig_handler[sig] = SIG_DFL;
+        p->sig_mask &= ~(1u << sig);
+    }
 
-    // Like a Unix shell reports a signal: 128 + the vector that killed it.
-    proc_exit(128 + (i64)regs->int_no);                      // does not return
+    if (p->sig_handler[sig] == SIG_DFL) {
+        terminal_printf(RED, BLACK, "\n%s (pid %u): %s\n", p->name, (u32)p->pid, reason);
+        terminal_printf(SILVER, BLACK,
+            "  rip=0x%016lx rsp=0x%016lx err=0x%lx cr2=0x%016lx\n",
+            regs->rip, regs->rsp, regs->err_code, cr2);
+    }
+    signal_send(p, sig);
+    signal_deliver(regs);            // kills, or redirects into the handler
 }

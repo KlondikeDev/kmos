@@ -13,6 +13,8 @@
 #include <gdt.h>
 #include <usermode.h>
 #include <proc.h>
+#include <signal.h>
+#include <syscall.h>
 
 volatile u32 ticks = 0;
 
@@ -332,6 +334,9 @@ void irq_handler(registers_t* regs) {
         // the next tick while the kernel task idles.
         schedule();
     }
+
+    // Last stop before iretq to ring 3: act on any pending signals.
+    if ((regs->cs & 3) == 3) signal_deliver(regs);
 }
 
 static const char* exception_name(uint64_t vec) {
@@ -356,6 +361,7 @@ static const char* exception_name(uint64_t vec) {
 void isr_handler(registers_t* regs) {
     if (regs->int_no == SYSCALL_VECTOR) {
         syscall_dispatch(regs);
+        signal_deliver(regs);        // a syscall always returns to ring 3
         return;
     }
 
@@ -363,7 +369,7 @@ void isr_handler(registers_t* regs) {
     // Kill it and unwind to the kernel rather than taking the whole system
     // down over a misbehaving user program.
     if ((regs->cs & 3) == 3) {
-        usermode_fault(exception_name(regs->int_no), regs);  // does not return
+        usermode_fault(exception_name(regs->int_no), regs);  // kills or diverts to a handler
         return;
     }
 

@@ -21,11 +21,16 @@
 
 #include <types.h>
 #include <proc.h>
+#include <file.h>
+#include <signal.h>
+#include <errno.h>
 #include <idt.h>
 #include <gdt.h>
 #include <memory.h>
 #include <memset.h>
+#include <memcpy.h>
 #include <klog.h>
+#include <serial.h>
 #include <pit.h>
 #include <io.h>
 
@@ -34,14 +39,23 @@ static process_t* current;
 static i32 next_pid = 1;
 static u32 slice = 0;
 
+// FPU state of a freshly initialised CPU, copied into every new process.
+static u8 fpu_template[512] __attribute__((aligned(16)));
+
 void sched_init(void) {
     memset(procs, 0, sizeof(procs));
+
+    __asm__ volatile("fninit; fxsave %0" : "=m"(fpu_template));
+
     process_t* k = &procs[0];
     k->pid = 0;
     k->ppid = 0;
+    k->pgid = 0;
     k->state = PROC_RUNNING;
     k->space = vmm_kernel_space();
     k->kstack = NULL;                // keeps running on the boot stack
+    k->cwd[0] = '/';
+    memcpy(k->fpu, fpu_template, sizeof(fpu_template));
     const char* name = "kernel";
     for (int i = 0; name[i]; i++) k->name[i] = name[i];
     current = k;
@@ -53,6 +67,10 @@ process_t* proc_current(void) {
     return current;
 }
 
+process_t* proc_slot(u32 i) {
+    return &procs[i];
+}
+
 process_t* proc_by_pid(i32 pid) {
     for (int i = 0; i < MAX_PROCS; i++) {
         if (procs[i].state != PROC_UNUSED && procs[i].pid == pid) return &procs[i];
@@ -60,7 +78,9 @@ process_t* proc_by_pid(i32 pid) {
     return NULL;
 }
 
-process_t* proc_alloc(const char* name, i32 ppid) {
+process_t* proc_alloc(const char* name, process_t* parent) {
+    if (!parent) parent = &procs[0];
+
     process_t* p = NULL;
     for (int i = 1; i < MAX_PROCS; i++) {
         if (procs[i].state == PROC_UNUSED) { p = &procs[i]; break; }
@@ -84,28 +104,36 @@ process_t* proc_alloc(const char* name, i32 ppid) {
 
     memset(p, 0, sizeof(*p));
     p->pid = next_pid++;
-    p->ppid = ppid;
+    p->ppid = parent->pid;
+    // Children of the kernel task start their own process group; everyone
+    // else joins their parent's until they ask otherwise.
+    p->pgid = parent->pid == 0 ? p->pid : parent->pgid;
     p->state = PROC_EMBRYO;
     p->space = space;
     p->kstack = kstack;
     p->kstack_top = ((u64)kstack + KSTACK_SIZE) & ~0xFULL;
+    memcpy(p->fpu, fpu_template, sizeof(fpu_template));
+    memcpy(p->cwd, parent->cwd, sizeof(p->cwd));
+    fd_inherit(p, parent);
+    // Ignored signals stay ignored across spawn/exec; handlers do not, since
+    // the code they point at is not in the new image.
+    for (int s = 0; s < NSIG; s++) {
+        p->sig_handler[s] = parent->sig_handler[s] == SIG_IGN ? SIG_IGN : SIG_DFL;
+    }
+    p->sig_mask = parent->sig_mask;
     int i = 0;
     for (; name[i] && i < PROC_NAME_LEN - 1; i++) p->name[i] = name[i];
     p->name[i] = '\0';
     return p;
 }
 
-void proc_start(process_t* p, u64 entry, u64 user_sp, u64 argc, u64 argv) {
+void proc_start_frame(process_t* p, const registers_t* frame) {
     // The interrupt frame proc_trampoline will iretq through.
     registers_t* regs = (registers_t*)(p->kstack_top - sizeof(registers_t));
-    memset(regs, 0, sizeof(*regs));
-    regs->rip = entry;
+    *regs = *frame;
     regs->cs = GDT_USER_CS_RPL3;
-    regs->eflags = 0x202;            // reserved bit 1, IF set
-    regs->rsp = user_sp;
     regs->ss = GDT_USER_DS_RPL3;
-    regs->rdi = argc;                // main(argc, argv), via crt0
-    regs->rsi = argv;
+    regs->eflags = (regs->eflags & 0x0CD5) | 0x202;          // IF on, IOPL 0
 
     // Below it, what switch_context expects to pop: r15..rbp, then `ret`.
     u64* sp = (u64*)regs;
@@ -118,12 +146,49 @@ void proc_start(process_t* p, u64 entry, u64 user_sp, u64 argc, u64 argv) {
     irq_restore(flags);
 }
 
+void proc_start(process_t* p, u64 entry, u64 user_sp, u64 argc, u64 argv, u64 envp) {
+    registers_t frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.rip = entry;
+    frame.rsp = user_sp;
+    frame.eflags = 0x202;
+    frame.rdi = argc;                // main(argc, argv, envp), via crt0
+    frame.rsi = argv;
+    frame.rdx = envp;
+    proc_start_frame(p, &frame);
+}
+
 void proc_free(process_t* p) {
+    fd_close_all(p);
     if (p->space && p->space != vmm_kernel_space()) {
         vmm_destroy_space(p->space);
     }
     if (p->kstack) kfree(p->kstack);
     memset(p, 0, sizeof(*p));       // state = PROC_UNUSED
+}
+
+process_t* proc_fork(const registers_t* frame) {
+    process_t* parent = current;
+    process_t* child = proc_alloc(parent->name, parent);
+    if (!child) return NULL;
+
+    if (!vmm_clone_user(parent->space, child->space, &child->user_pages)) {
+        proc_free(child);
+        return NULL;
+    }
+    child->pgid = parent->pgid;
+    child->brk_base = parent->brk_base;
+    child->brk = parent->brk;
+    // A forked child runs the same code, so it keeps the handlers too.
+    for (int s = 0; s < NSIG; s++) child->sig_handler[s] = parent->sig_handler[s];
+    child->sig_restorer = parent->sig_restorer;
+    // The parent's FPU registers are live in the CPU, not in its save area.
+    __asm__ volatile("fxsave %0" : "=m"(child->fpu));
+
+    registers_t regs = *frame;
+    regs.rax = 0;                    // fork() returns 0 in the child
+    proc_start_frame(child, &regs);
+    return child;
 }
 
 void schedule(void) {
@@ -148,6 +213,11 @@ void schedule(void) {
     current = next;
     slice = 0;
 
+    // The kernel itself never touches x87/SSE registers, so the outgoing
+    // process's state can be saved and the incoming one's loaded right here.
+    __asm__ volatile("fxsave %0" : "=m"(prev->fpu));
+    __asm__ volatile("fxrstor %0" :: "m"(next->fpu));
+
     // Traps from ring 3 must land on the incoming process's kernel stack.
     if (next->kstack) tss_set_rsp0(next->kstack_top);
     vmm_switch(next->space);
@@ -156,15 +226,40 @@ void schedule(void) {
 }
 
 void sched_block(wait_reason_t why) {
+    // A signal that is already pending must not be slept through: the
+    // caller sees it and returns -EINTR instead.
+    if (signal_pending(current)) return;
     current->state = PROC_BLOCKED;
     current->wait = why;
     schedule();
     current->wait = WAIT_NONE;
+    current->wait_obj = NULL;
+}
+
+void sched_block_on(const void* obj) {
+    current->wait_obj = obj;
+    sched_block(WAIT_OBJECT);
+}
+
+void sched_wake_obj(const void* obj) {
+    for (int i = 1; i < MAX_PROCS; i++) {
+        if (procs[i].state == PROC_BLOCKED && procs[i].wait == WAIT_OBJECT &&
+            procs[i].wait_obj == obj) {
+            procs[i].state = PROC_READY;
+        }
+    }
+}
+
+void sched_interrupt(process_t* p) {
+    if (p->state == PROC_BLOCKED) p->state = PROC_READY;
 }
 
 void sched_sleep(u32 n) {
     current->wake_tick = ticks + n;
-    sched_block(WAIT_SLEEP);
+    while ((i32)(ticks - current->wake_tick) < 0) {
+        sched_block(WAIT_SLEEP);
+        if (signal_pending(current)) return;
+    }
 }
 
 void sched_tick(void) {
@@ -178,14 +273,6 @@ void sched_tick(void) {
     // The kernel task gives way immediately; everyone else gets a quantum.
     if (current->pid == 0 || ++slice >= SCHED_QUANTUM) {
         schedule();
-    }
-}
-
-void sched_wake_input(void) {
-    for (int i = 1; i < MAX_PROCS; i++) {
-        if (procs[i].state == PROC_BLOCKED && procs[i].wait == WAIT_INPUT) {
-            procs[i].state = PROC_READY;
-        }
     }
 }
 
@@ -206,7 +293,9 @@ void sched_reap_orphans(void) {
     irq_restore(flags);
 }
 
-void proc_exit(i64 status) {
+// Both ways out of a process end here. wstatus is already in the POSIX
+// wait() encoding: (code << 8) for exit(code), or the signal number.
+__attribute__((noreturn)) static void do_exit(i64 wstatus) {
     __asm__ volatile("cli");
     process_t* me = current;
     if (me->pid == 0) {
@@ -214,9 +303,18 @@ void proc_exit(i64 status) {
         for (;;) __asm__ volatile("hlt");
     }
 
-    klog(LOG_OKAY, "proc: %u (%s) exited with status %d\n",
-         (u32)me->pid, me->name, (i32)status);
-    me->exit_status = status;
+    // Serial only: the shell reports what matters to the user.
+    if (wstatus & 0x7F) {
+        kserialoutf("proc: %u (%s) killed by signal %u\n",
+             (u32)me->pid, me->name, (u32)(wstatus & 0x7F));
+    } else {
+        kserialoutf("proc: %u (%s) exited with status %u\n",
+             (u32)me->pid, me->name, (u32)((wstatus >> 8) & 0xFF));
+    }
+    me->exit_status = wstatus;
+
+    // Closing descriptors may wake pipe readers (EOF) and writers (EPIPE).
+    fd_close_all(me);
 
     // The address space can go now -- but not while it is loaded. The kernel
     // stack we are standing on has to wait for whoever reaps us.
@@ -232,24 +330,46 @@ void proc_exit(i64 status) {
     }
 
     process_t* parent = proc_by_pid(me->ppid);
-    if (parent && parent->state == PROC_BLOCKED && parent->wait == WAIT_CHILD &&
-        (parent->wait_pid == -1 || parent->wait_pid == me->pid)) {
-        parent->state = PROC_READY;
+    if (!parent || parent->state == PROC_ZOMBIE) {
+        me->ppid = 0;
+    } else if (parent->pid != 0) {
+        signal_send(parent, SIGCHLD);
+        if (parent->state == PROC_BLOCKED && parent->wait == WAIT_CHILD) {
+            parent->state = PROC_READY;
+        }
     }
-    if (!parent || parent->state == PROC_ZOMBIE) me->ppid = 0;
 
     me->state = PROC_ZOMBIE;
     schedule();                      // never comes back: nobody runs a zombie
     for (;;) __asm__ volatile("hlt");
 }
 
-i32 proc_wait(i32 pid, i64* status) {
+void proc_exit(i64 code) {
+    do_exit((code & 0xFF) << 8);
+}
+
+void proc_exit_signal(i32 sig) {
+    do_exit(sig & 0x7F);
+}
+
+void proc_fpu_reset(void) {
+    __asm__ volatile("fxrstor %0" :: "m"(fpu_template));
+}
+
+static bool wait_matches(const process_t* p, i32 pid) {
+    if (pid > 0) return p->pid == pid;
+    if (pid == -1) return true;
+    if (pid == 0) return p->pgid == current->pgid;
+    return p->pgid == -pid;
+}
+
+i32 proc_wait(i32 pid, i64* status, u32 options) {
     for (;;) {
         bool have_child = false;
         for (int i = 1; i < MAX_PROCS; i++) {
             process_t* p = &procs[i];
             if (p->state == PROC_UNUSED || p->ppid != current->pid) continue;
-            if (pid != -1 && p->pid != pid) continue;
+            if (!wait_matches(p, pid)) continue;
             have_child = true;
             if (p->state == PROC_ZOMBIE) {
                 i32 found = p->pid;
@@ -258,9 +378,11 @@ i32 proc_wait(i32 pid, i64* status) {
                 return found;
             }
         }
-        if (!have_child) return -1;
+        if (!have_child) return -ECHILD;
+        if (options & WNOHANG) return 0;
         current->wait_pid = pid;
         sched_block(WAIT_CHILD);
+        if (signal_pending(current)) return -EINTR;
     }
 }
 
@@ -271,6 +393,7 @@ bool proc_info(u32 index, proc_info_t* out) {
         if (seen++ == index) {
             out->pid = procs[i].pid;
             out->ppid = procs[i].ppid;
+            out->pgid = procs[i].pgid;
             out->state = (i32)procs[i].state;
             for (int j = 0; j < PROC_NAME_LEN; j++) out->name[j] = procs[i].name[j];
             return true;

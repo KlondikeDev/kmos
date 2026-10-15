@@ -17,6 +17,7 @@
 #include <klog.h>
 #include <memcpy.h>
 #include <memset.h>
+#include <errno.h>
 
 // Geometry, cached from the superblock at mount.
 static u8  ufs_drive;
@@ -173,27 +174,6 @@ static bool lookup_visit(const char* name, u32 namlen, u32 ino, void* ctx) {
     return true;
 }
 
-// Path (absolute and normalised, from the VFS) to inode number, or 0.
-static u32 lookup(const char* path, ufs2_dinode_t* out) {
-    u32 ino = UFS2_ROOT_INO;
-    if (!read_inode(ino, out)) return 0;
-
-    const char* p = path;
-    while (*p) {
-        while (*p == '/') p++;
-        if (!*p) break;
-        const char* start = p;
-        while (*p && *p != '/') p++;
-
-        if ((out->di_mode & UFS2_IFMT) != UFS2_IFDIR) return 0;
-        lookup_ctx_t l = { start, (u32)(p - start), 0 };
-        if (!dir_walk(out, lookup_visit, &l) || !l.found) return 0;
-        ino = l.found;
-        if (!read_inode(ino, out)) return 0;
-    }
-    return ino;
-}
-
 typedef struct {
     u32 index;
     u32 seen;
@@ -216,41 +196,63 @@ static bool readdir_visit(const char* name, u32 namlen, u32 ino, void* ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// VFS interface
+// VFS interface. A vnode's id is its inode number.
 // ---------------------------------------------------------------------------
 
-static i32 ufs2_read_file(const char* path, void* buf, u32 max) {
-    if (!mounted) return -1;
+static i32 node_from_inode(u32 ino, vnode_t* out) {
     ufs2_dinode_t ip;
-    if (!lookup(path, &ip)) return -1;
-    if ((ip.di_mode & UFS2_IFMT) != UFS2_IFREG) return -1;
-    u64 n = ip.di_size < max ? ip.di_size : max;
-    if (n > 0x7FFFFFFF) n = 0x7FFFFFFF;
-    if (!read_data(&ip, 0, buf, (u32)n)) return -1;
-    return (i32)n;
+    if (!read_inode(ino, &ip)) return -EIO;
+    u32 fmt = ip.di_mode & UFS2_IFMT;
+    out->id = ino;
+    out->aux = 0;
+    out->size = ip.di_size;
+    out->type = fmt == UFS2_IFDIR ? VN_DIR : fmt == UFS2_IFREG ? VN_REG : VN_CHR;
+    return 0;
 }
 
-static i32 ufs2_readdir(const char* path, u32 index, char* name_out, u32* size_out, bool* is_dir_out) {
-    if (!mounted) return -1;
-    ufs2_dinode_t dir;
-    if (!lookup(path, &dir)) return -1;
-    if ((dir.di_mode & UFS2_IFMT) != UFS2_IFDIR) return -1;
+static i32 ufs2_root(vnode_t* out) {
+    if (!mounted) return -ENODEV;
+    return node_from_inode(UFS2_ROOT_INO, out);
+}
 
+static i32 ufs2_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
+    ufs2_dinode_t ip;
+    if (!read_inode((u32)dir->id, &ip)) return -EIO;
+    lookup_ctx_t l = { name, 0, 0 };
+    while (name[l.want_len]) l.want_len++;
+    if (!dir_walk(&ip, lookup_visit, &l)) return -EIO;
+    if (!l.found) return -ENOENT;
+    return node_from_inode(l.found, out);
+}
+
+static i64 ufs2_read(vnode_t* node, u64 off, void* buf, u64 len) {
+    ufs2_dinode_t ip;
+    if (!read_inode((u32)node->id, &ip)) return -EIO;
+    if (off >= ip.di_size) return 0;
+    if (len > ip.di_size - off) len = ip.di_size - off;
+    if (len > 0x7FFFFFFF) len = 0x7FFFFFFF;
+    if (!read_data(&ip, off, buf, (u32)len)) return -EIO;
+    return (i64)len;
+}
+
+static i32 ufs2_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* out) {
+    ufs2_dinode_t ip;
+    if (!read_inode((u32)dir->id, &ip)) return -EIO;
     readdir_ctx_t r = { index, 0, name_out, 0 };
-    if (!dir_walk(&dir, readdir_visit, &r)) return -1;
+    if (!dir_walk(&ip, readdir_visit, &r)) return -EIO;
     if (!r.ino) return 0;
-
-    ufs2_dinode_t ent;
-    if (!read_inode(r.ino, &ent)) return -1;
-    *is_dir_out = (ent.di_mode & UFS2_IFMT) == UFS2_IFDIR;
-    *size_out = ent.di_size > 0xFFFFFFFFULL ? 0xFFFFFFFF : (u32)ent.di_size;
-    return 1;
+    i32 e = node_from_inode(r.ino, out);
+    return e < 0 ? e : 1;
 }
 
 const vfs_ops_t ufs2_vfs_ops = {
     .type = "ufs2",
-    .read_file = ufs2_read_file,
+    .root = ufs2_root,
+    .lookup = ufs2_lookup,
+    .read = ufs2_read,
     .readdir = ufs2_readdir,
+    // Read-only for now: write, create, unlink and truncate stay NULL, which
+    // the VFS reports as EROFS.
 };
 
 static u32 sb_u32(const u8* sb, u32 off) {

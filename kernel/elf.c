@@ -16,6 +16,7 @@
 #include <elf.h>
 #include <usermode.h>
 #include <klog.h>
+#include <serial.h>
 
 #define PAGE_MASK (~(USER_PAGE_SIZE - 1))
 
@@ -129,7 +130,8 @@ bool elf_load(process_t* p, const u8* image, u64 size, u64* entry_out, u64* imag
             (ph->p_flags & PF_X) ? 'x' : '-',
             '\0',
         };
-        klog(LOG_DEBUG, "elf: segment 0x%lx-0x%lx %s (%lu bytes from file)\n",
+        // Serial only: one line per segment per exec would bury the console.
+        kserialoutf("elf: segment 0x%lx-0x%lx %s (%lu bytes from file)\n",
              ph->p_vaddr, ph->p_vaddr + ph->p_memsz, perms, ph->p_filesz);
     }
 
