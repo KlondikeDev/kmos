@@ -5,15 +5,19 @@
 # See LICENSE for details
 
 # Process entry point for ring 3 Kunix programs. The kernel drops us here with
-# rsp at USER_STACK_TOP (16-byte aligned) and every register zeroed.
+# rsp 16-byte aligned, rdi = argc, rsi = argv, rdx = envp.
 
 .section .text
 .globl _start
 _start:
     xorl %ebp, %ebp         # terminate the frame-pointer chain for debuggers
-    call main               # the call leaves rsp 16n-8, as the ABI expects
+    call __libk_start       # (argc, argv, envp): sets environ, calls main, exits
+1:  jmp 1b
 
-    movq %rax, %rdi         # main's return value is the exit status
-    movq $0, %rax           # SYS_EXIT
+# Signal handlers return here (the kernel pushes this address before
+# entering a handler); it asks the kernel to restore the interrupted state.
+.globl __libk_sigrestorer
+__libk_sigrestorer:
+    movq $27, %rax          # SYS_SIGRETURN
     int $0x80
-1:  jmp 1b                  # exit never returns, but just in case
+2:  jmp 2b

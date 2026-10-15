@@ -4,62 +4,49 @@
 // Licensed under the Kunix License v1.0 or later
 // See LICENSE for details
 
-// wc FILE -- count lines and bytes, show the first and last line, and print
-// an FNV-1a checksum of the contents. Compare the checksum with the host's
-// copy to prove a large file read back byte-for-byte intact.
+// wc [-c] [FILE...] -- lines, words and bytes. With -c it also prints an
+// FNV-1a checksum, handy for proving a big file read back intact.
 
 #include "kunix.h"
 
-#define WC_MAX (3600 * 1024)         // a bit under the per-process page cap
+static int want_hash = 0;
+static unsigned long tl, tw, tb;
 
-static void put_line(const char* s, const char* end) {
-    const char* e = s;
-    while (e < end && *e != '\n') e++;
-    sys_write(KUNIX_STDOUT, s, (u64)(e - s));
-    kputs("\n");
+static int count(int fd, const char* name) {
+    char buf[4096];
+    unsigned long lines = 0, words = 0, bytes = 0;
+    unsigned long hash = 0xcbf29ce484222325UL;
+    int in_word = 0;
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)buf[i];
+            hash = (hash ^ c) * 0x100000001b3UL;
+            if (c == '\n') lines++;
+            if (isspace(c)) in_word = 0;
+            else if (!in_word) { in_word = 1; words++; }
+        }
+        bytes += (unsigned long)n;
+    }
+    if (n < 0) { dprintf(STDERR_FILENO, "wc: %s: %s\n", name, strerror(errno)); return 1; }
+    printf("%7lu %7lu %8lu", lines, words, bytes);
+    if (want_hash) printf(" fnv1a:%016lx", hash);
+    printf(" %s\n", name);
+    tl += lines; tw += words; tb += bytes;
+    return 0;
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        kputs("usage: wc FILE\n");
-        return 1;
+    int i = 1;
+    if (i < argc && strcmp(argv[i], "-c") == 0) { want_hash = 1; i++; }
+    if (i == argc) return count(STDIN_FILENO, "");
+    int rc = 0, files = argc - i;
+    for (; i < argc; i++) {
+        int fd = open(argv[i], O_RDONLY);
+        if (fd < 0) { dprintf(STDERR_FILENO, "wc: %s: %s\n", argv[i], strerror(errno)); rc = 1; continue; }
+        rc |= count(fd, argv[i]);
+        close(fd);
     }
-    char* buf = kalloc(WC_MAX);
-    if (!buf) {
-        kputs("wc: out of memory\n");
-        return 1;
-    }
-    long n = sys_readfile(argv[1], buf, WC_MAX);
-    if (n < 0) {
-        kputs("wc: ");
-        kputs(argv[1]);
-        kputs(": no such file\n");
-        return 1;
-    }
-
-    long lines = 0;
-    u64 hash = 0xcbf29ce484222325UL;                 // FNV-1a, 64-bit
-    for (long i = 0; i < n; i++) {
-        if (buf[i] == '\n') lines++;
-        hash = (hash ^ (unsigned char)buf[i]) * 0x100000001b3UL;
-    }
-    kputi(lines);
-    kputs(" lines, ");
-    kputi(n);
-    kputs(" bytes, fnv1a ");
-    char hex[17];
-    for (int i = 15; i >= 0; i--) { hex[i] = "0123456789abcdef"[hash & 15]; hash >>= 4; }
-    hex[16] = '\0';
-    kputs(hex);
-    kputs("\n");
-    if (n == 0) return 0;
-
-    kputs("first: ");
-    put_line(buf, buf + n);
-    long last = n - 1;
-    if (buf[last] == '\n') last--;
-    while (last > 0 && buf[last - 1] != '\n') last--;
-    kputs("last:  ");
-    put_line(buf + last, buf + n);
-    return 0;
+    if (files > 1) printf("%7lu %7lu %8lu total\n", tl, tw, tb);
+    return rc;
 }

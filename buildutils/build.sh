@@ -35,6 +35,11 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/usermode.c -o usermode.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/elf.c -o elf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/proc.c -o proc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/file.c -o file.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/signal.c -o signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/syscall.c -o syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/tty.c -o tty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/devfs.c -o devfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-as arch/x86/usermode.s -o usermode_asm.o
     x86_64-elf-as arch/x86/switch.s -o switch.o
     x86_64-elf-as arch/x86/interrupts.s -o interrupts.o
@@ -43,23 +48,28 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
-# Ring 3 programs: each user/<name>.c becomes a static ELF, copied onto the
-# FAT32 disk as <NAME>.ELF so the shell can "run" it. No SSE (the kernel does
-# not save FPU state across traps) and no stack protector (no libc to supply
-# __stack_chk_guard).
+# Ring 3 programs: each user/<name>.c becomes a static ELF linked against
+# libk (user/lib) and installed on the FAT32 disk as /BIN/<NAME>.ELF.
+# Userland may use SSE -- the kernel saves FPU state on every context switch.
+# No stack protector (libk has no __stack_chk_guard yet). libk itself is
+# built with -fno-builtin so gcc cannot turn memset's loop into a call to
+# memset.
 userland(){
     info "Building userland..."
     mkdir -p build/user
+    UFLAGS="-std=gnu99 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -Iuser"
     x86_64-elf-as user/crt0.s -o build/user/crt0.o
+    x86_64-elf-gcc -c user/lib/libk.c -o build/user/libk.o $UFLAGS -fno-builtin -fno-tree-loop-distribute-patterns
+    mmd -i disk.img ::/BIN 2>/dev/null || true
     for src in user/*.c; do
         name=$(basename "$src" .c)
-        x86_64-elf-gcc -c "$src" -o "build/user/$name.o" -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mno-sse -mno-sse2 -mno-mmx -fno-stack-protector -fno-pic
-        x86_64-elf-gcc -T user/user.ld -o "build/user/$name.elf" -ffreestanding -nostdlib -static -no-pie build/user/crt0.o "build/user/$name.o" -lgcc
-        mcopy -o -i disk.img "build/user/$name.elf" "::/$(echo "$name" | tr a-z A-Z).ELF"
+        x86_64-elf-gcc -c "$src" -o "build/user/$name.o" $UFLAGS
+        x86_64-elf-gcc -T user/user.ld -o "build/user/$name.elf" -ffreestanding -nostdlib -static -no-pie build/user/crt0.o "build/user/$name.o" build/user/libk.o -lgcc
+        mcopy -o -i disk.img "build/user/$name.elf" "::/BIN/$(echo "$name" | tr a-z A-Z).ELF"
     done
 }
 
@@ -78,7 +88,6 @@ setup(){
         -o build/binaries/kunix-kodiak.iso iso_root
     ./limine/limine bios-install build/binaries/kunix-kodiak.iso
 }
-
 cleaning(){
     info "Cleaning up..."
     mkdir -p build/objects build/binaries
@@ -86,7 +95,6 @@ cleaning(){
     mv kunix-kodiak.elf build/binaries/
     mv kunix-kodiak.bin build/binaries/
 }
-
 disk(){
     # Only create + format if the image is missing, so files written to
     # an existing disk survive rebuilds (never reformat a live disk).

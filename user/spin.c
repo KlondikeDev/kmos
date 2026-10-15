@@ -4,39 +4,19 @@
 // Licensed under the Kunix License v1.0 or later
 // See LICENSE for details
 
-// Burns CPU without ever making a syscall, then reports. Run two of these
-// in the background: if they finish together rather than one after the
-// other, the timer is preempting ring 3 -- nobody is yielding voluntarily.
-// Also exercises the heap: the work buffer comes from sbrk.
-//
-//   spin [ROUNDS]
+// spin [ROUNDS] -- burns CPU without ever blocking, then reports. Two of
+// these in the background finish together only if the timer preempts ring 3.
 
 #include "kunix.h"
 
 int main(int argc, char** argv) {
-    long rounds = 20;
-    if (argc > 1) {
-        rounds = 0;
-        for (const char* s = argv[1]; *s >= '0' && *s <= '9'; s++) rounds = rounds * 10 + (*s - '0');
-    }
-
-    volatile unsigned char* buf = kalloc(64 * 1024);
-    if (!buf) {
-        kputs("spin: sbrk failed\n");
-        return 1;
-    }
-
-    long pid = sys_getpid();
+    long rounds = argc > 1 ? atoi(argv[1]) : 20;
+    volatile unsigned char* buf = malloc(64 * 1024);
+    if (!buf) { puts("spin: out of memory"); return 1; }
     for (long r = 1; r <= rounds; r++) {
-        for (u64 i = 0; i < 64 * 1024; i++) buf[i] = (unsigned char)(buf[i] + i + r);
-        for (volatile u64 k = 0; k < 2000000; k++) { }
-        if (r % 5 == 0) {
-            kputs("[spin ");
-            kputi(pid);
-            kputs("] round ");
-            kputi(r);
-            kputs("\n");
-        }
+        for (unsigned long i = 0; i < 64 * 1024; i++) buf[i] = (unsigned char)(buf[i] + i + r);
+        for (volatile unsigned long k = 0; k < 2000000; k++) { }
+        if (r % 5 == 0) printf("[spin %d] round %ld\n", getpid(), r);
     }
     return 0;
 }

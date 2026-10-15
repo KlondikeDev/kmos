@@ -4,56 +4,33 @@
 // Licensed under the Kunix License v1.0 or later
 // See LICENSE for details
 
-// A ring 3 Kunix program written in C. Exercises every syscall the kernel
-// currently offers -- write, getcpl, read and readfile -- plus the parts of
-// the ELF loader a flat blob could never use: initialised globals (.data),
-// zeroed globals (.bss), and constants in their own read-only segment.
+// demo -- a tour: identity, environment, a line from the keyboard, a file.
 
 #include "kunix.h"
 
 static long counter = 41;            // .data: must arrive holding 41
-static char contents[2048];          // .bss: must arrive zeroed
+static char zeroed[2048];            // .bss: must arrive zeroed
 
-int main(void) {
-    kputs("\nKunix C program, loaded from disk as an ELF.\n");
-
-    long cpl = sys_getcpl();
-    if (cpl != 3) {
-        kputs("unexpected privilege level -- not ring 3?\n");
-        return 1;
-    }
-    kputs("confirmed running at CPL 3.\n");
+int main(int argc, char** argv) {
+    struct utsname u;
+    uname(&u);
+    printf("\n%s %s on %s, pid %d (parent %d), ring %ld\n",
+           u.sysname, u.release, u.machine, getpid(), getppid(), getcpl());
+    printf("argv:");
+    for (int i = 0; i < argc; i++) printf(" [%s]", argv[i]);
+    printf("\nPATH=%s\n", getenv("PATH") ? getenv("PATH") : "(unset)");
 
     counter++;
-    if (counter != 42 || contents[0] != 0 || contents[sizeof(contents) - 1] != 0) {
-        kputs(".data/.bss were not set up correctly\n");
+    if (counter != 42 || zeroed[0] || zeroed[sizeof(zeroed) - 1]) {
+        puts(".data/.bss were not set up correctly");
         return 2;
     }
-    kputs(".data and .bss look right.\n\n");
 
-    // Read a line from the keyboard into a stack buffer and echo it back.
+    printf("say something: ");
     char line[128];
-    kputs("say something: ");
-    long n = sys_read(KUNIX_STDIN, line, sizeof(line) - 1);
-    if (n < 0) {
-        kputs("read failed\n");
-        return 1;
-    }
+    ssize_t n = read(STDIN_FILENO, line, sizeof(line) - 1);
+    if (n < 0) { perror("read"); return 1; }
     line[n] = '\0';
-    kputs("you said: ");
-    kputs(line);
-    kputs("\n\n");
-
-    // Pull a file off the FAT32 disk, this time into a global buffer.
-    long len = sys_readfile("README.TXT", contents, sizeof(contents) - 1);
-    if (len < 0) {
-        kputs("README.TXT: not found\n");
-    } else {
-        contents[len] = '\0';
-        kputs("README.TXT contains:\n");
-        kputs(contents);
-        kputs("\n");
-    }
-
+    printf("you said: %s", line);
     return 0;
 }
