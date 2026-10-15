@@ -284,9 +284,16 @@ extern void irq15(void);
 void idt_init();
 
 // This is the values that are in the registers, after they get pushed to the stack. Fancy.
+// In long mode the CPU always pushes SS:RSP, even when the trap did not change
+// privilege level, so rsp and ss are here for every interrupt -- not just the
+// ones arriving from ring 3.
 typedef struct {
     uint64_t rax, rcx, rdx, rbx, rbp, rsi, rdi;
     uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
     uint64_t int_no, err_code;
-    uint64_t rip, cs, eflags;
+    uint64_t rip, cs, eflags, rsp, ss;
 } registers_t;
+
+void idt_set_gate(uint8_t num, uint64_t base);
+// Same, but reachable from ring 3: needed for the int 0x80 syscall gate.
+void idt_set_gate_dpl(uint8_t num, uint64_t base, uint8_t dpl);

@@ -10,6 +10,9 @@
 #include <pit.h>
 #include <panic.h>
 #include <keyboard.h>
+#include <gdt.h>
+#include <usermode.h>
+#include <proc.h>
 
 volatile u32 ticks = 0;
 
@@ -32,14 +35,21 @@ typedef struct PACKED {
 idt_entry_t idt[256];
 idt_ptr_t idtp;
 
-void idt_set_gate(uint8_t num, uint64_t base) {
+// dpl is the numerically highest ring allowed to reach this vector with an
+// int instruction. Everything except the syscall gate stays at 0, so ring 3
+// executing e.g. "int $0x81" earns a #GP instead of a free trip into a handler.
+void idt_set_gate_dpl(uint8_t num, uint64_t base, uint8_t dpl) {
     idt[num].base_low = base & 0xFFFF;
     idt[num].base_mid = (base >> 16) & 0xFFFF;
     idt[num].base_high = (base >> 32) & 0xFFFFFFFF;
-    idt[num].selector = 0x28;  // Kernel code segment
+    idt[num].selector = GDT_KERNEL_CS;  // Kernel code segment
     idt[num].ist = 0;
-    idt[num].flags = 0x8E;     // Present, Ring 0, 64-bit interrupt gate
+    idt[num].flags = 0x8E | ((dpl & 3) << 5);  // Present, 64-bit interrupt gate
     idt[num].reserved = 0;
+}
+
+void idt_set_gate(uint8_t num, uint64_t base) {
+    idt_set_gate_dpl(num, base, 0);
 }
 
 void idt_gate_setting(){
@@ -302,20 +312,61 @@ void idt_gate_setting(){
 }
 
 void irq_handler(registers_t* regs) {
-    // Send EOI to PIC
-    if (regs->int_no >= 40) {
-        outb(0xA0, 0x20);
-    }
-    if(regs->int_no == 32){
-        ticks++;
-    }
     if (regs->int_no == 33) {  // IRQ1 = keyboard
         read_key();
     }
+
+    // Send EOI to PIC. This must happen before scheduling: the switch may not
+    // come back here for a long time, and until the PIC sees an EOI it will
+    // not deliver another timer tick -- which would stop preemption dead.
+    if (regs->int_no >= 40) {
+        outb(0xA0, 0x20);
+    }
     outb(0x20, 0x20);
+
+    if(regs->int_no == 32){
+        ticks++;
+        sched_tick();
+    } else if (proc_current()->pid == 0) {
+        // The keyboard may have woken a reader; don't leave it waiting for
+        // the next tick while the kernel task idles.
+        schedule();
+    }
+}
+
+static const char* exception_name(uint64_t vec) {
+    switch(vec) {
+        case 0:  return "DIVIDE BY ZERO";
+        case 1:  return "DEBUG EXCEPTION";
+        case 3:  return "BREAKPOINT EXCEPTION";
+        case 4:  return "OVERFLOW EXCEPTION";
+        case 5:  return "BOUND RANGE EXCEEDED";
+        case 6:  return "INVALID OPCODE";
+        case 7:  return "DEVICE NOT AVAILABLE";
+        case 11: return "SEGMENT NOT PRESENT";
+        case 12: return "STACK FAULT";
+        case 13: return "GENERAL PROTECTION FAULT";
+        case 14: return "PAGE FAULT";
+        case 16: return "FLOATING POINT EXCEPTION";
+        case 17: return "ALIGNMENT CHECK";
+        default: return "UNKNOWN EXCEPTION";
+    }
 }
 
 void isr_handler(registers_t* regs) {
+    if (regs->int_no == SYSCALL_VECTOR) {
+        syscall_dispatch(regs);
+        return;
+    }
+
+    // Anything else arriving from ring 3 is the payload's fault, not ours.
+    // Kill it and unwind to the kernel rather than taking the whole system
+    // down over a misbehaving user program.
+    if ((regs->cs & 3) == 3) {
+        usermode_fault(exception_name(regs->int_no), regs);  // does not return
+        return;
+    }
+
     switch(regs->int_no) {
         case 0:
             panic("DIVIDE BY ZERO", regs);
@@ -414,6 +465,8 @@ void idt_init() {
 
     kserialout("About to set IDT gates...\n");
     idt_gate_setting();
+    // The one vector ring 3 is allowed to enter deliberately.
+    idt_set_gate_dpl(SYSCALL_VECTOR, (uint64_t)isr128, 3);
     kserialout("Gates set!\n");
 
     __asm__ volatile("lidt %0" : : "m"(idtp));
