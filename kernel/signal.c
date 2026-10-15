@@ -26,6 +26,7 @@
 #include <gdt.h>
 #include <memcpy.h>
 #include <klog.h>
+#include <errno.h>
 
 #define RED_ZONE 128
 
@@ -34,8 +35,25 @@ static bool default_is_ignore(i32 sig) {
     return sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT;
 }
 
+static bool default_is_stop(i32 sig) {
+    return sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU;
+}
+
 void signal_send(process_t* p, i32 sig) {
     if (sig <= 0 || sig >= NSIG || !p || p->state == PROC_ZOMBIE) return;
+
+    // Job control acts at send time, whatever the disposition: SIGCONT
+    // resumes a stopped process and cancels any stop still pending; a stop
+    // cancels a pending SIGCONT; SIGKILL must reach even a stopped process.
+    u32 stops = (1u << SIGSTOP) | (1u << SIGTSTP) | (1u << SIGTTIN) | (1u << SIGTTOU);
+    if (sig == SIGCONT) {
+        p->sig_pending &= ~stops;
+        proc_continue(p);
+    } else if (stops & (1u << sig)) {
+        p->sig_pending &= ~(1u << SIGCONT);
+    }
+    if (sig == SIGKILL) proc_continue(p);
+
     // An ignored signal is discarded at once (POSIX), so it can never
     // interrupt a blocking call.
     if (sig != SIGKILL && sig != SIGSTOP) {
@@ -69,8 +87,13 @@ bool signal_pending(const process_t* p) {
 }
 
 void signal_deliver(registers_t* regs) {
+    signal_deliver_from(regs, false);
+}
+
+void signal_deliver_from(registers_t* regs, bool from_syscall) {
     process_t* p = proc_current();
     if (p->pid == 0) return;
+    bool handler_ran = false;
 
     u32 ready;
     while ((ready = deliverable(p)) != 0) {
@@ -81,7 +104,10 @@ void signal_deliver(registers_t* regs) {
         if (handler == SIG_IGN) continue;
         if (handler == SIG_DFL) {
             if (default_is_ignore(sig)) continue;
-            // No stop/continue yet: SIGSTOP/SIGTSTP terminate for now.
+            if (default_is_stop(sig)) {
+                proc_stop_self(sig);         // returns once continued
+                continue;
+            }
             proc_exit_signal(sig);                           // does not return
         }
 
@@ -102,7 +128,17 @@ void signal_deliver(registers_t* regs) {
         regs->rsp = sp;
         regs->rip = handler;
         regs->rdi = (u64)sig;
-        return;                                              // one at a time
+        handler_ran = true;
+        break;                                               // one at a time
+    }
+
+    // A syscall that was only interrupted so the process could be stopped
+    // (or by an ignored signal) is restarted transparently, as with BSD's
+    // and Linux's SA_RESTART: back rip up over the 2-byte `int $0x80` and
+    // put the syscall number back in rax. A handler that ran sees EINTR.
+    if (from_syscall && !handler_ran && p->syscall_nr >= 0 && (i64)regs->rax == -EINTR) {
+        regs->rip -= 2;
+        regs->rax = (u64)p->syscall_nr;
     }
 }
 

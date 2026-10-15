@@ -16,6 +16,10 @@
 // shared -- by reference count -- between every descriptor that refers to it
 // (after dup, dup2, fork or spawn). So two processes that inherited the same
 // descriptor also share its offset, exactly as on Unix.
+//
+// Separate open()s of the same file get separate file_ts but one shared
+// vnode (the in-memory "inode"), so a size change made through one -- or a
+// first cluster allocated through one -- is seen by all of them.
 
 // open() flags. The values are Linux's, so a Linux personality can pass
 // them straight through.
@@ -51,7 +55,7 @@ struct file {
     u32 refs;
     u32 flags;                         // O_* given to open (access mode etc.)
     u64 pos;
-    vnode_t node;
+    vnode_t* node;                     // shared by every open of the same object
     char* path;                        // directories only: for readdir
     void* priv;                        // pipe state, ...
 };
@@ -59,6 +63,8 @@ struct file {
 // Open a path. Returns 0 and the new file, or -errno.
 i32 file_open(const char* path, u32 flags, file_t** out);
 void file_ref(file_t* f);
+// Is some open file using this node? (Unlinking one is refused for now.)
+bool vnode_is_open(const vnode_t* n);
 void file_unref(file_t* f);
 
 // Make a pipe: a read end and a write end.

@@ -27,13 +27,16 @@
 //          ...           heap, grown upwards by sbrk
 //   USER_LOAD_LIMIT      nothing (image or heap) may reach past here
 //          ...           unmapped guard page
-//   USER_STACK_BOTTOM    stack, USER_STACK_PAGES pages, grows down
+//   USER_STACK_LIMIT     the stack may grow down to here (8 MiB reserved)
+//          ...           mapped on demand, as the stack touches it
+//   USER_STACK_BOTTOM    the first USER_STACK_PAGES are mapped up front
 //   USER_STACK_TOP       argv strings and pointers, then the initial rsp
 #define USER_CODE_BASE    0x0000000000400000ULL
 #define USER_STACK_TOP    0x0000007FFFFFF000ULL
 #define USER_STACK_PAGES  4
 #define USER_STACK_BOTTOM (USER_STACK_TOP - USER_STACK_PAGES * USER_PAGE_SIZE)
-#define USER_LOAD_LIMIT   (USER_STACK_BOTTOM - USER_PAGE_SIZE)
+#define USER_STACK_LIMIT  (USER_STACK_TOP - 8 * MB)
+#define USER_LOAD_LIMIT   (USER_STACK_LIMIT - USER_PAGE_SIZE)
 
 // Hard caps, so a hostile or broken program cannot eat all of memory.
 #define USER_MAX_PAGES    1024             // per process: 4 MiB
@@ -70,6 +73,9 @@ bool user_copy_to(process_t* p, u64 virt, const void* src, u64 len);
 // True when every byte of [addr, addr+len) is mapped user-accessible in the
 // *current* address space -- and writable, if `write` is set.
 bool user_range_ok(u64 addr, u64 len, bool write);
+
+// Back the stack page holding addr, if addr is in the growable stack region.
+bool user_grow_stack(u64 addr);
 
 // Copy a NUL-terminated string out of the current address space, checking
 // every byte's page. False if it is unmapped or longer than max.

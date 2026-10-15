@@ -15,24 +15,79 @@
 #include <klibc/string.h>
 
 // ---------------------------------------------------------------------------
+// Open vnodes
+//
+// vfs_lookup returns a fresh copy of a node each time. Every open file
+// needs to see the same one, so open nodes are interned here, keyed by
+// mount and the driver's locator: aux when it has one (FAT32's directory
+// entry position, which never changes even when the first cluster does),
+// otherwise id (UFS2's inode number, devfs's device number).
+// ---------------------------------------------------------------------------
+
+typedef struct open_vnode {
+    vnode_t node;                      // first member: a vnode_t* is an open_vnode*
+    u32 refs;
+    struct open_vnode* next;
+} open_vnode_t;
+
+static open_vnode_t* open_vnodes;
+
+static u64 vnode_key(const vnode_t* n) {
+    return n->aux ? n->aux : n->id;
+}
+
+static vnode_t* vnode_intern(const vnode_t* n) {
+    for (open_vnode_t* o = open_vnodes; o; o = o->next) {
+        if (o->node.mnt == n->mnt && vnode_key(&o->node) == vnode_key(n)) {
+            o->refs++;
+            return &o->node;
+        }
+    }
+    open_vnode_t* o = kmalloc(sizeof(open_vnode_t));
+    if (!o) return NULL;
+    o->node = *n;
+    o->refs = 1;
+    o->next = open_vnodes;
+    open_vnodes = o;
+    return &o->node;
+}
+
+bool vnode_is_open(const vnode_t* n) {
+    for (open_vnode_t* o = open_vnodes; o; o = o->next) {
+        if (o->node.mnt == n->mnt && vnode_key(&o->node) == vnode_key(n)) return true;
+    }
+    return false;
+}
+
+static void vnode_release(vnode_t* n) {
+    open_vnode_t* o = (open_vnode_t*)n;
+    if (--o->refs) return;
+    for (open_vnode_t** pp = &open_vnodes; *pp; pp = &(*pp)->next) {
+        if (*pp == o) { *pp = o->next; break; }
+    }
+    kfree(o);
+}
+
+// ---------------------------------------------------------------------------
 // Files backed by the VFS
 // ---------------------------------------------------------------------------
 
 static i64 vnode_file_read(file_t* f, void* buf, u64 len) {
-    i64 n = vfs_read(&f->node, f->pos, buf, len);
-    if (n > 0 && f->node.type == VN_REG) f->pos += (u64)n;
+    i64 n = vfs_read(f->node, f->pos, buf, len);
+    if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
     return n;
 }
 
 static i64 vnode_file_write(file_t* f, const void* buf, u64 len) {
-    if (f->node.type == VN_REG && (f->flags & O_APPEND)) f->pos = f->node.size;
-    i64 n = vfs_write(&f->node, f->pos, buf, len);
-    if (n > 0 && f->node.type == VN_REG) f->pos += (u64)n;
+    if (f->node->type == VN_REG && (f->flags & O_APPEND)) f->pos = f->node->size;
+    i64 n = vfs_write(f->node, f->pos, buf, len);
+    if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
     return n;
 }
 
 static void vnode_file_release(file_t* f) {
     if (f->path) kfree(f->path);
+    if (f->node) vnode_release(f->node);
 }
 
 static const file_ops_t vnode_file_ops = {
@@ -69,18 +124,21 @@ i32 file_open(const char* path, u32 flags, file_t** out) {
     } else if (flags & O_DIRECTORY) {
         return -ENOTDIR;
     }
-    if ((flags & O_TRUNC) && acc != O_RDONLY && node.type == VN_REG) {
-        r = vfs_truncate(&node, 0);
-        if (r < 0) return r;
-    }
 
     file_t* f = file_alloc(&vnode_file_ops, flags);
     if (!f) return -ENOMEM;
-    f->node = node;
+    f->node = vnode_intern(&node);
+    if (!f->node) { kfree(f); return -ENOMEM; }
+
+    // Truncate the shared node, so every open of this file sees it.
+    if ((flags & O_TRUNC) && acc != O_RDONLY && node.type == VN_REG) {
+        r = vfs_truncate(f->node, 0);
+        if (r < 0) { file_unref(f); return r; }
+    }
     if (node.type == VN_DIR) {
         // Directory listings include mount points, which needs the path.
         f->path = kmalloc(VFS_PATH_MAX);
-        if (!f->path) { kfree(f); return -ENOMEM; }
+        if (!f->path) { file_unref(f); return -ENOMEM; }
         vfs_normalize(path, f->path);
     }
     *out = f;
@@ -117,6 +175,7 @@ i64 file_write(file_t* f, const void* buf, u64 len) {
 // and a writer still exists; writers block while it is full and a reader
 // still exists. Everyone blocks on the pipe's address.
 typedef struct {
+    vnode_t node;                      // what fstat/lseek see: a FIFO
     u8  buf[PIPE_BUF_SIZE];
     u32 head;                          // next byte to read
     u32 count;                         // bytes buffered
@@ -196,7 +255,8 @@ i32 pipe_create(file_t** read_end, file_t** write_end) {
         return -ENOMEM;
     }
     r->priv = w->priv = p;
-    r->node.type = w->node.type = VN_FIFO;
+    p->node.type = VN_FIFO;
+    r->node = w->node = &p->node;
     p->readers = p->writers = 1;
     *read_end = r;
     *write_end = w;

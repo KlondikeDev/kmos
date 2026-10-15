@@ -254,6 +254,32 @@ void sched_interrupt(process_t* p) {
     if (p->state == PROC_BLOCKED) p->state = PROC_READY;
 }
 
+// Tell a parent something happened to its child (exit or stop).
+static void notify_parent(process_t* child) {
+    process_t* parent = proc_by_pid(child->ppid);
+    if (!parent || parent->pid == 0 || parent->state == PROC_ZOMBIE) return;
+    signal_send(parent, SIGCHLD);
+    if (parent->state == PROC_BLOCKED && parent->wait == WAIT_CHILD) {
+        parent->state = PROC_READY;
+    }
+}
+
+void proc_stop_self(i32 sig) {
+    current->state = PROC_STOPPED;
+    current->stop_sig = sig;
+    current->stop_unreported = true;
+    kserialoutf("proc: %u (%s) stopped by signal %u\n", (u32)current->pid, current->name, (u32)sig);
+    notify_parent(current);
+    schedule();                      // parked until proc_continue
+}
+
+void proc_continue(process_t* p) {
+    if (p->state == PROC_STOPPED) {
+        p->state = PROC_READY;
+        p->stop_unreported = false;
+    }
+}
+
 void sched_sleep(u32 n) {
     current->wake_tick = ticks + n;
     while ((i32)(ticks - current->wake_tick) < 0) {
@@ -330,14 +356,8 @@ __attribute__((noreturn)) static void do_exit(i64 wstatus) {
     }
 
     process_t* parent = proc_by_pid(me->ppid);
-    if (!parent || parent->state == PROC_ZOMBIE) {
-        me->ppid = 0;
-    } else if (parent->pid != 0) {
-        signal_send(parent, SIGCHLD);
-        if (parent->state == PROC_BLOCKED && parent->wait == WAIT_CHILD) {
-            parent->state = PROC_READY;
-        }
-    }
+    if (!parent || parent->state == PROC_ZOMBIE) me->ppid = 0;
+    else notify_parent(me);
 
     me->state = PROC_ZOMBIE;
     schedule();                      // never comes back: nobody runs a zombie
@@ -376,6 +396,11 @@ i32 proc_wait(i32 pid, i64* status, u32 options) {
                 if (status) *status = p->exit_status;
                 proc_free(p);
                 return found;
+            }
+            if ((options & WUNTRACED) && p->state == PROC_STOPPED && p->stop_unreported) {
+                p->stop_unreported = false;
+                if (status) *status = ((i64)p->stop_sig << 8) | 0x7F;
+                return p->pid;
             }
         }
         if (!have_child) return -ECHILD;

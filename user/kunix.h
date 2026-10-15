@@ -182,11 +182,14 @@ int isatty(int fd);
 int ioctl(int fd, unsigned long req, unsigned long arg);
 
 // ---- processes ----
-#define WNOHANG 1
+#define WNOHANG   1
+#define WUNTRACED 2
 #define WIFEXITED(s)   (((s) & 0x7F) == 0)
 #define WEXITSTATUS(s) (((s) >> 8) & 0xFF)
-#define WIFSIGNALED(s) (((s) & 0x7F) != 0)
+#define WIFSIGNALED(s) (((s) & 0x7F) != 0 && ((s) & 0x7F) != 0x7F)
 #define WTERMSIG(s)    ((s) & 0x7F)
+#define WIFSTOPPED(s)  (((s) & 0xFF) == 0x7F)
+#define WSTOPSIG(s)    (((s) >> 8) & 0xFF)
 
 __attribute__((noreturn)) void _exit(int status);
 __attribute__((noreturn)) void exit(int status);
@@ -220,6 +223,7 @@ typedef struct {
 #define PROC_RUNNING 3
 #define PROC_BLOCKED 4
 #define PROC_ZOMBIE  5
+#define PROC_STOPPED 6
 int procinfo(unsigned long index, procinfo_t* info);   // 1, or 0 at the end
 
 struct utsname {
@@ -258,6 +262,8 @@ int meminfo(struct meminfo* m);
 #define SIGCONT  18
 #define SIGSTOP  19
 #define SIGTSTP  20
+#define SIGTTIN  21
+#define SIGTTOU  22
 #define NSIG     32
 
 typedef void (*sighandler_t)(int);

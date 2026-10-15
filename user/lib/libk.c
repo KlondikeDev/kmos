@@ -199,6 +199,8 @@ const char* signame(int sig) {
         case SIGPIPE: return "broken pipe";
         case SIGALRM: return "alarm";
         case SIGTERM: return "terminated";
+        case SIGSTOP: return "stopped (signal)";
+        case SIGTSTP: return "suspended";
         default:      return "signal";
     }
 }

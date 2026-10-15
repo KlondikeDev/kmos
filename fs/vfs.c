@@ -7,6 +7,7 @@
 #include <types.h>
 #include <vfs.h>
 #include <proc.h>
+#include <file.h>
 #include <errno.h>
 #include <console.h>
 #include <klog.h>
@@ -239,6 +240,11 @@ i32 vfs_unlink(const char* path, bool want_dir) {
     if (r < 0) return r;
     if (want_dir && node.type != VN_DIR) return -ENOTDIR;
     if (!want_dir && node.type == VN_DIR) return -EISDIR;
+    node.mnt = dir.mnt;
+    // Unix would keep an open file's data alive until the last close; the
+    // drivers cannot do that yet, and freeing it under an open descriptor
+    // would let later writes land in someone else's blocks. So: refuse.
+    if (vnode_is_open(&node)) return -EBUSY;
     if (!dir.mnt->ops->unlink) return -EROFS;
     return dir.mnt->ops->unlink(&dir, name);
 }

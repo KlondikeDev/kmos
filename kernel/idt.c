@@ -361,7 +361,7 @@ static const char* exception_name(uint64_t vec) {
 void isr_handler(registers_t* regs) {
     if (regs->int_no == SYSCALL_VECTOR) {
         syscall_dispatch(regs);
-        signal_deliver(regs);        // a syscall always returns to ring 3
+        signal_deliver_from(regs, true);   // a syscall always returns to ring 3
         return;
     }
 

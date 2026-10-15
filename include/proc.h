@@ -26,6 +26,7 @@ typedef enum {
     PROC_RUNNING,
     PROC_BLOCKED,
     PROC_ZOMBIE,     // exited, waiting for its parent to collect the status
+    PROC_STOPPED,    // SIGSTOP/SIGTSTP; runs again on SIGCONT
 } proc_state_t;
 
 typedef enum {
@@ -51,6 +52,8 @@ typedef struct {
     const void* wait_obj;
     u32 wake_tick;
     i64 exit_status;  // POSIX wait() encoding, once a zombie
+    i32 stop_sig;     // signal that stopped it, while PROC_STOPPED
+    bool stop_unreported;  // waitpid(WUNTRACED) has not seen this stop yet
 
     u64 space;        // physical address of this process's PML4
     u32 user_pages;   // frames mapped into the lower half, capped
@@ -67,6 +70,7 @@ typedef struct {
     u32 fd_cloexec;   // bit n set: close fd n on execve
 
     u32 sig_pending;  // bit n set: signal n waiting for delivery
+    i64 syscall_nr;   // number of the syscall in progress, for restarts
     u32 sig_mask;     // bit n set: signal n blocked
     u64 sig_handler[NSIG];   // SIG_DFL, SIG_IGN, or a ring 3 address
     u64 sig_restorer;        // ring 3 trampoline that calls sigreturn
@@ -116,9 +120,11 @@ __attribute__((noreturn)) void proc_exit_signal(i32 sig);
 void proc_fpu_reset(void);
 
 // Wait for a child (pid, or any child if -1; -pgid for a group). Returns its
-// pid and stores its wait status ((code << 8) or signal number); 0 with
-// WNOHANG if none has exited yet; or -ECHILD / -EINTR.
-#define WNOHANG 1
+// pid and stores its wait status ((code << 8) or signal number, or
+// (sig << 8) | 0x7F for a stop under WUNTRACED); 0 with WNOHANG if none is
+// ready yet; or -ECHILD / -EINTR.
+#define WNOHANG   1
+#define WUNTRACED 2      // also report children that stopped
 i32 proc_wait(i32 pid, i64* status, u32 options);
 
 // Pick the next ready process and switch to it. Call with interrupts off.
@@ -130,6 +136,11 @@ void sched_sleep(u32 ticks);
 void sched_tick(void);             // from the timer IRQ
 // Make a blocked process runnable early (e.g. a signal arrived).
 void sched_interrupt(process_t* p);
+
+// Job control: stop the current process (notifying its parent), or let a
+// stopped one run again.
+void proc_stop_self(i32 sig);
+void proc_continue(process_t* p);
 
 bool sched_user_procs(void);       // any process besides the kernel task?
 void sched_reap_orphans(void);     // kernel task collects parentless zombies

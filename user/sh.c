@@ -48,8 +48,11 @@ typedef struct {
 
 typedef struct {
     pid_t pgid;
-    pid_t pids[MAX_CMDS];
-    int npids;
+    pid_t pids[MAX_CMDS];            // members not yet reaped
+    int npids;                       // 0 = free slot
+    pid_t last_pid;                  // the pipeline's last command: its status counts
+    int last_status;
+    int stopped;
     char text[64];
 } job_t;
 
@@ -223,14 +226,103 @@ static int builtin_export(command_t* c) {
 
 static int builtin_jobs(void) {
     for (int j = 0; j < MAX_JOBS; j++) {
-        if (jobs[j].npids) printf("[%d]  running    %s\n", j + 1, jobs[j].text);
+        if (jobs[j].npids) {
+            printf("[%d]  %-10s %s\n", j + 1, jobs[j].stopped ? "suspended" : "running", jobs[j].text);
+        }
     }
+    return 0;
+}
+
+// Wait for a foreground job: until every member has exited, or one stops.
+// Returns the status of the job's last command, or -1 if it was suspended.
+static int wait_foreground(job_t* job) {
+    tcsetpgrp(STDIN_FILENO, job->pgid);
+    int stopped = 0;
+    while (job->npids && !stopped) {
+        int st;
+        pid_t pid = waitpid(-job->pgid, &st, WUNTRACED);
+        if (pid < 0) {
+            if (errno == EINTR) continue;
+            break;                   // ECHILD: nothing left to wait for
+        }
+        if (WIFSTOPPED(st)) {
+            stopped = 1;
+            break;
+        }
+        for (int i = 0; i < job->npids; i++) {
+            if (job->pids[i] != pid) continue;
+            job->pids[i] = job->pids[--job->npids];
+            break;
+        }
+        if (pid == job->last_pid) job->last_status = st;
+        else if (WIFSIGNALED(st) && WTERMSIG(st) != SIGPIPE) report(pid, st, "killed");
+    }
+    tcsetpgrp(STDIN_FILENO, shell_pgid);
+    if (stopped) {
+        job->stopped = 1;
+        return -1;
+    }
+    report(job->last_pid, job->last_status, "killed");
+    return job->last_status;
+}
+
+static int status_code(int st) {
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return WEXITSTATUS(st);
+}
+
+// Park a suspended foreground job in the table so fg/bg can find it.
+static int remember_job(job_t* job) {
+    for (int j = 0; j < MAX_JOBS; j++) {
+        if (jobs[j].npids) continue;
+        jobs[j] = *job;
+        return j;
+    }
+    return -1;
+}
+
+// "%2" or "2" -> job index; no argument -> the most recent job.
+static int pick_job(command_t* c) {
+    if (c->argc > 1) {
+        const char* a = c->argv[1];
+        if (*a == '%') a++;
+        int j = atoi(a) - 1;
+        return (j >= 0 && j < MAX_JOBS && jobs[j].npids) ? j : -1;
+    }
+    for (int j = MAX_JOBS - 1; j >= 0; j--) if (jobs[j].npids) return j;
+    return -1;
+}
+
+static int builtin_fg(command_t* c) {
+    int j = pick_job(c);
+    if (j < 0) { dprintf(STDERR_FILENO, "fg: no such job\n"); return 1; }
+    job_t job = jobs[j];
+    jobs[j].npids = 0;               // it lives on the stack while in front
+    printf("[%d]  - continued  %s\n", j + 1, job.text);
+    job.stopped = 0;
+    kill(-job.pgid, SIGCONT);
+    int st = wait_foreground(&job);
+    if (st < 0) {
+        jobs[j] = job;               // suspended again: same slot
+        printf("\n[%d]  + suspended  %s\n", j + 1, job.text);
+        return 128 + SIGTSTP;
+    }
+    return status_code(st);
+}
+
+static int builtin_bg(command_t* c) {
+    int j = pick_job(c);
+    if (j < 0) { dprintf(STDERR_FILENO, "bg: no such job\n"); return 1; }
+    jobs[j].stopped = 0;
+    kill(-jobs[j].pgid, SIGCONT);
+    printf("[%d]  - continued  %s\n", j + 1, jobs[j].text);
     return 0;
 }
 
 static int builtin_help(void) {
     puts("ksh builtins: cd [dir], pwd, echo, export NAME=VALUE, unset NAME,");
-    puts("              jobs, wait, exit [n], help");
+    puts("              jobs, fg [%n], bg [%n], wait, exit [n], help");
+    puts("Keys: Ctrl+C interrupts, Ctrl+Z suspends, Ctrl+D at the prompt exits.");
     puts("Syntax: a | b, a > f, a >> f, a < f, a 2> f, a 2>&1, a; b, a && b,");
     puts("        a || b, a &, 'quotes', \"$VARS\", $? and $$.");
     puts("Programs are found in $PATH (currently: see `echo $PATH`).");
@@ -249,6 +341,8 @@ static int run_special_builtin(command_t* c) {
     }
     if (strcmp(n, "exit") == 0) exit(c->argc > 1 ? atoi(c->argv[1]) : last_status);
     if (strcmp(n, "jobs") == 0) return builtin_jobs();
+    if (strcmp(n, "fg") == 0) return builtin_fg(c);
+    if (strcmp(n, "bg") == 0) return builtin_bg(c);
     if (strcmp(n, "wait") == 0) {
         int status;
         pid_t pid;
@@ -322,6 +416,7 @@ static int apply_redirects(command_t* c) {
 __attribute__((noreturn))
 static void child_exec(command_t* c, pid_t pgid, int in_fd, int out_fd) {
     signal(SIGINT, SIG_DFL);
+    signal(SIGTSTP, SIG_DFL);        // the shell ignores it; its jobs must not
     setpgid(0, pgid);
     if (in_fd != STDIN_FILENO) { dup2(in_fd, STDIN_FILENO); close(in_fd); }
     if (out_fd != STDOUT_FILENO) { dup2(out_fd, STDOUT_FILENO); close(out_fd); }
@@ -343,7 +438,8 @@ static int run_pipeline(command_t* cmds, int ncmds, int background, const char* 
         const char* n = c->argv[0];
         int special = strcmp(n, "cd") == 0 || strcmp(n, "export") == 0 ||
                       strcmp(n, "unset") == 0 || strcmp(n, "exit") == 0 ||
-                      strcmp(n, "jobs") == 0 || strcmp(n, "wait") == 0;
+                      strcmp(n, "jobs") == 0 || strcmp(n, "wait") == 0 ||
+                      strcmp(n, "fg") == 0 || strcmp(n, "bg") == 0;
         if (special && !background) return run_special_builtin(c);
     }
 
@@ -373,32 +469,27 @@ static int run_pipeline(command_t* cmds, int ncmds, int background, const char* 
         in_fd = fds[0] >= 0 ? fds[0] : STDIN_FILENO;
     }
 
+    job_t job;
+    memset(&job, 0, sizeof(job));
+    job.pgid = pgid;
+    job.npids = ncmds;
+    for (int i = 0; i < ncmds; i++) job.pids[i] = pids[i];
+    job.last_pid = pids[ncmds - 1];
+    strncpy(job.text, text, sizeof(job.text) - 1);
+
     if (background) {
-        for (int j = 0; j < MAX_JOBS; j++) {
-            if (jobs[j].npids) continue;
-            jobs[j].pgid = pgid;
-            jobs[j].npids = ncmds;
-            for (int i = 0; i < ncmds; i++) jobs[j].pids[i] = pids[i];
-            strncpy(jobs[j].text, text, sizeof(jobs[j].text) - 1);
-            printf("[%d] %d\n", j + 1, pgid);
-            break;
-        }
+        int j = remember_job(&job);
+        printf("[%d] %d\n", j + 1, pgid);
         return 0;
     }
 
-    tcsetpgrp(STDIN_FILENO, pgid);
-    int status = 0;
-    for (int i = 0; i < ncmds; i++) {
-        int st;
-        while (waitpid(pids[i], &st, 0) < 0 && errno == EINTR) { }
-        if (i == ncmds - 1) status = st;
-        else if (WIFSIGNALED(st) && WTERMSIG(st) != SIGPIPE) report(pids[i], st, "killed");
+    int st = wait_foreground(&job);
+    if (st < 0) {
+        int j = remember_job(&job);
+        printf("\n[%d]  + suspended  %s\n", j + 1, job.text);
+        return 128 + SIGTSTP;
     }
-    tcsetpgrp(STDIN_FILENO, shell_pgid);
-
-    report(pids[ncmds - 1], status, "killed");
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return WEXITSTATUS(status);
+    return status_code(st);
 }
 
 // Parse tokens[*pos..] into one pipeline; returns its exit status.
@@ -485,16 +576,22 @@ static void run_line(const char* line) {
 static void reap_jobs(void) {
     int status;
     pid_t pid;
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
         for (int j = 0; j < MAX_JOBS; j++) {
             for (int i = 0; i < jobs[j].npids; i++) {
                 if (jobs[j].pids[i] != pid) continue;
+                if (WIFSTOPPED(status)) {
+                    if (!jobs[j].stopped) printf("[%d]  + suspended  %s\n", j + 1, jobs[j].text);
+                    jobs[j].stopped = 1;
+                    break;
+                }
                 jobs[j].pids[i] = jobs[j].pids[--jobs[j].npids];
                 if (jobs[j].npids == 0) {
                     printf("[%d]  + %s  %s\n", j + 1,
                            WIFSIGNALED(status) ? signame(WTERMSIG(status)) : "done",
                            jobs[j].text);
                 }
+                break;
             }
         }
     }
@@ -537,6 +634,8 @@ int main(int argc, char** argv, char** envp) {
     tcsetpgrp(STDIN_FILENO, shell_pgid);
     // Ctrl+C at the prompt should just give a fresh prompt.
     signal(SIGINT, on_sigint);
+    // Ctrl+Z at the prompt must not suspend the shell itself.
+    signal(SIGTSTP, SIG_IGN);
 
     struct utsname u;
     if (uname(&u) == 0) printf("\n%s %s (%s) -- ksh, pid %d. Type 'help'.\n\n",

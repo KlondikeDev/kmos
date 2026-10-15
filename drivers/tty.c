@@ -58,6 +58,12 @@ void tty_input(char c) {
         return;
     }
 
+    if ((mode & TTY_MODE_ISIG) && c == 0x1A) {             // Ctrl+Z
+        echo_str("^Z\n");
+        if (foreground_pgid > 0) signal_send_group(foreground_pgid, SIGTSTP);
+        return;
+    }
+
     if (!(mode & TTY_MODE_CANON)) {
         enqueue(&c, 1);
         echo(c);

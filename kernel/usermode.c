@@ -94,6 +94,16 @@ bool user_copy_to(process_t* p, u64 virt, const void* src, u64 len) {
     return true;
 }
 
+// The stack region below what is mapped grows on first touch -- from a page
+// fault in ring 3, or from a syscall handed a buffer there. True if `addr`
+// is now backed.
+bool user_grow_stack(u64 addr) {
+    if (addr < USER_STACK_LIMIT || addr >= USER_STACK_BOTTOM) return false;
+    process_t* p = proc_current();
+    if (p->pid == 0) return false;
+    return user_map(p, addr & PAGE_MASK, PF_R | PF_W);
+}
+
 bool user_range_ok(u64 addr, u64 len, bool write) {
     if (len == 0) return true;
     if (addr + len < addr) return false;                     // wraparound
@@ -103,6 +113,7 @@ bool user_range_ok(u64 addr, u64 len, bool write) {
     u64 last = (addr + len - 1) & PAGE_MASK;
     for (u64 page = addr & PAGE_MASK; ; page += USER_PAGE_SIZE) {
         u64 pte = vmm_get_pte(space, page);
+        if (!(pte & PTE_PRESENT) && user_grow_stack(page)) pte = vmm_get_pte(space, page);
         if (!(pte & PTE_PRESENT) || !(pte & PTE_USER)) return false;
         if (write && !(pte & PTE_WRITE)) return false;
         if (page == last) break;
@@ -326,6 +337,11 @@ void usermode_fault(const char* reason, registers_t* regs) {
     uint64_t cr2;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
     process_t* p = proc_current();
+
+    // A not-present page fault in the stack region is the stack growing:
+    // back the page and retry the instruction. (Error code bit 0 clear =
+    // the page was not present, as opposed to a protection violation.)
+    if (regs->int_no == 14 && !(regs->err_code & 1) && user_grow_stack(cr2)) return;
     i32 sig = signal_for_fault(regs->int_no);
 
     // A fault cannot be ignored or blocked: retrying the instruction would

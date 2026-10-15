@@ -106,12 +106,12 @@ static i64 sys_open(u64 path, u64 flags, u64 mode) {
 static i64 sys_lseek(u64 fd, i64 off, u64 whence) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node.type == VN_FIFO || f->node.type == VN_CHR) return -ESPIPE;
+    if (f->node->type == VN_FIFO || f->node->type == VN_CHR) return -ESPIPE;
     i64 base;
     switch (whence) {
         case SEEK_SET: base = 0; break;
         case SEEK_CUR: base = (i64)f->pos; break;
-        case SEEK_END: base = (i64)f->node.size; break;
+        case SEEK_END: base = (i64)f->node->size; break;
         default: return -EINVAL;
     }
     if (base + off < 0) return -EINVAL;
@@ -137,7 +137,7 @@ static i64 sys_fstat(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!user_range_ok(out, sizeof(kstat_t), true)) return -EFAULT;
-    fill_stat(&f->node, (kstat_t*)out);
+    fill_stat(f->node, (kstat_t*)out);
     return 0;
 }
 
@@ -191,7 +191,7 @@ static i64 sys_pipe(u64 out) {
 static i64 sys_readdir(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node.type != VN_DIR || !f->path) return -ENOTDIR;
+    if (f->node->type != VN_DIR || !f->path) return -ENOTDIR;
     if (!user_range_ok(out, sizeof(kdirent_t), true)) return -EFAULT;
 
     kdirent_t d;
@@ -226,7 +226,7 @@ static i64 sys_ftruncate(u64 fd, i64 len) {
     if (!f) return -EBADF;
     if (len < 0) return -EINVAL;
     if ((f->flags & O_ACCMODE) == O_RDONLY) return -EBADF;
-    return vfs_truncate(&f->node, (u64)len);
+    return vfs_truncate(f->node, (u64)len);
 }
 
 static i64 sys_chdir(u64 path) {
@@ -248,7 +248,7 @@ static i64 sys_getcwd(u64 buf, u64 len) {
 static i64 sys_ioctl(u64 fd, u64 req, u64 arg) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (!devfs_is_tty(&f->node)) return -ENOTTY;
+    if (!devfs_is_tty(f->node)) return -ENOTTY;
     switch (req) {
         case TIOCGMODE: return tty_get_mode();
         case TIOCSMODE: tty_set_mode((u32)arg); return 0;
@@ -259,7 +259,7 @@ static i64 sys_ioctl(u64 fd, u64 req, u64 arg) {
 static i64 sys_tcsetpgrp(u64 fd, u64 pgid) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (!devfs_is_tty(&f->node)) return -ENOTTY;
+    if (!devfs_is_tty(f->node)) return -ENOTTY;
     tty_set_foreground((i32)pgid);
     return 0;
 }
@@ -267,7 +267,7 @@ static i64 sys_tcsetpgrp(u64 fd, u64 pgid) {
 static i64 sys_tcgetpgrp(u64 fd) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (!devfs_is_tty(&f->node)) return -ENOTTY;
+    if (!devfs_is_tty(f->node)) return -ENOTTY;
     return tty_get_foreground();
 }
 
@@ -433,6 +433,7 @@ static i64 sys_meminfo(u64 out) {
 void syscall_dispatch(registers_t* regs) {
     u64 a = regs->rdi, b = regs->rsi, c = regs->rdx;
     i64 r;
+    me()->syscall_nr = (i64)regs->rax;          // in case it must be restarted
 
     switch (regs->rax) {
         case SYS_EXIT:        proc_exit((i64)a);                 // does not return
@@ -462,7 +463,12 @@ void syscall_dispatch(registers_t* regs) {
         case SYS_RMDIR:       r = sys_path_op(a, regs->rax); break;
         case SYS_KILL:        r = sys_kill((i64)a, b); break;
         case SYS_SIGACTION:   r = sys_sigaction(a, b, c); break;
-        case SYS_SIGRETURN:   signal_return(regs); return;       // restores rax too
+        case SYS_SIGRETURN:
+            // The restored frame may hold -EINTR from the call the handler
+            // interrupted; that result stands, it must not be "restarted".
+            me()->syscall_nr = -1;
+            signal_return(regs);
+            return;
         case SYS_GETPPID:     r = me()->ppid; break;
         case SYS_SETPGID:     r = sys_setpgid((i64)a, (i64)b); break;
         case SYS_GETPGID:     r = sys_getpgid((i64)a); break;

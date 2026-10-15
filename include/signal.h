@@ -30,6 +30,8 @@
 #define SIGCONT  18
 #define SIGSTOP  19
 #define SIGTSTP  20
+#define SIGTTIN  21
+#define SIGTTOU  22
 #define SIGWINCH 28
 
 #define SIG_DFL 0
@@ -47,6 +49,8 @@ bool signal_pending(const process_t* p);
 // On the way back to ring 3: act on pending signals -- ignore, kill the
 // process, or rewrite the frame so it resumes in a handler.
 void signal_deliver(registers_t* regs);
+// Same, knowing the frame is a syscall return (enables restarting it).
+void signal_deliver_from(registers_t* regs, bool from_syscall);
 
 // SYS_SIGRETURN: restore the frame saved when the handler was entered.
 void signal_return(registers_t* regs);

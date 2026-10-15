@@ -53,7 +53,29 @@ static void test_basics(void) {
     CHECK("ENOSYS for an unknown syscall", syscall3(999, 0, 0, 0) == -ENOSYS);
 }
 
+// Touch ~1 MiB of stack: far past the 16 KiB mapped at exec.
+static __attribute__((noinline)) long deep_stack(void) {
+    volatile char big[1024 * 1024];
+    for (unsigned long i = 0; i < sizeof(big); i += 4096) big[i] = (char)i;
+    long sum = 0;
+    for (unsigned long i = 0; i < sizeof(big); i += 4096) sum += big[i];
+    return sum;
+}
+
+static __attribute__((noinline)) long stack_syscall(void) {
+    char buf[200 * 1024];            // untouched: the kernel must grow into it
+    int fd = open("/dev/zero", O_RDONLY);
+    long n = read(fd, buf, sizeof(buf));
+    close(fd);
+    return n;
+}
+
 static void test_memory(void) {
+    long expect = 0;
+    for (unsigned long i = 0; i < 1024 * 1024; i += 4096) expect += (char)i;
+    CHECK("the stack grows on demand (1 MiB of locals)", deep_stack() == expect);
+    CHECK("a syscall can write into not-yet-touched stack", stack_syscall() == 200 * 1024);
+
     unsigned char* p = malloc(1024 * 1024);
     int ok = p != NULL;
     if (ok) {
@@ -254,6 +276,28 @@ static void test_signals(void) {
     CHECK("kill(-pgid) reaches the whole group",
           WIFSIGNALED(s0) && WTERMSIG(s0) == SIGKILL && WIFSIGNALED(s1) && WTERMSIG(s1) == SIGKILL);
 
+    // Stop a child blocked in read(), feed it, continue it: the read must
+    // restart transparently and deliver the byte, not fail with EINTR.
+    pipe(fds);
+    pid = fork();
+    if (pid == 0) {
+        close(fds[1]);
+        char c = 0;
+        ssize_t r = read(fds[0], &c, 1);
+        _exit(r == 1 ? c : 100 + errno);
+    }
+    close(fds[0]);
+    msleep(50);
+    kill(pid, SIGSTOP);
+    int sst;
+    CHECK("waitpid(WUNTRACED) sees the stop",
+          waitpid(pid, &sst, WUNTRACED) == pid && WIFSTOPPED(sst) && WSTOPSIG(sst) == SIGSTOP);
+    write(fds[1], "\x2a", 1);
+    kill(pid, SIGCONT);
+    waitpid(pid, &st, 0);
+    close(fds[1]);
+    CHECK("SIGCONT resumes, and the stopped read restarts", WIFEXITED(st) && WEXITSTATUS(st) == 42);
+
     pid = fork();
     if (pid == 0) { volatile int* p = 0; _exit(*p); }
     waitpid(pid, &st, 0);
@@ -366,6 +410,15 @@ static void test_writes(void) {
     close(fd);
     CHECK("O_TRUNC empties", stat(path, &st) == 0 && st.st_size == 0);
     CHECK("O_CREAT|O_EXCL on an existing file", open(path, O_WRONLY | O_CREAT | O_EXCL) < 0 && errno == EEXIST);
+
+    // Two separate opens of one file share its size and clusters.
+    int a = open(path, O_WRONLY), b = open(path, O_RDONLY);
+    write(a, "shared", 6);
+    char sb[8] = {0};
+    CHECK("two opens of one file see each other's writes", read(b, sb, 6) == 6 && memcmp(sb, "shared", 6) == 0);
+    CHECK("unlink of an open file is refused", unlink(path) < 0 && errno == EBUSY);
+    close(a);
+    close(b);
     CHECK("unlink", unlink(path) == 0 && stat(path, &st) < 0 && errno == ENOENT);
 
     rmdir("/KTDIR/INNER.TXT");
