@@ -3,6 +3,8 @@
 // See LICENSE for details
 
 #include <io.h>
+#include <itoa.h>
+#include <stdarg.h>
 #include <serial.h>
 
 volatile bool faulty = false;
@@ -51,4 +53,109 @@ void kserialout(const char *s) {
         kserialputchar(*s++);
     }
 
+}
+
+static void kserialout_padded(const char* str, int width, char pad_char) {
+    int len = 0;
+    const char* p = str;
+    while (*p++) {
+        len++;
+    }
+    int padding = width - len;
+    if (padding > 0) {
+        for (int i = 0; i < padding; i++) {
+            kserialputchar(pad_char);
+        }
+    }
+    kserialout(str);
+}
+
+void kserialoutf(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vkserialoutf(format, args);
+    va_end(args);
+}
+
+void vkserialoutf(const char* format, va_list args) {
+        while(*format) {
+        if (*format == '%') {
+            format++;
+            
+            char pad_char = ' ';
+            if (*format == '0') {
+                pad_char = '0';
+                format++;
+            }
+            
+            int width = 0;
+            while (*format >= '0' && *format <= '9') {
+                width = width * 10 + (*format - '0');
+                format++;
+            }
+
+            // Length modifier: %l and %ll both mean "the argument is 64-bit".
+            // Without this a 64-bit value would be read as an int and the rest
+            // of the argument list would be misaligned from there on.
+            int is_long = 0;
+            while (*format == 'l') {
+                is_long = 1;
+                format++;
+            }
+
+            if (*format == '\0') {   // format ends in '%': don't run past the terminator
+                kserialputchar('%');
+                break;
+            }
+
+            switch (*format) {
+                case 'd': {
+                    char buffer[100];
+                    if (is_long) {
+                        itoa64(va_arg(args, i64), buffer);
+                    } else {
+                        itoa(va_arg(args, int), buffer);
+                    }
+                    kserialout_padded(buffer, width, pad_char);
+                    break;
+                }
+                case 'u': {
+                    char buffer[100];
+                    if (is_long) {
+                        utoa64(va_arg(args, u64), buffer, 10);
+                    } else {
+                        utoa(va_arg(args, unsigned int), buffer, 10);
+                    }
+                    kserialout_padded(buffer, width, pad_char);
+                    break;
+                }
+                case 'x': {
+                    char buffer[100];
+                    if (is_long) {
+                        utoa64(va_arg(args, u64), buffer, 16);
+                    } else {
+                        utoa(va_arg(args, unsigned int), buffer, 16);
+                    }
+                    kserialout_padded(buffer, width, pad_char);
+                    break;
+                }
+                case 's': {
+                    char* str = va_arg(args, char*);
+                    kserialout_padded(str, width, ' ');
+                    break;
+                }
+                case '%': {
+                    kserialputchar('%');
+                    break;
+                }
+                default: {
+                    kserialputchar('%');
+                    kserialputchar(*format);
+                }
+            }
+        } else {
+            kserialputchar(*format);
+        }
+        format++;
+    }
 }

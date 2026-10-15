@@ -4,9 +4,13 @@
 
 #pragma once
 
+#include <stdarg.h>
+
 int init_serial();
 void kserialout(const char* str);
 void kserialputchar(char c);
+void kserialoutf(const char* format, ...);
+void vkserialoutf(const char* format, va_list args);
 extern volatile bool faulty;
 
 #define COM1 0x3f8          // COM1

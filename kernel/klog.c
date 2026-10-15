@@ -20,10 +20,11 @@ kernel_logs_t log_messages[4] = {
 
 void klog(kernel_logs_t* log, const char* format, ...) {
     va_list args;
+    va_list serial_args;
     va_start(args, format);
-    kserialout(format);
-    kserialout("\n");
-
+    va_copy(serial_args, args);
+    vkserialoutf(format, serial_args);
+    va_end(serial_args);
     uint32_t seconds = ticks / 250;
     uint32_t microseconds = (ticks % 250) * 4000;
     terminal_printf(SILVER, BLACK, "[%4d.%06d] ", seconds, microseconds);
@@ -46,6 +47,15 @@ void klog(kernel_logs_t* log, const char* format, ...) {
                 format++;
             }
 
+            // Length modifier: %l and %ll both mean "the argument is 64-bit".
+            // Without this a 64-bit value would be read as an int and the rest
+            // of the argument list would be misaligned from there on.
+            int is_long = 0;
+            while (*format == 'l') {
+                is_long = 1;
+                format++;
+            }
+
             if (*format == '\0') {   // format ends in '%': don't run past the terminator
                 terminal_putchar('%');
                 break;
@@ -54,22 +64,31 @@ void klog(kernel_logs_t* log, const char* format, ...) {
             switch (*format) {
                 case 'd': {
                     char buffer[100];
-                    int32_t val = va_arg(args, int);
-                    itoa(val, buffer);
+                    if (is_long) {
+                        itoa64(va_arg(args, i64), buffer);
+                    } else {
+                        itoa(va_arg(args, int), buffer);
+                    }
                     print_padded(buffer, width, pad_char);
                     break;
                 }
                 case 'u': {
                     char buffer[100];
-                    uint32_t val = va_arg(args, unsigned int);
-                    utoa(val, buffer, 10);
+                    if (is_long) {
+                        utoa64(va_arg(args, u64), buffer, 10);
+                    } else {
+                        utoa(va_arg(args, unsigned int), buffer, 10);
+                    }
                     print_padded(buffer, width, pad_char);
                     break;
                 }
                 case 'x': {
                     char buffer[100];
-                    uint32_t val = va_arg(args, unsigned int);
-                    utoa(val, buffer, 16);
+                    if (is_long) {
+                        utoa64(va_arg(args, u64), buffer, 16);
+                    } else {
+                        utoa(va_arg(args, unsigned int), buffer, 16);
+                    }
                     print_padded(buffer, width, pad_char);
                     break;
                 }
@@ -92,7 +111,6 @@ void klog(kernel_logs_t* log, const char* format, ...) {
         }
         format++;
     }
-
     va_end(args);
     terminal_flush();   // body text goes through terminal_putchar, which never flushes
 
