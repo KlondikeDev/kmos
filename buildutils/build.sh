@@ -65,7 +65,9 @@ userland(){
     UFLAGS="-std=gnu99 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -Iuser"
     x86_64-elf-as user/crt0.s -o build/user/crt0.o
     x86_64-elf-gcc -c user/lib/libk.c -o build/user/libk.o $UFLAGS -fno-builtin -fno-tree-loop-distribute-patterns
-    mmd -i disk.img ::/BIN 2>/dev/null || true
+    # Only create /BIN if it is missing: on a name clash mmd stops and asks
+    # what to do, which hangs an interactive build forever.
+    mdir -i disk.img ::/BIN >/dev/null 2>&1 || mmd -i disk.img ::/BIN
     for src in user/*.c; do
         name=$(basename "$src" .c)
         x86_64-elf-gcc -c "$src" -o "build/user/$name.o" $UFLAGS
