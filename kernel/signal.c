@@ -153,7 +153,12 @@ void signal_return(registers_t* regs) {
     memcpy(&saved, (const void*)frame, sizeof(saved));
 
     // The frame lived in user memory, so ring 3 could have edited it. Only
-    // take what is safe: never a kernel selector, never IOPL, always IF.
+    // take what is safe: never a kernel selector, never IOPL, always IF --
+    // and never a RIP outside the user half: iretq to a non-canonical
+    // address faults in ring 0, which would take the whole kernel down.
+    if (saved.rip >= USER_STACK_TOP || saved.rsp > USER_STACK_TOP) {
+        proc_exit_signal(SIGSEGV);
+    }
     saved.cs = GDT_USER_CS_RPL3;
     saved.ss = GDT_USER_DS_RPL3;
     saved.eflags = (saved.eflags & 0x0CD5) | 0x202;

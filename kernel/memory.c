@@ -38,10 +38,15 @@ uint64_t get_usable_ram(void) {
 
 void pmm_init(void) {
     hhdm_offset = hhdm_request.response->offset;
+    // The bitmap only has to cover memory we can hand out. Sizing it by the
+    // highest address of *any* map entry is a trap: firmware reports MMIO
+    // holes far above RAM (QEMU puts one near 1 TiB on some CPUs), and a
+    // bitmap covering that would itself eat 32 MiB of RAM.
     uint64_t max_end = 0;
     struct limine_memmap_response *memmap = memmap_request.response;
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
+        if (entry->type != LIMINE_MEMMAP_USABLE) continue;
         uint64_t end = entry->base + entry->length;
         if (end > max_end) {
             max_end = end;
@@ -63,12 +68,13 @@ void pmm_init(void) {
     memset(bitmap, 0xFF, bitmap_size);
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
-        uint64_t start = entry->base / PAGE_SIZE;
-        uint64_t count = entry->length / PAGE_SIZE;
-        for (uint64_t j = start; j < start + count; j++) {
-            if (entry->type == LIMINE_MEMMAP_USABLE) {
-                bitmap[j / 8] &= ~(1 << (j % 8));
-            }
+        if (entry->type != LIMINE_MEMMAP_USABLE) continue;
+        // Only whole pages inside the entry are free: round the start up
+        // and the end down.
+        uint64_t start = (entry->base + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t end = (entry->base + entry->length) / PAGE_SIZE;
+        for (uint64_t j = start; j < end && j < total_pages; j++) {
+            bitmap[j / 8] &= ~(1 << (j % 8));
         }
     }
     uint64_t phys = (uint64_t)bitmap - hhdm_offset;
@@ -145,11 +151,13 @@ static uint64_t read_cr3(void) {
 }
 
 // Return the next-level table under entry[idx], creating it if allowed.
+// NULL if it does not exist (and create is false) or memory ran out --
+// running out while a user program grows must be an error, not a panic.
 static uint64_t* next_table(uint64_t* table, uint64_t idx, uint64_t user_bit, bool create) {
     if (!(table[idx] & 1)) {
         if (!create) return NULL;
         void* page = pmm_alloc();
-        if (!page) __asm__ volatile("int $0x82");
+        if (!page) return NULL;
         memset(table_virt((uint64_t)page), 0, PAGE_SIZE);
         table[idx] = (uint64_t)page | 3 | user_bit;
     } else {
@@ -164,7 +172,7 @@ void vmm_init(void) {
     kernel_pml4 = read_cr3();
     uint64_t* pml4 = table_virt(kernel_pml4);
     for (int i = 256; i < 512; i++) {
-        next_table(pml4, i, 0, true);
+        if (!next_table(pml4, i, 0, true)) __asm__ volatile("int $0x82");  // at boot: fatal
     }
 }
 
@@ -243,7 +251,10 @@ bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out) {
                     for (int w = 0; w < PAGE_SIZE / 8; w++) b[w] = a[w];
                     uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
                                     ((uint64_t)k << 21) | ((uint64_t)l << 12);
-                    vmm_map_in(dst, virt, (uint64_t)frame, pte & ~0x000FFFFFFFFFF000ULL);
+                    if (!vmm_map_in(dst, virt, (uint64_t)frame, pte & ~0x000FFFFFFFFFF000ULL)) {
+                        pmm_free((uint64_t)frame);
+                        return false;
+                    }
                     pages++;
                 }
             }
@@ -253,16 +264,20 @@ bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out) {
     return true;
 }
 
-void vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags) {
+bool vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t user_bit = flags & PTE_USER_BIT;
     uint64_t* pml4 = table_virt(space);
     uint64_t* pdpt = next_table(pml4, (virt >> 39) & 0x1FF, user_bit, true);
+    if (!pdpt) return false;
     uint64_t* pd   = next_table(pdpt, (virt >> 30) & 0x1FF, user_bit, true);
+    if (!pd) return false;
     uint64_t* pt   = next_table(pd,   (virt >> 21) & 0x1FF, user_bit, true);
+    if (!pt) return false;
     pt[(virt >> 12) & 0x1FF] = phys | flags;
     if (space == read_cr3()) {
         __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
     }
+    return true;
 }
 
 void vmm_unmap_in(uint64_t space, uint64_t virt) {
@@ -290,8 +305,8 @@ uint64_t vmm_get_pte(uint64_t space, uint64_t virt) {
     return pt[(virt >> 12) & 0x1FF];
 }
 
-void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
-    vmm_map_in(read_cr3(), virt, phys, flags);
+bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
+    return vmm_map_in(read_cr3(), virt, phys, flags);
 }
 
 void vmm_unmap(uint64_t virt) {
@@ -312,8 +327,7 @@ static uint64_t heap_end;                // next unmapped virtual address
 void heap_init(void) {
     heap_base_addr = 0xFFFF900000000000;
     void* phys = pmm_alloc();
-    if (!phys) __asm__ volatile("int $0x82");
-    vmm_map(heap_base_addr, (uint64_t)phys, 3);
+    if (!phys || !vmm_map(heap_base_addr, (uint64_t)phys, 3)) __asm__ volatile("int $0x82");
 
     genesis_block_ptr = (struct block_header* )heap_base_addr;
 
@@ -331,8 +345,18 @@ static struct block_header* heap_grow(uint64_t need) {
     struct block_header* blk = (struct block_header*)heap_end;
     for (uint64_t i = 0; i < pages; i++) {
         void* phys = pmm_alloc();
-        if (!phys) return NULL;   // kmalloc reports this as allocation failure
-        vmm_map(heap_end, (uint64_t)phys, 3);
+        if (!phys || !vmm_map(heap_end, (uint64_t)phys, 3)) {
+            // Out of memory part-way: give back what this call mapped, so
+            // the heap is exactly as it was. kmalloc then returns NULL.
+            if (phys) pmm_free((uint64_t)phys);
+            while (i--) {
+                heap_end -= PAGE_SIZE;
+                uint64_t pte = vmm_get_pte(read_cr3(), heap_end);
+                vmm_unmap(heap_end);
+                pmm_free(pte & 0x000FFFFFFFFFF000ULL);
+            }
+            return NULL;
+        }
         heap_end += PAGE_SIZE;
     }
     blk->size = pages * PAGE_SIZE - sizeof(struct block_header);

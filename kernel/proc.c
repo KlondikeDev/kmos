@@ -86,19 +86,19 @@ process_t* proc_alloc(const char* name, process_t* parent) {
         if (procs[i].state == PROC_UNUSED) { p = &procs[i]; break; }
     }
     if (!p) {
-        klog(LOG_ERROR, "proc: process table full\n");
+        kserialout("proc: process table full\n");
         return NULL;
     }
 
     u8* kstack = kmalloc(KSTACK_SIZE);
     if (!kstack) {
-        klog(LOG_ERROR, "proc: out of memory for a kernel stack\n");
+        kserialout("proc: out of memory for a kernel stack\n");
         return NULL;
     }
     u64 space = vmm_create_space();
     if (!space) {
         kfree(kstack);
-        klog(LOG_ERROR, "proc: out of memory for an address space\n");
+        kserialout("proc: out of memory for an address space\n");
         return NULL;
     }
 

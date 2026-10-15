@@ -53,17 +53,16 @@ bool user_map(process_t* p, u64 virt, u32 pf_flags) {
         u64 flags = PTE_PRESENT | PTE_USER;
         if ((pte & PTE_WRITE) || (pf_flags & PF_W)) flags |= PTE_WRITE;
         if ((pte & PTE_NX) && !(pf_flags & PF_X)) flags |= PTE_NX;
-        vmm_map_in(p->space, virt, pte & PTE_ADDR_MASK, flags);
-        return true;
+        return vmm_map_in(p->space, virt, pte & PTE_ADDR_MASK, flags);
     }
 
     if (p->user_pages >= USER_MAX_PAGES) {
-        klog(LOG_ERROR, "usermode: %s needs more than %u pages\n", p->name, USER_MAX_PAGES);
+        kserialoutf("usermode: %s needs more than %u pages\n", p->name, USER_MAX_PAGES);
         return false;
     }
     void* frame = pmm_alloc();
     if (!frame) {
-        klog(LOG_ERROR, "usermode: out of physical memory\n");
+        kserialoutf("usermode: out of physical memory\n");
         return false;
     }
     // Zeroed through the kernel's direct map: the page need not be in the
@@ -73,7 +72,11 @@ bool user_map(process_t* p, u64 virt, u32 pf_flags) {
     u64 flags = PTE_PRESENT | PTE_USER;
     if (pf_flags & PF_W) flags |= PTE_WRITE;
     if (nx_enabled() && !(pf_flags & PF_X)) flags |= PTE_NX;
-    vmm_map_in(p->space, virt, (u64)frame, flags);
+    if (!vmm_map_in(p->space, virt, (u64)frame, flags)) {
+        pmm_free((u64)frame);
+        kserialoutf("usermode: out of memory for page tables\n");
+        return false;
+    }
     p->user_pages++;
     return true;
 }

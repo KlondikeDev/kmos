@@ -219,6 +219,17 @@ static int child_sigpipe(void) {
     return 0;
 }
 
+// Forge a sigreturn whose saved RIP is non-canonical. The kernel must kill
+// just this process (SIGSEGV), not fault in ring 0.
+static int child_forged_sigreturn(void) {
+    unsigned long frame[22];                         // a registers_t
+    memset(frame, 0, sizeof(frame));
+    frame[17] = 0x8000000000000000UL;                // rip: non-canonical
+    frame[20] = (unsigned long)&frame;               // rsp
+    __asm__ volatile("mov %0, %%rsp; mov $27, %%eax; int $0x80" :: "r"(frame) : "memory");
+    return 0;
+}
+
 static void test_signals(void) {
     // A handler runs, and the code around it keeps its registers.
     signal(SIGUSR1, on_usr1);
@@ -248,6 +259,9 @@ static void test_signals(void) {
     kill(pid, SIGUSR1);
     waitpid(pid, &st, 0);
     CHECK("a signal interrupts a blocked read with EINTR", WIFEXITED(st) && WEXITSTATUS(st) == 0);
+
+    st = in_child(child_forged_sigreturn);
+    CHECK("a forged sigreturn frame kills only the forger", WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
 
     st = in_child(child_sigpipe);
     CHECK("writing to a reader-less pipe raises SIGPIPE", WIFSIGNALED(st) && WTERMSIG(st) == SIGPIPE);
