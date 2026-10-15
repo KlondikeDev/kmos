@@ -67,10 +67,17 @@ bool identify_drive(uint8_t drive_select){
     return false;
 }
 
-bool read_sectors(u32 lba, void* buffer) {
+// drive: 0 = primary master, 1 = primary slave.
+bool ata_read(u8 drive, u32 lba, void* buffer) {
     while(inb(ATA_REG_STATUS) & ATA_STATUS_BUSY);
 
-    outb(ATA_REG_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
+    // Bit 4 of the drive register picks master/slave. After switching drives
+    // the status register needs ~400ns to reflect the new one, which is four
+    // reads of the alternate status port.
+    outb(ATA_REG_DRIVE, 0xE0 | ((drive & 1) << 4) | ((lba >> 24) & 0x0F));
+    for(int i = 0; i < 4; i++){
+        inb(ATA_REG_ALT_STATUS);
+    }
     outb(ATA_REG_SECTOR_COUNT, 1);
     outb(ATA_REG_LBA_LOW, lba & 0xFF);
     outb(ATA_REG_LBA_MID, (lba >> 8) & 0xFF);
@@ -87,4 +94,8 @@ bool read_sectors(u32 lba, void* buffer) {
         data[i] = inw(ATA_REG_DATA);
     }
     return true;
+}
+
+bool read_sectors(u32 lba, void* buffer) {
+    return ata_read(0, lba, buffer);
 }

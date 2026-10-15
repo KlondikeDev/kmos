@@ -9,6 +9,7 @@
 #include <ata.h>
 #include <console.h>
 #include <klibc/string.h>
+#include <vfs.h>
 
 _Static_assert(sizeof(bpb_t) == 512, "bpb_t must be exactly one sector");
 _Static_assert(sizeof(dirent_t) == 32, "dirent_t must be exactly 32 bytes");
@@ -241,6 +242,40 @@ const char* fat32_pwd(void) {
     return current_path;
 }
 
+// ---- directory iteration (for SYS_READDIR) ----
+// Report the index-th real entry (skipping "." and "..") of the directory at
+// `path`. Returns 1 if there is one, 0 past the end, -1 if path is bad.
+i32 fat32_readdir(const char* path, uint32_t index, char* name_out,
+                  uint32_t* size_out, bool* is_dir_out) {
+    uint32_t dir;
+    if (!resolve_path_dir(path, &dir)) return -1;
+
+    uint8_t buf[512];
+    char name[13];
+    uint32_t seen = 0;
+    uint32_t cluster = dir;
+    while (cluster < FAT_CLUSTER_EOC) {
+        uint32_t lba = cluster_to_lba(cluster);
+        for (uint32_t s = 0; s < sectors_per_cluster; s++) {
+            if (!read_sectors(lba + s, buf)) return -1;
+            dirent_t* e = (dirent_t*)buf;
+            for (int i = 0; i < DIRENTS_PER_SECTOR; i++) {
+                if (e[i].name[0] == FAT_DIRENT_END) return 0;
+                if (!fat_entry_usable(&e[i])) continue;
+                fat_format_name(e[i].name, name);
+                if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+                if (seen++ != index) continue;
+                for (int c = 0; c < 13; c++) name_out[c] = name[c];
+                *size_out = e[i].size;
+                *is_dir_out = (e[i].attr & FAT_ATTR_DIRECTORY) != 0;
+                return 1;
+            }
+        }
+        cluster = fat_next_cluster(cluster);
+    }
+    return 0;
+}
+
 // ---- Phase 4: read a file by path into buffer ----
 // Accepts "file", "dir/file", or "/abs/dir/file". Returns bytes read, or -1.
 i32 fat32_read_file(const char* path, void* buffer, uint32_t max_bytes) {
@@ -291,3 +326,9 @@ i32 fat32_read_file(const char* path, void* buffer, uint32_t max_bytes) {
     }
     return (i32)copied;
 }
+
+const vfs_ops_t fat32_vfs_ops = {
+    .type = "fat32",
+    .read_file = fat32_read_file,
+    .readdir = fat32_readdir,
+};

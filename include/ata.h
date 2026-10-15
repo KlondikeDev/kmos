@@ -6,7 +6,9 @@
 #include <types.h>
 
 bool identify_drive(uint8_t drive_select);
-bool read_sectors(u32 lba, void* buffer);
+bool read_sectors(u32 lba, void* buffer);   // primary master
+// Read one 512-byte sector. drive: 0 = primary master, 1 = primary slave.
+bool ata_read(u8 drive, u32 lba, void* buffer);
 void ata_print_model(void);
 
 #define ATA_REG_DATA         0x1F0
