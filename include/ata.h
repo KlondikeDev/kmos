@@ -9,6 +9,8 @@ bool identify_drive(uint8_t drive_select);
 bool read_sectors(u32 lba, void* buffer);   // primary master
 // Read one 512-byte sector. drive: 0 = primary master, 1 = primary slave.
 bool ata_read(u8 drive, u32 lba, void* buffer);
+bool ata_write(u8 drive, u32 lba, const void* buffer);
+bool write_sectors(u32 lba, const void* buffer);  // primary master
 void ata_print_model(void);
 
 #define ATA_REG_DATA         0x1F0
@@ -25,3 +27,5 @@ void ata_print_model(void);
 #define ATA_STATUS_ERR       0x01
 
 #define ATA_CMD_IDENTIFY     0xEC
+#define ATA_CMD_WRITE        0x30
+#define ATA_CMD_FLUSH        0xE7

@@ -99,3 +99,40 @@ bool ata_read(u8 drive, u32 lba, void* buffer) {
 bool read_sectors(u32 lba, void* buffer) {
     return ata_read(0, lba, buffer);
 }
+
+// Write one 512-byte sector, then flush the drive's write cache so the data
+// is really on the disk (or in QEMU's image) before we report success.
+bool ata_write(u8 drive, u32 lba, const void* buffer) {
+    while(inb(ATA_REG_STATUS) & ATA_STATUS_BUSY);
+
+    outb(ATA_REG_DRIVE, 0xE0 | ((drive & 1) << 4) | ((lba >> 24) & 0x0F));
+    for(int i = 0; i < 4; i++){
+        inb(ATA_REG_ALT_STATUS);
+    }
+    outb(ATA_REG_SECTOR_COUNT, 1);
+    outb(ATA_REG_LBA_LOW, lba & 0xFF);
+    outb(ATA_REG_LBA_MID, (lba >> 8) & 0xFF);
+    outb(ATA_REG_LBA_HI, (lba >> 16) & 0xFF);
+
+    outb(ATA_REG_STATUS, ATA_CMD_WRITE);
+
+    if(!ata_poll()) {
+        return false;
+    }
+
+    const uint16_t* data = (const uint16_t*)buffer;
+    for(int i = 0; i < 256; i++) {
+        outw(ATA_REG_DATA, data[i]);
+    }
+
+    outb(ATA_REG_STATUS, ATA_CMD_FLUSH);
+    uint8_t status;
+    do {
+        status = inb(ATA_REG_STATUS);
+    } while(status & ATA_STATUS_BUSY);
+    return !(status & ATA_STATUS_ERR);
+}
+
+bool write_sectors(u32 lba, const void* buffer) {
+    return ata_write(0, lba, buffer);
+}

@@ -89,8 +89,5 @@ bool fat32_chdir(const char* path);     // change working directory
 const char* fat32_pwd(void);            // current working-directory path
 // Returns bytes read (>= 0) on success, or -1 if the file isn't found.
 i32 fat32_read_file(const char* path, void* buffer, u32 max_bytes);
-// Index-th entry of a directory ("." and ".." skipped). name_out needs 13
-// bytes. Returns 1 found, 0 past the end, -1 if the path is not a directory.
-i32 fat32_readdir(const char* path, u32 index, char* name_out, u32* size_out, bool* is_dir_out);
 
 extern const vfs_ops_t fat32_vfs_ops;
