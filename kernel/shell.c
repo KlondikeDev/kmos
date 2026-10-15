@@ -15,9 +15,11 @@
 #include <security.h>
 #include <memory.h>
 #include <fat32.h>
+#include <vfs.h>
+#include <usermode.h>
 
 static void shell_prompt(void) {
-    terminal_printf(SILVER, BLACK, "kunix:%s|> ", fat32_pwd());
+    terminal_printf(SILVER, BLACK, "kunix:%s|> ", vfs_pwd());
     prompt_x = cursor_x;
 }
 
@@ -42,11 +44,14 @@ void shell_process_command(const char* cmd) {
         terminal_printf(SILVER, BLACK, "sysinfo - Displays system information\n");
         terminal_printf(SILVER, BLACK, "reboot  - Reboots the system\n");
         terminal_printf(SILVER, BLACK, "pci     - Lists PCI devices\n");
-        terminal_printf(SILVER, BLACK, "ls      - Lists files in the working directory\n");
+        terminal_printf(SILVER, BLACK, "ls      - Lists files in a directory\n");
+        terminal_printf(SILVER, BLACK, "mounts  - Lists mounted filesystems\n");
         terminal_printf(SILVER, BLACK, "cd      - Changes the working directory\n");
         terminal_printf(SILVER, BLACK, "pwd     - Prints the working directory\n");
         terminal_printf(SILVER, BLACK, "cat     - Prints a file's contents\n");
         terminal_printf(SILVER, BLACK, "testssp - Tests stack-smashing protection\n");
+        terminal_printf(SILVER, BLACK, "usermode - Runs a ring 3 program ('stack' or 'fault' for variants)\n");
+        terminal_printf(SILVER, BLACK, "run     - Runs an ELF executable from disk in ring 3\n");
         terminal_printf(SILVER, BLACK, "panic   - Initiates kernel panic\n\n");
     } else if(strcmp(cmd, "clear") == 0) {
         terminal_clear();
@@ -71,13 +76,45 @@ void shell_process_command(const char* cmd) {
     } else if (strcmp(cmd, "testssp") == 0) {
             test_ssp();
             return;
-    } else if(strcmp(cmd, "ls") == 0){
-        fat32_list();
+    } else if(strcmp(cmd, "usermode") == 0){
+        usermode_demo();
+    } else if(strcmp(cmd, "usermode stack") == 0){
+        usermode_stack_demo();
+    } else if(strcmp(cmd, "usermode fault") == 0){
+        usermode_fault_demo();
+    } else if(strncmp(cmd, "run ", 4) == 0){
+        // The process's own read() will reuse input_buffer, which cmd points
+        // into, so take a copy of the path first.
+        char path[256];
+        size_t n = 0;
+        for (const char* p = cmd + 4; *p && n < sizeof(path) - 1; p++) path[n++] = *p;
+        path[n] = '\0';
+        u64 flags = irq_save();
+        i32 pid = usermode_spawn(path, 0, NULL, 0);
+        irq_restore(flags);
+        if (pid < 0) {
+            terminal_printf(GREY, BLACK, "run: %s: cannot execute\n", path);
+        } else {
+            usermode_run_and_wait(pid);
+        }
+    } else if(strcmp(cmd, "ls") == 0 || strncmp(cmd, "ls ", 3) == 0){
+        const char* dir = cmd[2] ? cmd + 3 : ".";
+        char name[VFS_NAME_MAX];
+        u32 size;
+        bool is_dir;
+        i32 r;
+        for (u32 i = 0; (r = vfs_readdir(dir, i, name, &size, &is_dir)) == 1; i++) {
+            if (is_dir) terminal_printf(CYAN, BLACK, "%s/\n", name);
+            else terminal_printf(SILVER, BLACK, "%s\t%u bytes\n", name, size);
+        }
+        if (r < 0) terminal_printf(GREY, BLACK, "ls: %s: no such directory\n", dir);
+    } else if(strcmp(cmd, "mounts") == 0){
+        vfs_list_mounts();
     } else if(strcmp(cmd, "pwd") == 0){
-        terminal_printf(SILVER, BLACK, "%s\n", fat32_pwd());
+        terminal_printf(SILVER, BLACK, "%s\n", vfs_pwd());
     } else if(strncmp(cmd, "cd ", 3) == 0){
         const char* path = cmd + 3;
-        if(!fat32_chdir(path)){
+        if(!vfs_chdir(path)){
             terminal_printf(GREY, BLACK, "cd: %s: no such directory\n", path);
         }
     } else if(strncmp(cmd, "cat ", 4) == 0){
@@ -86,7 +123,7 @@ void shell_process_command(const char* cmd) {
         if(fbuf == NULL){
             terminal_printf(RED, BLACK, "cat: out of memory\n");
         } else {
-            i32 n = fat32_read_file(fname, fbuf, 4096);
+            i32 n = vfs_read_file(fname, fbuf, 4096);
             if(n < 0){
                 terminal_printf(GREY, BLACK, "cat: %s: no such file\n", fname);
             } else {

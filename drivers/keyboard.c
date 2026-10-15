@@ -6,6 +6,7 @@
 #include <types.h>
 #include <keyboard.h>
 #include <io.h>
+#include <proc.h>
 
 // I should start using defines more. I just avoid them for no reason. I actually quite like them.
 #define DATA_PORT 0x60
@@ -147,6 +148,7 @@ void read_key() {
             input_buffer[index] = '\0';
             command_ready = true;
             index = 0;
+            sched_wake_input();     // a process may be blocked in read()
             return;
         } else if (key == '\b') {
             if (index > 0) {

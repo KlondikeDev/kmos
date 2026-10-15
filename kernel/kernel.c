@@ -26,6 +26,11 @@
 #include <cpuinit.h>
 #include <ata.h>
 #include <fat32.h>
+#include <vfs.h>
+#include <ufs2.h>
+#include <gdt.h>
+#include <proc.h>
+#include <usermode.h>
 
 // Limine nuke!
 static volatile LIMINE_BASE_REVISION(3);
@@ -40,6 +45,7 @@ void kernel_main(void) {
     init_serial();
     pmm_init();
     heap_init();
+    vmm_init();
     framebuffer_init(); // Kunix, city of light!
     terminal_init();    // Kunix, city of night!
     cpu_init();
@@ -51,6 +57,14 @@ void kernel_main(void) {
     klog(LOG_OKAY, "Booting Kunix Millennium Operating System...\n");
     klog(LOG_DEBUG, "Kernel Built at %s on %s: %s-%s (%s)\n", KUNIX_BUILD_TIME, KUNIX_BUILD_DATE, KUNIX_NAME, KUNIX_CODENAME, KUNIX_ARCH);
     
+    // Must precede idt_init: the IDT gates reference our own kernel code
+    // selector, and the TSS has to exist before anything can trap out of ring 3.
+    gdt_init();
+
+    // Before idt_init: that turns interrupts on, and the very first timer
+    // tick goes through the scheduler.
+    sched_init();
+
     idt_init();
     pit_init();
     klog(LOG_OKAY, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
@@ -58,6 +72,11 @@ void kernel_main(void) {
     pci_list_devices();
     identify_drive(0xA0);
     fat32_init();
+    vfs_mount("/", &fat32_vfs_ops);
+    // A second IDE disk (primary slave) holding UFS2 appears at /ufs.
+    if (identify_drive(0xB0) && ufs2_mount(1)) {
+        vfs_mount("/ufs", &ufs2_vfs_ops);
+    }
 
     terminal_printf(BLACK, BLACK, "\n");
     
@@ -70,10 +89,33 @@ void kernel_main(void) {
     terminal_printf(SILVER, BLACK, "For more information on how to use Kunix, see the wiki:\nhttps://wiki.kunix.org\n");
     keyboard_init();
 
-    shell_init();
-    
+    // The console belongs to the ring 3 shell when there is one on disk. The
+    // kernel shell is the fallback, and takes over again whenever no user
+    // processes are left (e.g. after `exit` in the ring 3 shell).
+    // Interrupts stay off until the log line is out, so the shell's banner
+    // cannot overtake it.
+    u64 flags = irq_save();
+    i32 init_pid = usermode_spawn("/SH.ELF", 0, NULL, 0);
+    if (init_pid < 0) {
+        klog(LOG_WARN, "No /SH.ELF on disk, starting the kernel shell\n");
+    } else {
+        klog(LOG_OKAY, "Started /SH.ELF as pid %u\n", (u32)init_pid);
+    }
+    irq_restore(flags);
+
+    // From here on this is PID 0, the kernel task. It only runs when no
+    // process is ready, so this loop doubles as the idle loop.
+    bool kernel_shell = false;
 	while(1) {
 		__asm__ volatile ("hlt");
+		sched_reap_orphans();
+		if (sched_user_procs()) continue;     // keyboard input is theirs
+
+		if (!kernel_shell) {
+			kernel_shell = true;
+			command_ready = false;
+			shell_init();
+		}
 		if (command_ready) {
 			command_ready = false;
 			shell_process_command(input_buffer);

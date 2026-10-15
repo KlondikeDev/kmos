@@ -8,6 +8,7 @@
 #include <memset.h>
 
 #define PAGE_SIZE 4096
+#define PTE_USER_BIT 0x4
 
 static uint8_t *bitmap;
 static uint64_t total_pages;
@@ -103,67 +104,150 @@ void pmm_free(uint64_t addr) {
     if (i < last_free_hint) last_free_hint = i;
 }
 
-void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
-    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
-    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
-    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
-    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
+// ---------------------------------------------------------------------------
+// Virtual memory
+//
+// Every address space is a PML4. The upper half (slots 256-511) is the
+// kernel and is shared by all of them: each new PML4 gets copies of the
+// kernel's upper-half entries, which point at the very same PDPTs. That only
+// stays true if the kernel never adds a *new* upper-half PML4 entry later, so
+// vmm_init() creates all 256 of them up front.
+//
+// The lower half (slots 0-255) is private to each process.
+// ---------------------------------------------------------------------------
+
+static uint64_t kernel_pml4;    // physical address of the boot address space
+
+uint64_t vmm_hhdm(void) {
+    return hhdm_offset;
+}
+
+static uint64_t* table_virt(uint64_t phys) {
+    return (uint64_t*)(phys + hhdm_offset);
+}
+
+static uint64_t read_cr3(void) {
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    uint64_t* pml4 = (uint64_t* )(cr3 + hhdm_offset);
-    if (!(pml4[pml4_idx] & 1)) {
-        void *page = pmm_alloc();
+    return cr3 & ~0xFFFULL;
+}
+
+// Return the next-level table under entry[idx], creating it if allowed.
+static uint64_t* next_table(uint64_t* table, uint64_t idx, uint64_t user_bit, bool create) {
+    if (!(table[idx] & 1)) {
+        if (!create) return NULL;
+        void* page = pmm_alloc();
         if (!page) __asm__ volatile("int $0x82");
-        memset((void *)((uint64_t)page + hhdm_offset), 0, PAGE_SIZE);
-        pml4[pml4_idx] = (uint64_t)page | 3;
+        memset(table_virt((uint64_t)page), 0, PAGE_SIZE);
+        table[idx] = (uint64_t)page | 3 | user_bit;
+    } else {
+        // Access rights are the AND of every level, so a page is only
+        // reachable from ring 3 when every table above it is marked user too.
+        table[idx] |= user_bit;
     }
+    return table_virt(table[idx] & 0x000FFFFFFFFFF000ULL);
+}
 
-    uint64_t *pdpt = (uint64_t *)((pml4[pml4_idx] & ~0xFFF) + hhdm_offset);
-    if (!(pdpt[pdpt_idx] & 1)) {
-        void *pd = pmm_alloc();
-        if (!pd) __asm__ volatile("int $0x82");
-        memset((void *)((uint64_t)pd + hhdm_offset), 0, PAGE_SIZE);
-        pdpt[pdpt_idx] = (uint64_t)pd | 3;
+void vmm_init(void) {
+    kernel_pml4 = read_cr3();
+    uint64_t* pml4 = table_virt(kernel_pml4);
+    for (int i = 256; i < 512; i++) {
+        next_table(pml4, i, 0, true);
     }
+}
 
-    uint64_t *pd = (uint64_t *)((pdpt[pdpt_idx] & ~0xFFF) + hhdm_offset);
-    if (!(pd[pd_idx] & 1)) {
-        void *pt = pmm_alloc();
-        if (!pt) __asm__ volatile("int $0x82");
-        memset((void *)((uint64_t)pt + hhdm_offset), 0, PAGE_SIZE);
-        pd[pd_idx] = (uint64_t)pt | 3;
+uint64_t vmm_kernel_space(void) {
+    return kernel_pml4;
+}
+
+uint64_t vmm_current_space(void) {
+    return read_cr3();
+}
+
+void vmm_switch(uint64_t pml4) {
+    if (read_cr3() != pml4) {
+        __asm__ volatile("mov %0, %%cr3" :: "r"(pml4) : "memory");
     }
+}
 
-    uint64_t *pt = (uint64_t *)((pd[pd_idx] & ~0xFFF) + hhdm_offset);
-    pt[pt_idx] = phys | flags;
-    __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
+uint64_t vmm_create_space(void) {
+    void* page = pmm_alloc();
+    if (!page) return 0;
+    uint64_t* pml4 = table_virt((uint64_t)page);
+    uint64_t* kpml4 = table_virt(kernel_pml4);
+    for (int i = 0; i < 256; i++) pml4[i] = 0;
+    for (int i = 256; i < 512; i++) pml4[i] = kpml4[i];
+    return (uint64_t)page;
+}
+
+// Free every user frame and every lower-half table, then the PML4 itself.
+// Must not be called on the space currently loaded in CR3.
+void vmm_destroy_space(uint64_t space) {
+    uint64_t* pml4 = table_virt(space);
+    for (int i = 0; i < 256; i++) {
+        if (!(pml4[i] & 1)) continue;
+        uint64_t* pdpt = table_virt(pml4[i] & 0x000FFFFFFFFFF000ULL);
+        for (int j = 0; j < 512; j++) {
+            if (!(pdpt[j] & 1)) continue;
+            uint64_t* pd = table_virt(pdpt[j] & 0x000FFFFFFFFFF000ULL);
+            for (int k = 0; k < 512; k++) {
+                if (!(pd[k] & 1)) continue;
+                uint64_t* pt = table_virt(pd[k] & 0x000FFFFFFFFFF000ULL);
+                for (int l = 0; l < 512; l++) {
+                    if (pt[l] & 1) pmm_free(pt[l] & 0x000FFFFFFFFFF000ULL);
+                }
+                pmm_free(pd[k] & 0x000FFFFFFFFFF000ULL);
+            }
+            pmm_free(pdpt[j] & 0x000FFFFFFFFFF000ULL);
+        }
+        pmm_free(pml4[i] & 0x000FFFFFFFFFF000ULL);
+    }
+    pmm_free(space);
+}
+
+void vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags) {
+    uint64_t user_bit = flags & PTE_USER_BIT;
+    uint64_t* pml4 = table_virt(space);
+    uint64_t* pdpt = next_table(pml4, (virt >> 39) & 0x1FF, user_bit, true);
+    uint64_t* pd   = next_table(pdpt, (virt >> 30) & 0x1FF, user_bit, true);
+    uint64_t* pt   = next_table(pd,   (virt >> 21) & 0x1FF, user_bit, true);
+    pt[(virt >> 12) & 0x1FF] = phys | flags;
+    if (space == read_cr3()) {
+        __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    }
+}
+
+void vmm_unmap_in(uint64_t space, uint64_t virt) {
+    uint64_t* pml4 = table_virt(space);
+    uint64_t* pdpt = next_table(pml4, (virt >> 39) & 0x1FF, 0, false);
+    if (!pdpt) return;
+    uint64_t* pd = next_table(pdpt, (virt >> 30) & 0x1FF, 0, false);
+    if (!pd) return;
+    uint64_t* pt = next_table(pd, (virt >> 21) & 0x1FF, 0, false);
+    if (!pt) return;
+    pt[(virt >> 12) & 0x1FF] = 0;
+    if (space == read_cr3()) {
+        __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    }
+}
+
+uint64_t vmm_get_pte(uint64_t space, uint64_t virt) {
+    uint64_t* pml4 = table_virt(space);
+    uint64_t* pdpt = next_table(pml4, (virt >> 39) & 0x1FF, 0, false);
+    if (!pdpt) return 0;
+    uint64_t* pd = next_table(pdpt, (virt >> 30) & 0x1FF, 0, false);
+    if (!pd) return 0;
+    uint64_t* pt = next_table(pd, (virt >> 21) & 0x1FF, 0, false);
+    if (!pt) return 0;
+    return pt[(virt >> 12) & 0x1FF];
+}
+
+void vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {
+    vmm_map_in(read_cr3(), virt, phys, flags);
 }
 
 void vmm_unmap(uint64_t virt) {
-    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
-    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
-    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
-    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
-    uint64_t cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    uint64_t* pml4 = (uint64_t* )(cr3 + hhdm_offset);
-    if (!(pml4[pml4_idx] & 1)) {
-        return;
-    }
-
-    uint64_t *pdpt = (uint64_t *)((pml4[pml4_idx] & ~0xFFF) + hhdm_offset);
-    if (!(pdpt[pdpt_idx] & 1)) {
-        return;
-    }
-
-    uint64_t *pd = (uint64_t *)((pdpt[pdpt_idx] & ~0xFFF) + hhdm_offset);
-    if (!(pd[pd_idx] & 1)) {
-        return;
-    }
-
-    uint64_t *pt = (uint64_t *)((pd[pd_idx] & ~0xFFF) + hhdm_offset);
-    pt[pt_idx] = 0;
-    __asm__ volatile("invlpg (%0)" :: "r"(virt) : "memory");
+    vmm_unmap_in(read_cr3(), virt);
 }
 
 struct block_header {
