@@ -13,7 +13,8 @@ then run from the repository root:
     python3 buildutils/test.py            # the whole suite
     python3 buildutils/test.py --mem 48M  # on a smaller machine
     python3 buildutils/test.py --command pmtest   # Prime Meridian's suite
-    python3 buildutils/test.py --all              # ktest, pmtest and pmsmoke
+    python3 buildutils/test.py --all              # ktest, pmtest, pmsmoke and ufs
+    python3 buildutils/test.py --suite ufs        # just the UFS2 write/reboot/fsck test
 
 Each suite writes its results to /dev/serial; this script types the command
 into the shell through QEMU's monitor, follows the serial log until the
@@ -32,7 +33,29 @@ import time
 
 # ktest: the native syscall suite. pmtest: Linux programs through Prime
 # Meridian (musl). pmsmoke: zsh and busybox, as a user drives them.
-SUITES = ["ktest", "pmtest", "pmsmoke"]
+# ufs: the UFS2 driver -- one boot writes a tree, a second boot checks and
+# removes it, then the host checks the image (ufsdiag.py, and FreeBSD's
+# fsck_ffs if buildutils/fsck-ffs.sh has built it).
+SUITES = ["ktest", "pmtest", "pmsmoke", "ufs"]
+UFS_PHASES = ["ufstest write", "ufstest verify"]
+FSCK = os.path.expanduser("~/opt/kunix-host/bin/fsck_ffs")
+
+
+def check_ufs_image(root):
+    """True if the host-side checkers find nothing wrong with ufs.img."""
+    img = os.path.join(root, "ufs.img")
+    ok = subprocess.run([sys.executable, os.path.join(root, "buildutils/ufsdiag.py"), img]).returncode == 0
+    if os.path.exists(FSCK):
+        out = subprocess.run([FSCK, "-n", img], capture_output=True, text=True).stdout
+        # A clean check prints only its phases and the summary line.
+        noise = [l for l in out.splitlines() if l.strip() and not l.startswith("**")
+                 and "is not a disk device" not in l and not l.startswith("CONTINUE")
+                 and " files, " not in l]
+        print("fsck_ffs: " + ("clean" if not noise else "PROBLEMS:\n" + "\n".join(noise)))
+        ok = ok and not noise
+    else:
+        print("fsck_ffs not built (buildutils/fsck-ffs.sh); only ufsdiag.py checked the image")
+    return ok
 
 KEYS = {" ": "spc", "\n": "ret", ".": "dot", "/": "slash", "-": "minus"}
 
@@ -44,16 +67,27 @@ def main():
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
     ap.add_argument("--log", help="also save the whole serial log here")
     ap.add_argument("--all", action="store_true",
-                    help="run every suite (ktest, pmtest, pmsmoke), each in a fresh boot")
+                    help="run every suite (ktest, pmtest, pmsmoke, ufs), each in a fresh boot")
+    ap.add_argument("--suite", help="run one suite by name (as --all would)")
     args = ap.parse_args()
 
+    def boot(command):
+        return subprocess.run([sys.executable, os.path.abspath(__file__), "--mem", args.mem,
+                               "--timeout", str(args.timeout), "--command", command]).returncode == 0
+
+    def run_suite(suite):
+        if suite != "ufs":
+            return boot(suite)
+        ok = all(boot(phase) for phase in UFS_PHASES)
+        return check_ufs_image(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) and ok
+
+    if args.suite:
+        sys.exit(0 if run_suite(args.suite) else 1)
     if args.all:
         failures = 0
         for suite in SUITES:
             print(f"==== {suite}", flush=True)
-            rc = subprocess.run([sys.executable, os.path.abspath(__file__), "--mem", args.mem,
-                                 "--timeout", str(args.timeout), "--command", suite]).returncode
-            failures += rc != 0
+            failures += not run_suite(suite)
         print(f"\n{len(SUITES) - failures} of {len(SUITES)} suites passed")
         sys.exit(1 if failures else 0)
 

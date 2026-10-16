@@ -13,6 +13,14 @@ bool ata_write(u8 drive, u32 lba, const void* buffer);
 bool write_sectors(u32 lba, const void* buffer);  // primary master
 void ata_print_model(void);
 
+// Any of the four IDE drives: 0/1 primary master/slave, 2/3 secondary.
+// count sectors of 512 bytes. Writes are not flushed: call ata_flush once
+// the operation's writes are all out.
+bool ata_read_multi(u8 drive, u32 lba, u32 count, void* buffer);
+bool ata_write_multi(u8 drive, u32 lba, u32 count, const void* buffer);
+bool ata_flush(u8 drive);
+bool ata_present(u8 drive);         // an ATA disk (not ATAPI) answers IDENTIFY
+
 #define ATA_REG_DATA         0x1F0
 #define ATA_REG_SECTOR_COUNT 0x1F2
 #define ATA_REG_LBA_LOW      0x1F3

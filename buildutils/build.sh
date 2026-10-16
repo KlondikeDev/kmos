@@ -186,7 +186,9 @@ ufs(){
     # can check nothing was skipped or repeated.
     seq -f "line %06g of the big file" 1 110000 > build/ufsroot/big.txt
     rm -f ufs.img
-    makefs -t ffs -o version=2 -s 32m ufs.img build/ufsroot > /dev/null
+    # Room to write in: 64 MiB, and at least 8192 inodes free (makefs would
+    # otherwise size the inode table to exactly what is on the image).
+    makefs -t ffs -o version=2 -s 64m -f 8192 ufs.img build/ufsroot > /dev/null
 }
 
 qemu(){

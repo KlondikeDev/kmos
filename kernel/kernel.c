@@ -86,9 +86,8 @@ void kernel_main(void) {
     fat32_init();
     vfs_mount("/", &fat32_vfs_ops);
     // A second IDE disk (primary slave) holding UFS2 appears at /ufs.
-    if (identify_drive(0xB0) && ufs2_mount(1)) {
-        vfs_mount("/ufs", &ufs2_vfs_ops);
-    }
+    void* ufs = identify_drive(0xB0) ? ufs2_mount(1) : NULL;
+    if (ufs) vfs_mount_with("/ufs", &ufs2_vfs_ops, ufs);
     vfs_mount("/dev", &devfs_vfs_ops);
     vfs_mount("/proc", &procfs_vfs_ops);
     vfs_mount("/tmp", &tmpfs_vfs_ops);

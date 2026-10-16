@@ -80,6 +80,10 @@ static const mount_t* resolve_mount(const char* path, const char** rel) {
 }
 
 bool vfs_mount(const char* point, const vfs_ops_t* ops) {
+    return vfs_mount_with(point, ops, NULL);
+}
+
+bool vfs_mount_with(const char* point, const vfs_ops_t* ops, void* priv) {
     if (mount_count == VFS_MAX_MOUNTS) return false;
     mount_t* m = &mounts[mount_count];
     // Mounting happens before any process has a cwd worth trusting, so the
@@ -88,6 +92,7 @@ bool vfs_mount(const char* point, const vfs_ops_t* ops) {
     for (; point[i] && i < VFS_PATH_MAX - 1; i++) m->point[i] = point[i];
     m->point[i] = '\0';
     m->ops = ops;
+    m->priv = priv;
     m->index = mount_count;
     mount_count++;
     klog(LOG_OKAY, "vfs: mounted %s at %s\n", ops->type, m->point);
@@ -100,6 +105,7 @@ static i32 walk(const char* abs, vnode_t* out) {
     const mount_t* m = resolve_mount(abs, &rel);
     if (!m) return -ENOENT;
 
+    out->mnt = m;
     i32 r = m->ops->root(out);
     if (r < 0) return r;
     out->mnt = m;
@@ -212,6 +218,7 @@ i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out) 
     const mount_t* m;
     while (mount_child(abs, synthetic, name_out, &m)) {
         if (synthetic == index) {
+            out->mnt = m;
             r = m->ops->root(out);
             if (r < 0) return r;
             out->mnt = m;

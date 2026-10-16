@@ -478,7 +478,12 @@ static void test_writes(void) {
     CHECK("the clock is set (after 2025)", time(NULL) > 1735689600L);
 
     CHECK("names longer than 8.3 are refused", open("/a-very-long-name.text", O_WRONLY | O_CREAT) < 0);
-    CHECK("UFS2 is read-only", open("/ufs/new.txt", O_WRONLY | O_CREAT) < 0 && errno == EROFS);
+    int u = open("/ufs/ktest-ufs2-write.txt", O_RDWR | O_CREAT | O_TRUNC);
+    char ub[16] = "";
+    int uok = u >= 0 && write(u, "ufs2 writes", 11) == 11 && lseek(u, 0, SEEK_SET) == 0 &&
+              read(u, ub, sizeof(ub)) == 11 && memcmp(ub, "ufs2 writes", 11) == 0;
+    if (u >= 0) close(u);
+    CHECK("UFS2 takes long names and writes", uok && unlink("/ufs/ktest-ufs2-write.txt") == 0);
 }
 
 // Run lots of process and pipe churn; afterwards every physical page and

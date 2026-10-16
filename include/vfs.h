@@ -66,9 +66,13 @@ typedef struct mount {
     char point[VFS_PATH_MAX];
     const vfs_ops_t* ops;
     u32 index;                 // reported as st_dev
+    void* priv;                // the driver's state for this mount
 } mount_t;
 
 bool vfs_mount(const char* point, const vfs_ops_t* ops);
+// The same, for a driver that can mount several filesystems at once: priv
+// is handed back as node->mnt->priv (already set when root() is called).
+bool vfs_mount_with(const char* point, const vfs_ops_t* ops, void* priv);
 const mount_t* vfs_mount_at(u32 i);      // the i-th mount, NULL past the end
 
 // Normalise `path` against the current process's working directory.
