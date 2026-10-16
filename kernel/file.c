@@ -13,6 +13,8 @@
 #include <memory.h>
 #include <memset.h>
 #include <klibc/string.h>
+#include <devfs.h>
+#include <tty.h>
 
 // ---------------------------------------------------------------------------
 // Open vnodes
@@ -31,6 +33,8 @@ typedef struct open_vnode {
 } open_vnode_t;
 
 static open_vnode_t* open_vnodes;
+
+int file_poll_wait;
 
 static u64 vnode_key(const vnode_t* n) {
     return n->aux ? n->aux : n->id;
@@ -73,6 +77,11 @@ static void vnode_release(vnode_t* n) {
 // ---------------------------------------------------------------------------
 
 static i64 vnode_file_read(file_t* f, void* buf, u64 len) {
+    if ((f->flags & O_NONBLOCK) && devfs_is_tty(f->node)) {
+        // The terminal is the one device here that can block.
+        i64 n = tty_read(buf, len, true);
+        return n;
+    }
     i64 n = vfs_read(f->node, f->pos, buf, len);
     if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
     return n;
@@ -90,10 +99,16 @@ static void vnode_file_release(file_t* f) {
     if (f->node) vnode_release(f->node);
 }
 
+static u32 vnode_file_poll(file_t* f) {
+    if (devfs_is_tty(f->node)) return (tty_readable() ? POLLIN : 0) | POLLOUT;
+    return POLLIN | POLLOUT;           // disks and the other devices never block
+}
+
 static const file_ops_t vnode_file_ops = {
     .read = vnode_file_read,
     .write = vnode_file_write,
     .release = vnode_file_release,
+    .poll = vnode_file_poll,
 };
 
 static file_t* file_alloc(const file_ops_t* ops, u32 flags) {
@@ -159,6 +174,10 @@ i64 file_read(file_t* f, void* buf, u64 len) {
     if ((f->flags & O_ACCMODE) == O_WRONLY) return -EBADF;
     if (!f->ops->read) return -EINVAL;
     return f->ops->read(f, buf, len);
+}
+
+u32 file_poll(file_t* f) {
+    return f->ops->poll ? f->ops->poll(f) : (POLLIN | POLLOUT);
 }
 
 i64 file_write(file_t* f, const void* buf, u64 len) {
@@ -235,10 +254,24 @@ static void pipe_release(file_t* f) {
     if (p->readers == 0 && p->writers == 0) kfree(p);
 }
 
+static u32 pipe_poll(file_t* f) {
+    pipe_t* p = f->priv;
+    u32 ev = 0;
+    if ((f->flags & O_ACCMODE) == O_RDONLY) {
+        if (p->count) ev |= POLLIN;
+        if (p->writers == 0) ev |= POLLHUP;
+    } else {
+        if (p->readers == 0) ev |= POLLERR;
+        else if (p->count < PIPE_BUF_SIZE) ev |= POLLOUT;
+    }
+    return ev;
+}
+
 static const file_ops_t pipe_ops = {
     .read = pipe_read,
     .write = pipe_write,
     .release = pipe_release,
+    .poll = pipe_poll,
 };
 
 i32 pipe_create(file_t** read_end, file_t** write_end) {

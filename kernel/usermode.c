@@ -25,6 +25,7 @@
 #include <errno.h>
 #include <klibc/string.h>
 #include <mman.h>
+#include <msr.h>
 
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PAGE_MASK     (~(USER_PAGE_SIZE - 1))
@@ -142,82 +143,149 @@ bool copy_string_from_user(char* dst, u64 src, u64 max) {
 // Loading images
 // ---------------------------------------------------------------------------
 
-// Map the stack and lay out argv and envp at the top of it, System V style:
+// Auxiliary vector entries (the System V / Linux numbering).
+#define AT_NULL     0
+#define AT_PHDR     3
+#define AT_PHENT    4
+#define AT_PHNUM    5
+#define AT_PAGESZ   6
+#define AT_BASE     7
+#define AT_FLAGS    8
+#define AT_ENTRY    9
+#define AT_UID      11
+#define AT_EUID     12
+#define AT_GID      13
+#define AT_EGID     14
+#define AT_PLATFORM 15
+#define AT_HWCAP    16
+#define AT_CLKTCK   17
+#define AT_SECURE   23
+#define AT_RANDOM   25
+#define AT_EXECFN   31
+#define AUXV_COUNT  18           // pairs, AT_NULL included
+
+// Not cryptographic: the timestamp counter, stirred (splitmix64). It seeds
+// libc's stack-protector canary and the like; good enough until there is a
+// real entropy source.
+u64 weak_random(void) {
+    static u64 state;
+    u32 lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    state += ((u64)hi << 32 | lo) + 0x9E3779B97F4A7C15ULL;
+    u64 z = state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+static u64 cpu_hwcap(void) {
+    u32 a = 1, b, c, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    return d;
+}
+
+// Copy a string just below *sp; returns its user address.
+static u64 push_string(process_t* p, u64* sp, const char* str) {
+    u64 len = strlen(str) + 1;
+    *sp -= len;
+    return user_copy_to(p, *sp, str, len) ? *sp : 0;
+}
+
+// Map the stack and lay out the initial process state at its top, the
+// System V way -- which is what Linux programs read from rsp, while Kunix's
+// own crt0 just takes argc/argv/envp from rdi/rsi/rdx:
 //
-//   USER_STACK_TOP -> | the strings ...                          |
-//                     | envp[0] ... envp[envc-1], NULL           | <- envp
-//                     | argv[0] ... argv[argc-1], NULL           | <- argv, rsp
-//
-// main(argc, argv, envp) gets them in rdi/rsi/rdx from the entry frame.
-static bool setup_stack(process_t* p, const user_args_t* a, u64* sp_out,
-                        u64* argv_out, u64* envp_out) {
-    for (u64 page = USER_STACK_BOTTOM; page < USER_STACK_TOP; page += USER_PAGE_SIZE) {
+//   USER_STACK_TOP -> | strings: argv, envp, execfn, platform; 16 random bytes |
+//                     | (padding to 16 bytes)                                   |
+//                     | auxv: (type, value) pairs, ending with AT_NULL          |
+//                     | NULL, envp[envc-1] ... envp[0]                          |
+//                     | NULL, argv[argc-1] ... argv[0]                          |
+//             rsp ->  | argc                                                    |
+static bool setup_stack(process_t* p, u32 argc, const char* const* argv, u32 envc,
+                        const char* const* envp, const char* execfn,
+                        const elf_info_t* info, registers_t* frame) {
+    u64 strings = strlen(execfn) + 1 + 7 + 16 + 16;
+    for (u32 i = 0; i < argc; i++) strings += strlen(argv[i]) + 1;
+    for (u32 i = 0; i < envc; i++) strings += strlen(envp[i]) + 1;
+    u64 words = 1 + (argc + 1) + (envc + 1) + 2 * AUXV_COUNT;
+    u64 need = strings + words * 8 + 32;
+
+    u64 bottom = USER_STACK_BOTTOM;
+    while (USER_STACK_TOP - bottom < need + USER_PAGE_SIZE) bottom -= USER_PAGE_SIZE;
+    for (u64 page = bottom; page < USER_STACK_TOP; page += USER_PAGE_SIZE) {
         if (!user_map(p, page, PF_R | PF_W)) return false;
     }
 
+    u64* w = kmalloc(words * 8);
+    if (!w) return false;
+    bool ok = false;
     u64 sp = USER_STACK_TOP;
-    u64 ptrs[USER_MAX_ARGS + 1 + USER_MAX_ARGS + 1];
     u32 n = 0;
-    for (u32 i = 0; i < a->argc; i++) {
-        u64 len = strlen(a->argv[i]) + 1;
-        sp -= len;
-        if (!user_copy_to(p, sp, a->argv[i], len)) return false;
-        ptrs[n++] = sp;
-    }
-    ptrs[n++] = 0;
-    for (u32 i = 0; i < a->envc; i++) {
-        u64 len = strlen(a->envp[i]) + 1;
-        sp -= len;
-        if (!user_copy_to(p, sp, a->envp[i], len)) return false;
-        ptrs[n++] = sp;
-    }
-    ptrs[n++] = 0;
+    w[n++] = argc;
+    for (u32 i = 0; i < argc; i++) if (!(w[n++] = push_string(p, &sp, argv[i]))) goto out;
+    w[n++] = 0;
+    u64 uenvp_index = n;
+    for (u32 i = 0; i < envc; i++) if (!(w[n++] = push_string(p, &sp, envp[i]))) goto out;
+    w[n++] = 0;
+    u64 uexecfn = push_string(p, &sp, execfn);
+    u64 uplatform = push_string(p, &sp, "x86_64");
+    u64 rnd[2] = { weak_random(), weak_random() };
+    sp = (sp - 16) & ~0xFULL;
+    if (!uexecfn || !uplatform || !user_copy_to(p, sp, rnd, 16)) goto out;
+    u64 urandom = sp;
 
-    sp -= n * sizeof(u64);
-    sp &= ~0xFULL;                   // the ABI wants rsp 16-aligned at entry
-    if (!user_copy_to(p, sp, ptrs, n * sizeof(u64))) return false;
+    u64 aux[] = {
+        AT_PHDR, info ? info->phdr : 0,   AT_PHENT, sizeof(elf64_phdr_t),
+        AT_PHNUM, info ? info->phnum : 0, AT_PAGESZ, USER_PAGE_SIZE,
+        AT_BASE, 0,                       AT_FLAGS, 0,
+        AT_ENTRY, info ? info->entry : 0, AT_UID, 0,
+        AT_EUID, 0,                       AT_GID, 0,
+        AT_EGID, 0,                       AT_PLATFORM, uplatform,
+        AT_HWCAP, cpu_hwcap(),            AT_CLKTCK, 100,
+        AT_SECURE, 0,                     AT_RANDOM, urandom,
+        AT_EXECFN, uexecfn,
+        AT_NULL, 0,
+    };
+    _Static_assert(sizeof(aux) == AUXV_COUNT * 16, "AUXV_COUNT must match the vector");
+    for (u32 i = 0; i < AUXV_COUNT * 2; i++) w[n++] = aux[i];
 
-    *sp_out = sp;
-    *argv_out = sp;
-    *envp_out = sp + (a->argc + 1) * sizeof(u64);
-    return true;
+    // rsp must be 16-aligned at entry, pointing at argc.
+    sp -= n * 8;
+    sp &= ~0xFULL;
+    if (!user_copy_to(p, sp, w, n * 8)) goto out;
+
+    frame->rsp = sp;
+    frame->rdi = argc;
+    frame->rsi = sp + 8;
+    frame->rdx = sp + uenvp_index * 8;
+    ok = true;
+out:
+    kfree(w);
+    return ok;
 }
 
 // Read an executable and map it, plus a stack carrying args, into p's
 // address space (whatever p->space currently is).
-static i32 load_into(process_t* p, const char* path, const user_args_t* args,
-                     registers_t* frame) {
+static i32 load_into(process_t* p, const char* path, u32 argc, const char* const* argv,
+                     u32 envc, const char* const* envp, registers_t* frame) {
     vnode_t node;
     i32 r = vfs_lookup(path, &node);
     if (r < 0) return r;
     if (node.type != VN_REG) return -EACCES;
     if (node.size > USER_MAX_IMAGE) return -E2BIG;
 
-    u8* image = kmalloc(node.size ? node.size : 1);
-    if (!image) return -ENOMEM;
-    i64 size = vfs_read(&node, 0, image, node.size);
-    if (size < 0) {
-        kfree(image);
-        return (i32)size;
-    }
+    elf_info_t info;
+    r = elf_load(p, &node, &info);
+    if (r < 0) return r;
 
-    u64 entry, image_end, sp, uargv, uenvp;
-    bool ok = elf_load(p, image, (u64)size, &entry, &image_end);
-    kfree(image);                    // segments are copied out; the file is done
-    if (!ok) return -ENOEXEC;
-    if (!setup_stack(p, args, &sp, &uargv, &uenvp)) return -ENOMEM;
-
-    p->brk_base = p->brk = image_end;
     memset(frame, 0, sizeof(*frame));
-    frame->rip = entry;
-    frame->rsp = sp;
+    if (!setup_stack(p, argc, argv, envc, envp, path, &info, frame)) return -ENOMEM;
+    p->brk_base = p->brk = info.image_end;
+    frame->rip = info.entry;
     frame->eflags = 0x202;
     // execve hands this frame straight to iretq, so it must be complete.
     frame->cs = GDT_USER_CS_RPL3;
     frame->ss = GDT_USER_DS_RPL3;
-    frame->rdi = args->argc;
-    frame->rsi = uargv;
-    frame->rdx = uenvp;
     return 0;
 }
 
@@ -230,15 +298,14 @@ static void set_name(process_t* p, const char* path) {
 }
 
 i32 usermode_spawn(const char* path, const user_args_t* args, process_t* parent) {
-    user_args_t defaults = { .argc = 1, .argv = { path }, .envc = 0 };
-    if (!args || args->argc == 0) args = &defaults;
-
     process_t* p = proc_alloc(path, parent);
     if (!p) return -ENOMEM;
     set_name(p, path);
 
     registers_t frame;
-    i32 r = load_into(p, path, args, &frame);
+    i32 r = args && args->argc
+        ? load_into(p, path, args->argc, args->argv, args->envc, args->envp, &frame)
+        : load_into(p, path, 1, &path, 0, NULL, &frame);
     if (r < 0) {
         proc_free(p);
         return r;
@@ -263,7 +330,7 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     p->user_pages = 0;
 
     registers_t frame;
-    i32 r = load_into(p, path, args, &frame);
+    i32 r = load_into(p, path, args->argc, args->argv, args->envc, args->envp, &frame);
     if (r < 0) {
         vmm_destroy_space(new_space);
         p->space = old_space;
@@ -283,6 +350,13 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
         if (p->sig_handler[s] != SIG_IGN) p->sig_handler[s] = SIG_DFL;
     }
     p->sig_restorer = 0;
+    p->sig_linux = 0;
+    for (int s = 0; s < NSIG; s++) {
+        p->sig_flags[s] = p->sig_actmask[s] = 0;
+        p->sig_restorers[s] = 0;
+    }
+    p->fs_base = 0;
+    wrmsr(MSR_FS_BASE, 0);
     proc_fpu_reset();
     *regs = frame;
     return 0;
@@ -295,17 +369,19 @@ i32 usermode_spawn_blob(const char* name, const char* start, const char* end) {
     process_t* p = proc_alloc(name, NULL);
     if (!p) return -ENOMEM;
 
-    u64 sp, uargv, uenvp;
-    user_args_t args = { .argc = 1, .argv = { name }, .envc = 0 };
+    registers_t frame;
+    memset(&frame, 0, sizeof(frame));
     // Read-only and executable: no rewriting its own text.
     if (!user_map(p, USER_CODE_BASE, PF_R | PF_X) ||
         !user_copy_to(p, USER_CODE_BASE, start, len) ||
-        !setup_stack(p, &args, &sp, &uargv, &uenvp)) {
+        !setup_stack(p, 1, &name, 0, NULL, name, NULL, &frame)) {
         proc_free(p);
         return -ENOMEM;
     }
     p->brk_base = p->brk = USER_CODE_BASE + USER_PAGE_SIZE;
-    proc_start(p, USER_CODE_BASE, sp, 1, uargv, uenvp);
+    frame.rip = USER_CODE_BASE;
+    frame.eflags = 0x202;
+    proc_start_frame(p, &frame);
     return p->pid;
 }
 
@@ -360,6 +436,8 @@ void usermode_fault(const char* reason, registers_t* regs) {
         p->sig_mask &= ~(1u << sig);
     }
 
+    kserialoutf("fault: %s (pid %u): %s rip=0x%lx rsp=0x%lx err=0x%lx cr2=0x%lx\n",
+                p->name, (u32)p->pid, reason, regs->rip, regs->rsp, regs->err_code, cr2);
     if (p->sig_handler[sig] == SIG_DFL) {
         terminal_printf(RED, BLACK, "\n%s (pid %u): %s\n", p->name, (u32)p->pid, reason);
         terminal_printf(SILVER, BLACK,

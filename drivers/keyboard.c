@@ -13,6 +13,7 @@
 
 volatile bool shiftDown = false;
 volatile bool ctrlDown = false;
+volatile bool altDown = false;
 volatile uint32_t prompt_x = 0;
 
 // I will admit, these arrays were copied from somewhere. I can't remember where.
@@ -20,10 +21,10 @@ volatile uint32_t prompt_x = 0;
 
 char keymap[128] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', /* 9 */
-    '9', '0', '-', '=', '\b',   /* Backspace */
+    '9', '0', '-', '=', 0x7F,   /* Backspace: DEL, as Linux's console sends */
     '\t',           /* Tab */
     'q', 'w', 'e', 'r', /* 19 */
-    't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',       /* Enter key */
+    't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\r',       /* Enter: CR (ICRNL makes it \n) */
     0,          /* 29   - Control */
     'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';',   /* 39 */
     '\'', '`',   0,     /* Left shift */
@@ -59,10 +60,10 @@ char keymap[128] = {
 
 char keymap_shift[128] = {
     0, 27, '!', '@', '#', '$', '%', '^', '&', '*', /* 9 */
-    '(', ')', '_', '+', '\b', /* Backspace */
+    '(', ')', '_', '+', 0x7F, /* Backspace */
     '\t', /* Tab */
     'Q', 'W', 'E', 'R', /* 19 */
-    'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', /* Enter key */
+    'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r', /* Enter key */
     0, /* 29 - Control */
     'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', /* 39 */
     '"', '~', 0, /* Left shift */
@@ -115,13 +116,35 @@ void read_key() {
 
     // Extended keys (arrows, right-ctrl, keypad-/, ...) arrive as 0xE0 + code,
     // some with fake-shift bytes (0xE0 0x2A / 0xE0 0xAA) that must not touch
-    // shiftDown. We don't use any of them, so swallow the byte after 0xE0.
+    // shiftDown. The editing keys become the escape sequences Linux's
+    // console sends (TERM=linux); the rest are swallowed.
     if (scancode == 0xE0) {
         extended = true;
         return;
     }
     if (extended) {
         extended = false;
+        const char* seq = 0;
+        switch (scancode) {
+            case 0x1D: ctrlDown = true; return;       // right Ctrl
+            case 0x9D: ctrlDown = false; return;
+            case 0x38: altDown = true; return;        // right Alt
+            case 0xB8: altDown = false; return;
+            case 0x48: seq = "\x1B[A"; break;         // up
+            case 0x50: seq = "\x1B[B"; break;         // down
+            case 0x4D: seq = "\x1B[C"; break;         // right
+            case 0x4B: seq = "\x1B[D"; break;         // left
+            case 0x47: seq = "\x1B[1~"; break;        // Home
+            case 0x4F: seq = "\x1B[4~"; break;        // End
+            case 0x52: seq = "\x1B[2~"; break;        // Insert
+            case 0x53: seq = "\x1B[3~"; break;        // Delete
+            case 0x49: seq = "\x1B[5~"; break;        // Page Up
+            case 0x51: seq = "\x1B[6~"; break;        // Page Down
+            case 0x1C: tty_input('\r'); return;       // keypad Enter
+            case 0x35: tty_input('/'); return;        // keypad /
+            default: return;
+        }
+        while (*seq) tty_input(*seq++);
         return;
     }
 
@@ -134,6 +157,10 @@ void read_key() {
         ctrlDown = true;
     } else if (scancode == 0x9D) {              // Left Ctrl released
         ctrlDown = false;
+    } else if (scancode == 0x38) {              // Left Alt pressed
+        altDown = true;
+    } else if (scancode == 0xB8) {              // Left Alt released
+        altDown = false;
     } else if (scancode < 0x80) {
         char key;
         if (shiftDown){
@@ -150,7 +177,15 @@ void read_key() {
         if (ctrlDown) {
             if (key >= 'a' && key <= 'z') key = (char)(key - 'a' + 1);
             else if (key >= 'A' && key <= 'Z') key = (char)(key - 'A' + 1);
+            else if (key == '[') key = 0x1B;            // ^[ = ESC
+            else if (key == '\\') key = 0x1C;           // ^\ = SIGQUIT
+            else if (key == ']') key = 0x1D;
+            else if (key == ' ' || key == '@' || key == '2') key = 0x00;
+            else if (key == '/' || key == '_' || key == '-') key = 0x1F;
         }
+
+        // Alt+key is "meta": ESC, then the key -- as terminals send it.
+        if (altDown) tty_input(0x1B);
 
         // Editing, echo and line handling all belong to the terminal now.
         tty_input(key);

@@ -47,11 +47,17 @@ typedef struct {
     i32 pid;
     i32 ppid;
     i32 pgid;         // process group, for job control and terminal signals
+    i32 sid;          // session
+    u32 umask;
     proc_state_t state;
     wait_reason_t wait;
     i32 wait_pid;
     const void* wait_obj;
     u32 wake_tick;
+    bool wake_timed;  // blocked on an object, but only until wake_tick
+    bool alarm_set;   // SIGALRM due at alarm_tick, then every alarm_interval
+    u32 alarm_tick;
+    u32 alarm_interval;
     i64 exit_status;  // POSIX wait() encoding, once a zombie
     i32 stop_sig;     // signal that stopped it, while PROC_STOPPED
     bool stop_unreported;  // waitpid(WUNTRACED) has not seen this stop yet
@@ -66,6 +72,8 @@ typedef struct {
     u64 brk_base;     // first byte past the loaded image
     u64 brk;          // current program break (sbrk)
 
+    u64 fs_base;      // FS segment base (thread pointer), set by arch_prctl
+
     vma_t vmas[MAX_VMAS];    // mmap regions, sorted by address
     u32 nvmas;
 
@@ -76,8 +84,16 @@ typedef struct {
     u32 sig_pending;  // bit n set: signal n waiting for delivery
     i64 syscall_nr;   // number of the syscall in progress, for restarts
     u32 sig_mask;     // bit n set: signal n blocked
+    u32 sig_saved_mask;      // sigsuspend/ppoll: the mask to put back...
+    bool sig_mask_saved;     // ...once the call (and any handler) is done
     u64 sig_handler[NSIG];   // SIG_DFL, SIG_IGN, or a ring 3 address
     u64 sig_restorer;        // ring 3 trampoline that calls sigreturn
+    // Per-handler details for handlers installed through Prime Meridian
+    // (rt_sigaction): they get a Linux signal frame instead of ours.
+    u32 sig_linux;           // bit n: handler n is a Linux one
+    u32 sig_flags[NSIG];     // its SA_* flags (Linux values)
+    u32 sig_actmask[NSIG];   // also blocked while it runs (our bit layout)
+    u64 sig_restorers[NSIG]; // its sa_restorer
 
     char name[PROC_NAME_LEN];
 } process_t;
@@ -135,6 +151,9 @@ i32 proc_wait(i32 pid, i64* status, u32 options);
 void schedule(void);
 void sched_block(wait_reason_t why);
 void sched_block_on(const void* obj);   // until sched_wake_obj(obj)
+// The same, but give up at tick `deadline` (absolute). True if woken
+// before then (by the object or a signal), false on timeout.
+bool sched_block_on_until(const void* obj, u32 deadline);
 void sched_wake_obj(const void* obj);
 void sched_sleep(u32 ticks);
 void sched_tick(void);             // from the timer IRQ

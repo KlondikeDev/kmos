@@ -31,6 +31,7 @@
 #include <klog.h>
 #include <klibc/string.h>
 #include <mman.h>
+#include <ksys.h>
 
 #define PAGE_MASK (~(USER_PAGE_SIZE - 1))
 
@@ -38,7 +39,7 @@ static process_t* me(void) {
     return proc_current();
 }
 
-static i32 copy_path(char* dst, u64 src) {
+i32 copy_path(char* dst, u64 src) {
     if (!src) return -EFAULT;
     if (!copy_string_from_user(dst, src, VFS_PATH_MAX)) {
         // Either unmapped or too long; tell them apart for a better errno.
@@ -74,21 +75,21 @@ static i32 copy_args(u64 argv, u64 envp, user_args_t* a) {
 
 // ---- files ----
 
-static i64 sys_read(u64 fd, u64 buf, u64 len) {
+i64 sys_read(u64 fd, u64 buf, u64 len) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!user_range_ok(buf, len, true)) return -EFAULT;
     return file_read(f, (void*)buf, len);
 }
 
-static i64 sys_write(u64 fd, u64 buf, u64 len) {
+i64 sys_write(u64 fd, u64 buf, u64 len) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!user_range_ok(buf, len, false)) return -EFAULT;
     return file_write(f, (const void*)buf, len);
 }
 
-static i64 sys_open(u64 path, u64 flags, u64 mode) {
+i64 sys_open(u64 path, u64 flags, u64 mode) {
     (void)mode;                                      // no permissions yet
     char kpath[VFS_PATH_MAX];
     i32 r = copy_path(kpath, path);
@@ -105,7 +106,7 @@ static i64 sys_open(u64 path, u64 flags, u64 mode) {
     return fd;
 }
 
-static i64 sys_lseek(u64 fd, i64 off, u64 whence) {
+i64 sys_lseek(u64 fd, i64 off, u64 whence) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (f->node->type == VN_FIFO || f->node->type == VN_CHR) return -ESPIPE;
@@ -121,7 +122,7 @@ static i64 sys_lseek(u64 fd, i64 off, u64 whence) {
     return (i64)f->pos;
 }
 
-static void fill_stat(const vnode_t* n, kstat_t* st) {
+void fill_stat(const vnode_t* n, kstat_t* st) {
     memset(st, 0, sizeof(*st));
     st->st_dev = n->mnt ? n->mnt->index : 0;
     st->st_ino = n->id;
@@ -155,7 +156,7 @@ static i64 sys_stat(u64 path, u64 out) {
     return 0;
 }
 
-static i64 sys_dup2(u64 oldfd, u64 newfd) {
+i64 sys_dup2(u64 oldfd, u64 newfd) {
     process_t* p = me();
     file_t* f = fd_get(p, (i32)oldfd);
     if (!f) return -EBADF;
@@ -168,7 +169,7 @@ static i64 sys_dup2(u64 oldfd, u64 newfd) {
     return (i64)newfd;
 }
 
-static i64 sys_dup(u64 fd) {
+i64 sys_dup(u64 fd) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     i32 nfd = fd_install(me(), f, 0);
@@ -176,7 +177,7 @@ static i64 sys_dup(u64 fd) {
     return nfd;
 }
 
-static i64 sys_pipe(u64 out) {
+i64 sys_pipe(u64 out) {
     if (!user_range_ok(out, 2 * sizeof(i32), true)) return -EFAULT;
     file_t *r, *w;
     i32 e = pipe_create(&r, &w);
@@ -210,7 +211,7 @@ static i64 sys_readdir(u64 fd, u64 out) {
     return r;
 }
 
-static i64 sys_path_op(u64 path, u64 op) {
+i64 sys_path_op(u64 path, u64 op) {
     char kpath[VFS_PATH_MAX];
     i32 r = copy_path(kpath, path);
     if (r < 0) return r;
@@ -223,7 +224,7 @@ static i64 sys_path_op(u64 path, u64 op) {
     }
 }
 
-static i64 sys_ftruncate(u64 fd, i64 len) {
+i64 sys_ftruncate(u64 fd, i64 len) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (len < 0) return -EINVAL;
@@ -231,14 +232,14 @@ static i64 sys_ftruncate(u64 fd, i64 len) {
     return vfs_truncate(f->node, (u64)len);
 }
 
-static i64 sys_chdir(u64 path) {
+i64 sys_chdir(u64 path) {
     char kpath[VFS_PATH_MAX];
     i32 r = copy_path(kpath, path);
     if (r < 0) return r;
     return vfs_chdir(kpath);
 }
 
-static i64 sys_getcwd(u64 buf, u64 len) {
+i64 sys_getcwd(u64 buf, u64 len) {
     const char* cwd = me()->cwd;
     u64 n = strlen(cwd) + 1;
     if (n > len) return -ERANGE;
@@ -287,7 +288,7 @@ static i64 sys_spawn(u64 path, u64 argv, u64 envp) {
     return r;
 }
 
-static i64 sys_execve(registers_t* regs, u64 path, u64 argv, u64 envp) {
+i64 sys_execve(registers_t* regs, u64 path, u64 argv, u64 envp) {
     char kpath[VFS_PATH_MAX];
     i32 r = copy_path(kpath, path);
     if (r < 0) return r;
@@ -300,7 +301,7 @@ static i64 sys_execve(registers_t* regs, u64 path, u64 argv, u64 envp) {
     return r;
 }
 
-static i64 sys_waitpid(u64 pid, u64 status_ptr, u64 options) {
+i64 sys_waitpid(u64 pid, u64 status_ptr, u64 options) {
     if (status_ptr && !user_range_ok(status_ptr, sizeof(i32), true)) return -EFAULT;
     i64 status = 0;
     i32 r = proc_wait((i32)pid, &status, (u32)options);
@@ -308,7 +309,7 @@ static i64 sys_waitpid(u64 pid, u64 status_ptr, u64 options) {
     return r;
 }
 
-static i64 sys_sbrk(i64 increment) {
+i64 sys_sbrk(i64 increment) {
     process_t* p = me();
     u64 old = p->brk;
     if (increment == 0) return (i64)old;
@@ -346,7 +347,7 @@ static i64 sys_procinfo(u64 index, u64 out) {
     return 1;
 }
 
-static i64 sys_kill(i64 pid, u64 sig) {
+i64 sys_kill(i64 pid, u64 sig) {
     if (sig >= NSIG) return -EINVAL;
     if (pid < -1) {
         i32 n = sig ? signal_send_group((i32)-pid, (i32)sig) : 1;
@@ -384,7 +385,7 @@ static i64 sys_sigprocmask(u64 how, u64 set) {
     return old;
 }
 
-static i64 sys_setpgid(i64 pid, i64 pgid) {
+i64 sys_setpgid(i64 pid, i64 pgid) {
     process_t* p = pid == 0 ? me() : proc_by_pid((i32)pid);
     if (!p || p->state == PROC_ZOMBIE) return -ESRCH;
     // Only yourself or your own children.
@@ -394,7 +395,7 @@ static i64 sys_setpgid(i64 pid, i64 pgid) {
     return 0;
 }
 
-static i64 sys_getpgid(i64 pid) {
+i64 sys_getpgid(i64 pid) {
     process_t* p = pid == 0 ? me() : proc_by_pid((i32)pid);
     if (!p) return -ESRCH;
     return p->pgid;
@@ -431,7 +432,7 @@ static i64 sys_meminfo(u64 out) {
     return 0;
 }
 
-static i64 sys_rename(u64 oldpath, u64 newpath) {
+i64 sys_rename(u64 oldpath, u64 newpath) {
     char from[VFS_PATH_MAX], to[VFS_PATH_MAX];
     i32 r = copy_path(from, oldpath);
     if (r < 0) return r;

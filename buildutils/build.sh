@@ -41,8 +41,12 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/tty.c -o tty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/rtc.c -o rtc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/mman.c -o mman.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/vt.c -o vt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/syscall.c -o pm_syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/signal.c -o pm_signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/devfs.c -o devfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-as arch/x86/usermode.s -o usermode_asm.o
+    x86_64-elf-as compat/primemeridian/entry.s -o pm_entry.o
     x86_64-elf-as arch/x86/switch.s -o switch.o
     x86_64-elf-as arch/x86/interrupts.s -o interrupts.o
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/kernel.c -o kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
@@ -50,7 +54,7 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
@@ -75,6 +79,27 @@ userland(){
         x86_64-elf-gcc -T user/user.ld -o "build/user/$name.elf" -ffreestanding -nostdlib -static -no-pie build/user/crt0.o "build/user/$name.o" build/user/libk.o -lgcc
         mcopy -o -i disk.img "build/user/$name.elf" "::/BIN/$(echo "$name" | tr a-z A-Z).ELF"
     done
+}
+
+# Prime Meridian: Linux programs, built static against musl on the host
+# (buildutils/pm-toolchain.sh sets that up). They go on the UFS2 disk, which
+# has room and long names: /ufs/bin/<name>. Skipped if musl is not built.
+primemeridian(){
+    PM_PREFIX=${PM_PREFIX:-$HOME/opt/primemeridian}
+    MUSL_GCC=$PM_PREFIX/musl/bin/musl-gcc
+    rm -rf build/pm
+    mkdir -p build/pm
+    if [ ! -x "$MUSL_GCC" ]; then
+        info "musl not built; skipping Linux programs (buildutils/pm-toolchain.sh musl)"
+        return
+    fi
+    info "Building Prime Meridian test programs..."
+    for src in compat/primemeridian/tests/*.c; do
+        "$MUSL_GCC" -static -O2 -Wall -Wextra -o "build/pm/$(basename "$src" .c)" "$src"
+    done
+    # Ported software (zsh, busybox, ...), if it has been built.
+    [ -d "$PM_PREFIX/bin" ] && cp "$PM_PREFIX"/bin/* build/pm/ 2>/dev/null
+    true
 }
 
 setup(){
@@ -121,6 +146,7 @@ ufs(){
     rm -rf build/ufsroot
     mkdir -p build/ufsroot/bin build/ufsroot/docs/deeper
     cp build/user/*.elf build/ufsroot/bin/
+    cp build/pm/* build/ufsroot/bin/ 2>/dev/null || true
     printf 'Hello from UFS2!\nThis file lives on the second disk.\n' > build/ufsroot/hello.txt
     printf 'Nested three levels down.\n' > build/ufsroot/docs/deeper/nested.txt
     printf 'A file whose name is far too long for FAT 8.3.\n' > build/ufsroot/docs/a-rather-long-file-name.txt
@@ -150,6 +176,7 @@ main(){
     build
     link
     userland
+    primemeridian
     ufs
     setup
     cleaning

@@ -33,6 +33,8 @@
 #include <serial.h>
 #include <pit.h>
 #include <io.h>
+#include <msr.h>
+#include <primemeridian.h>
 
 static process_t procs[MAX_PROCS];
 static process_t* current;
@@ -108,6 +110,8 @@ process_t* proc_alloc(const char* name, process_t* parent) {
     // Children of the kernel task start their own process group; everyone
     // else joins their parent's until they ask otherwise.
     p->pgid = parent->pid == 0 ? p->pid : parent->pgid;
+    p->sid = parent->pid == 0 ? p->pid : parent->sid;
+    p->umask = parent->pid == 0 ? 022 : parent->umask;
     p->state = PROC_EMBRYO;
     p->space = space;
     p->kstack = kstack;
@@ -184,6 +188,13 @@ process_t* proc_fork(const registers_t* frame) {
     // A forked child runs the same code, so it keeps the handlers too.
     for (int s = 0; s < NSIG; s++) child->sig_handler[s] = parent->sig_handler[s];
     child->sig_restorer = parent->sig_restorer;
+    child->fs_base = parent->fs_base;
+    child->sig_linux = parent->sig_linux;
+    for (int s = 0; s < NSIG; s++) {
+        child->sig_flags[s] = parent->sig_flags[s];
+        child->sig_actmask[s] = parent->sig_actmask[s];
+        child->sig_restorers[s] = parent->sig_restorers[s];
+    }
     // The parent's FPU registers are live in the CPU, not in its save area.
     __asm__ volatile("fxsave %0" : "=m"(child->fpu));
 
@@ -221,7 +232,12 @@ void schedule(void) {
     __asm__ volatile("fxrstor %0" :: "m"(next->fpu));
 
     // Traps from ring 3 must land on the incoming process's kernel stack.
-    if (next->kstack) tss_set_rsp0(next->kstack_top);
+    if (next->kstack) {
+        tss_set_rsp0(next->kstack_top);
+        pm_set_kernel_stack(next->kstack_top);
+    }
+    // The thread pointer: user code reads %fs-relative TLS through it.
+    wrmsr(MSR_FS_BASE, next->fs_base);
     vmm_switch(next->space);
     switch_context(&prev->saved_rsp, next->saved_rsp);
     // ...and some time later, prev is picked again and resumes here.
@@ -243,10 +259,21 @@ void sched_block_on(const void* obj) {
     sched_block(WAIT_OBJECT);
 }
 
+bool sched_block_on_until(const void* obj, u32 deadline) {
+    if ((i32)(ticks - deadline) >= 0) return false;
+    current->wake_tick = deadline;
+    current->wake_timed = true;
+    sched_block_on(obj);
+    current->wake_timed = false;
+    return (i32)(ticks - deadline) < 0;
+}
+
 void sched_wake_obj(const void* obj) {
     for (int i = 1; i < MAX_PROCS; i++) {
+        // poll() and select() sleep on file_poll_wait: any change might be
+        // the one they are waiting for.
         if (procs[i].state == PROC_BLOCKED && procs[i].wait == WAIT_OBJECT &&
-            procs[i].wait_obj == obj) {
+            (procs[i].wait_obj == obj || procs[i].wait_obj == &file_poll_wait)) {
             procs[i].state = PROC_READY;
         }
     }
@@ -271,7 +298,10 @@ void proc_stop_self(i32 sig) {
     current->stop_sig = sig;
     current->stop_unreported = true;
     kserialoutf("proc: %u (%s) stopped by signal %u\n", (u32)current->pid, current->name, (u32)sig);
-    notify_parent(current);
+    // SA_NOCLDSTOP (0x1): the parent asked not to hear about stops.
+    process_t* parent = proc_by_pid(current->ppid);
+    if (!parent || !(parent->sig_flags[SIGCHLD] & 0x1)) notify_parent(current);
+    else if (parent->state == PROC_BLOCKED && parent->wait == WAIT_CHILD) parent->state = PROC_READY;
     schedule();                      // parked until proc_continue
 }
 
@@ -293,9 +323,15 @@ void sched_sleep(u32 n) {
 void sched_tick(void) {
     for (int i = 1; i < MAX_PROCS; i++) {
         process_t* p = &procs[i];
-        if (p->state == PROC_BLOCKED && p->wait == WAIT_SLEEP &&
+        if (p->state == PROC_BLOCKED && (p->wait == WAIT_SLEEP || p->wake_timed) &&
             (i32)(ticks - p->wake_tick) >= 0) {
             p->state = PROC_READY;
+        }
+        if (p->alarm_set && p->state != PROC_UNUSED && p->state != PROC_ZOMBIE &&
+            (i32)(ticks - p->alarm_tick) >= 0) {
+            if (p->alarm_interval) p->alarm_tick += p->alarm_interval;
+            else p->alarm_set = false;
+            signal_send(p, SIGALRM);
         }
     }
     // The kernel task gives way immediately; everyone else gets a quantum.

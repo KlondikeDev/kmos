@@ -8,6 +8,7 @@
 
 #include <types.h>
 #include <proc.h>
+#include <vfs.h>
 
 // ELF64 on-disk structures, as laid out by the System V ABI. Only the parts a
 // static executable loader needs are here: the file header and the program
@@ -62,15 +63,25 @@ _Static_assert(sizeof(elf64_phdr_t) == 56, "elf64_phdr_t must be 56 bytes");
 #define ET_EXEC   2
 #define EM_X86_64 62
 
-#define PT_NULL 0
-#define PT_LOAD 1
+#define PT_NULL   0
+#define PT_LOAD   1
+#define PT_INTERP 3
+#define PT_PHDR   6
 
 #define PF_X 0x1
 #define PF_W 0x2
 #define PF_R 0x4
 
-// Validate an in-memory ELF image and map its PT_LOAD segments into p's
-// address space. On success stores the entry point and the page-aligned end
-// of the image (where the heap starts) and returns true. On failure logs why
-// and returns false; whatever was mapped is freed along with p.
-bool elf_load(process_t* p, const u8* image, u64 size, u64* entry_out, u64* image_end_out);
+// What the loader learned, for the entry frame and the auxiliary vector.
+typedef struct {
+    u64 entry;
+    u64 image_end;   // page-aligned end of the image: where the heap starts
+    u64 phdr;        // where the program headers are, in the loaded image
+    u64 phnum;
+} elf_info_t;
+
+// Validate an ELF file and map its PT_LOAD segments into p's address space,
+// reading them straight from the file. Returns 0, or -ENOEXEC (logged) for
+// anything we cannot run, -ENOMEM, or a read error; whatever was mapped is
+// freed along with p's address space.
+i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out);

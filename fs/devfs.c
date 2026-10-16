@@ -66,7 +66,7 @@ static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t*
 static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
     (void)off;
     switch (node->id) {
-        case DEV_TTY:  return tty_read(buf, len);
+        case DEV_TTY:  return tty_read(buf, len, false);
         case DEV_NULL:
         case DEV_SERIAL: return 0;
         case DEV_ZERO:

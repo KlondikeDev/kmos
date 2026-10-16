@@ -46,9 +46,9 @@
 
 // Hard caps, so a hostile or broken program cannot eat all of memory.
 #define USER_MAX_PAGES    32768            // per process: 128 MiB
-#define USER_MAX_IMAGE    (1 * MB)         // largest executable we will read
-#define USER_MAX_ARGS     32               // each of argv and envp
-#define USER_MAX_ARGBYTES 4096             // all their strings together
+#define USER_MAX_IMAGE    (64 * MB)        // largest executable we will run
+#define USER_MAX_ARGS     256              // each of argv and envp
+#define USER_MAX_ARGBYTES (64 * KB)        // all their strings together
 
 #define SYSCALL_VECTOR 0x80
 
@@ -86,6 +86,9 @@ bool user_grow_stack(u64 addr);
 // Copy a NUL-terminated string out of the current address space, checking
 // every byte's page. False if it is unmapped or longer than max.
 bool copy_string_from_user(char* dst, u64 src, u64 max);
+
+// Not cryptographic: TSC-seeded splitmix64, for AT_RANDOM and getrandom.
+u64 weak_random(void);
 
 // ---- starting programs ----
 

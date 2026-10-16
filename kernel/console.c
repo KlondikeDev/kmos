@@ -14,6 +14,7 @@
 #include <memset.h>
 #include <io.h>
 #include <limine.h>
+#include <vt.h>
 
 extern volatile struct limine_framebuffer_request fb_request;
 
@@ -147,6 +148,7 @@ void draw_char(uint32_t x,uint32_t y, unsigned char c,uint32_t fg_color,uint32_t
 }
 
 void terminal_putchar(unsigned char c) {
+    vt_hide_cursor();                // the VT's cursor may be drawn on this cell
     if (c == '\n') {
         cursor_x = 0;
         cursor_y++;
@@ -367,4 +369,46 @@ void terminal_flush(void) {
     dirty_top = UINT32_MAX;
     dirty_bottom = 0;
     irq_restore(irq);
+}
+
+// ---- cell-level helpers for the VT emulator (drivers/vt.c) ----
+
+// Copy a block of character cells, as memmove would: the source and
+// destination may overlap.
+void console_move_cells(uint32_t dst_col, uint32_t dst_row, uint32_t src_col, uint32_t src_row,
+                        uint32_t cols, uint32_t rows) {
+    if (!cols || !rows) return;
+    uint32_t bpp = fb_bpp / 8;
+    uint32_t bytes = cols * FONT_WIDTH * bpp;
+    bool upward = dst_row < src_row || (dst_row == src_row && dst_col <= src_col);
+    for (uint32_t i = 0; i < rows * FONT_HEIGHT; i++) {
+        uint32_t line = upward ? i : rows * FONT_HEIGHT - 1 - i;
+        uint8_t* d = shadow + (dst_row * FONT_HEIGHT + line) * fb_pitch + dst_col * FONT_WIDTH * bpp;
+        uint8_t* s = shadow + (src_row * FONT_HEIGHT + line) * fb_pitch + src_col * FONT_WIDTH * bpp;
+        if (d < s) for (uint32_t b = 0; b < bytes; b++) d[b] = s[b];
+        else       for (uint32_t b = bytes; b-- > 0; ) d[b] = s[b];
+    }
+    mark_dirty(dst_row * FONT_HEIGHT);
+    mark_dirty((dst_row + rows - 1) * FONT_HEIGHT);
+}
+
+void console_fill_cells(uint32_t col, uint32_t row, uint32_t cols, uint32_t rows, uint32_t bg) {
+    for (uint32_t r = row; r < row + rows; r++) {
+        for (uint32_t c = col; c < col + cols; c++) {
+            draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ' ', bg, bg);
+        }
+    }
+}
+
+// Flip a cell's colours: the VT's cursor.
+void console_invert_cell(uint32_t col, uint32_t row) {
+    uint32_t bpp = fb_bpp / 8;
+    for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
+        uint8_t* p = shadow + (row * FONT_HEIGHT + y) * fb_pitch + col * FONT_WIDTH * bpp;
+        for (uint32_t b = 0; b < FONT_WIDTH * bpp; b++) {
+            if (bpp == 4 && b % 4 == 3) continue;          // leave alpha alone
+            p[b] = (uint8_t)~p[b];
+        }
+    }
+    mark_dirty(row * FONT_HEIGHT);
 }

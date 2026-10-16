@@ -24,6 +24,8 @@
 #include <limine.h>
 #include <memory.h>
 #include <cpuinit.h>
+#include <vt.h>
+#include <primemeridian.h>
 #include <ata.h>
 #include <fat32.h>
 #include <vfs.h>
@@ -52,6 +54,7 @@ void kernel_main(void) {
     vmm_init();
     framebuffer_init(); // Kunix, city of light!
     terminal_init();    // Kunix, city of night!
+    vt_init();
     cpu_init();
     if(faulty == true) {
         klog(LOG_WARN, "Serial port faulty or not present...\n");
@@ -64,6 +67,7 @@ void kernel_main(void) {
     // Must precede idt_init: the IDT gates reference our own kernel code
     // selector, and the TSS has to exist before anything can trap out of ring 3.
     gdt_init();
+    pm_init();          // Prime Meridian: the `syscall` instruction's MSRs
 
     // Before idt_init: that turns interrupts on, and the very first timer
     // tick goes through the scheduler.

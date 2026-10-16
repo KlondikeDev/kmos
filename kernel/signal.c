@@ -27,6 +27,7 @@
 #include <memcpy.h>
 #include <klog.h>
 #include <errno.h>
+#include <primemeridian.h>
 
 #define RED_ZONE 128
 
@@ -109,6 +110,17 @@ void signal_deliver_from(registers_t* regs, bool from_syscall) {
                 continue;
             }
             proc_exit_signal(sig);                           // does not return
+        }
+
+        // A handler installed through Prime Meridian gets a Linux frame.
+        if (p->sig_linux & (1u << sig)) {
+            if (!pm_signal_setup(p, regs, sig, handler, from_syscall)) {
+                klog(LOG_WARN, "signal: pid %u cannot take signal %u, killing it\n",
+                     (u32)p->pid, (u32)sig);
+                proc_exit_signal(SIGSEGV);
+            }
+            handler_ran = true;
+            break;
         }
 
         // Build the handler frame. If the stack is unusable the process

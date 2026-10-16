@@ -18,5 +18,7 @@ void rtc_init(void);
 
 // Seconds since 1970-01-01 00:00:00 UTC.
 u64 rtc_now(void);
+// The same, in milliseconds (4 ms resolution: the PIT tick).
+u64 rtc_now_ms(void);
 
 void rtc_to_date(u64 epoch, rtc_date_t* out);

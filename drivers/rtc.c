@@ -94,6 +94,10 @@ u64 rtc_now(void) {
     return boot_epoch + (u64)(ticks - boot_ticks) / 250;     // PIT at 250 Hz
 }
 
+u64 rtc_now_ms(void) {
+    return boot_epoch * 1000 + (u64)(ticks - boot_ticks) * 4;
+}
+
 void rtc_to_date(u64 epoch, rtc_date_t* out) {
     i64 days = (i64)(epoch / 86400);
     u32 secs = (u32)(epoch % 86400);

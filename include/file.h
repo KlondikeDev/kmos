@@ -48,7 +48,16 @@ typedef struct {
     i64 (*read)(file_t* f, void* buf, u64 len);
     i64 (*write)(file_t* f, const void* buf, u64 len);
     void (*release)(file_t* f);        // the last reference is gone
+    u32 (*poll)(file_t* f);            // POLL* bits ready now; NULL = always ready
 } file_ops_t;
+
+// poll() events (Linux's values).
+#define POLLIN   0x001
+#define POLLPRI  0x002
+#define POLLOUT  0x004
+#define POLLERR  0x008
+#define POLLHUP  0x010
+#define POLLNVAL 0x020
 
 struct file {
     const file_ops_t* ops;
@@ -81,3 +90,8 @@ void fd_inherit(process_t* child, const process_t* parent);
 // Read/write through a descriptor's file, honouring access mode and offset.
 i64 file_read(file_t* f, void* buf, u64 len);
 i64 file_write(file_t* f, const void* buf, u64 len);
+// Which of POLLIN/POLLOUT/POLLHUP/POLLERR hold for f right now.
+u32 file_poll(file_t* f);
+// Every object a poller might be waiting on wakes this too, so poll() and
+// select() can block on "anything changed".
+extern int file_poll_wait;

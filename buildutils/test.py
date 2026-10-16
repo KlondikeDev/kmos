@@ -12,10 +12,12 @@ then run from the repository root:
 
     python3 buildutils/test.py            # the whole suite
     python3 buildutils/test.py --mem 48M  # on a smaller machine
+    python3 buildutils/test.py --command /ufs/bin/pmtest   # Prime Meridian's suite
 
-ktest writes each result to /dev/serial; this script types `ktest` into the
-shell through QEMU's monitor, follows the serial log until the summary line
-appears, and exits 0 only if every check passed.
+Each suite writes its results to /dev/serial; this script types the command
+into the shell through QEMU's monitor, follows the serial log until the
+"<name>: N passed, M failed" line appears, and exits 0 only if every check
+passed.
 """
 
 import argparse
@@ -35,6 +37,7 @@ def main():
     ap.add_argument("--mem", default="256M", help="guest RAM (default 256M)")
     ap.add_argument("--timeout", type=float, default=180, help="seconds to wait")
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
+    ap.add_argument("--log", help="also save the whole serial log here")
     args = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -85,7 +88,7 @@ def main():
             mon.sendall(f"sendkey {KEYS.get(ch, ch)}\n".encode())
             time.sleep(0.03)
 
-        summary = wait_for(r"ktest: (\d+) passed, (\d+) failed", deadline)
+        summary = wait_for(r"\w+: (\d+) passed, (\d+) failed", deadline)
         out = log()
         for line in out.splitlines():
             if line.startswith(("PASS ", "FAIL ")) or "PANIC" in line:
@@ -98,6 +101,9 @@ def main():
     finally:
         qemu.kill()
         qemu.wait()
+        if args.log:
+            with open(args.log, "w") as f:
+                f.write(log())
 
 
 if __name__ == "__main__":

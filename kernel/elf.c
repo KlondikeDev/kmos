@@ -4,9 +4,9 @@
 // Licensed under the Kunix License v1.0 or later
 // See LICENSE for details
 
-// Static ELF64 loader. The file has already been read into kernel memory;
-// this checks that it is something we can safely run, then copies each
-// PT_LOAD segment to the virtual address it asks for.
+// Static ELF64 loader. Reads the headers, checks that the file is something
+// we can safely run, then reads each PT_LOAD segment from the file straight
+// into the frames backing the virtual addresses it asks for.
 //
 // Everything in the file is untrusted. Every offset and size is checked
 // against the file length, and every address against the user window,
@@ -17,6 +17,8 @@
 #include <usermode.h>
 #include <klog.h>
 #include <serial.h>
+#include <memory.h>
+#include <errno.h>
 
 #define PAGE_MASK (~(USER_PAGE_SIZE - 1))
 
@@ -76,51 +78,96 @@ static bool elf_check_segment(const elf64_phdr_t* ph, u64 size) {
     return true;
 }
 
-bool elf_load(process_t* p, const u8* image, u64 size, u64* entry_out, u64* image_end_out) {
-    const elf64_ehdr_t* eh = (const elf64_ehdr_t*)image;
-    if (!elf_check_header(eh, size)) return false;
+#define ELF_MAX_PHDRS 64
 
-    const elf64_phdr_t* phdrs = (const elf64_phdr_t*)(image + eh->e_phoff);
+// Read file bytes into p's (already mapped) pages, through the direct map.
+static bool read_into(process_t* p, vnode_t* node, u64 off, u64 virt, u64 len) {
+    while (len) {
+        u64 pte = vmm_get_pte(p->space, virt);
+        if (!(pte & PTE_PRESENT)) return false;
+        u64 in_page = virt & (USER_PAGE_SIZE - 1);
+        u64 chunk = USER_PAGE_SIZE - in_page;
+        if (chunk > len) chunk = len;
+        void* dst = (void*)((pte & 0x000FFFFFFFFFF000ULL) + vmm_hhdm() + in_page);
+        if (vfs_read(node, off, dst, chunk) != (i64)chunk) return false;
+        virt += chunk;
+        off += chunk;
+        len -= chunk;
+    }
+    return true;
+}
+
+i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out) {
+    u64 size = node->size;
+    elf64_ehdr_t eh;
+    if (size < sizeof(eh) || vfs_read(node, 0, &eh, sizeof(eh)) != (i64)sizeof(eh)) {
+        klog(LOG_ERROR, "elf: file too small for a header (%lu bytes)\n", size);
+        return -ENOEXEC;
+    }
+    if (!elf_check_header(&eh, size)) return -ENOEXEC;
+    if (eh.e_phnum > ELF_MAX_PHDRS) {
+        klog(LOG_ERROR, "elf: %u program headers is too many\n", eh.e_phnum);
+        return -ENOEXEC;
+    }
+
+    u64 table = (u64)eh.e_phnum * sizeof(elf64_phdr_t);
+    elf64_phdr_t* phdrs = kmalloc(table);
+    if (!phdrs) return -ENOMEM;
+    i32 err = -ENOEXEC;
+    if (vfs_read(node, eh.e_phoff, phdrs, table) != (i64)table) goto out;
 
     // Pass 1: validate everything before mapping anything, so a bad file
     // never leaves a half-built address space behind.
     bool any_load = false;
     bool entry_ok = false;
-    for (u16 i = 0; i < eh->e_phnum; i++) {
+    u64 phdr_addr = 0;
+    for (u16 i = 0; i < eh.e_phnum; i++) {
         const elf64_phdr_t* ph = &phdrs[i];
+        if (ph->p_type == PT_INTERP) {
+            klog(LOG_ERROR, "elf: dynamically linked; only static programs run so far\n");
+            goto out;
+        }
+        if (ph->p_type == PT_PHDR) phdr_addr = ph->p_vaddr;
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
-        if (!elf_check_segment(ph, size)) return false;
+        if (!elf_check_segment(ph, size)) goto out;
         any_load = true;
         if ((ph->p_flags & PF_X) &&
-            eh->e_entry >= ph->p_vaddr && eh->e_entry < ph->p_vaddr + ph->p_memsz) {
+            eh.e_entry >= ph->p_vaddr && eh.e_entry < ph->p_vaddr + ph->p_memsz) {
             entry_ok = true;
+        }
+        // Without a PT_PHDR, the headers are wherever the segment holding
+        // that part of the file lands.
+        if (!phdr_addr && eh.e_phoff >= ph->p_offset &&
+            eh.e_phoff + table <= ph->p_offset + ph->p_filesz) {
+            phdr_addr = ph->p_vaddr + (eh.e_phoff - ph->p_offset);
         }
     }
     if (!any_load) {
         klog(LOG_ERROR, "elf: no loadable segments\n");
-        return false;
+        goto out;
     }
     if (!entry_ok) {
-        klog(LOG_ERROR, "elf: entry point 0x%lx is not in an executable segment\n", eh->e_entry);
-        return false;
+        klog(LOG_ERROR, "elf: entry point 0x%lx is not in an executable segment\n", eh.e_entry);
+        goto out;
     }
 
-    // Pass 2: map and copy. user_map hands back zeroed pages, so the .bss
-    // tail (memsz beyond filesz) needs no work. Segments are copied through
+    // Pass 2: map and fill. user_map hands back zeroed pages, so the .bss
+    // tail (memsz beyond filesz) needs no work. Segments are written through
     // the kernel's direct map, so p's address space need not be loaded.
     u64 image_end = 0;
-    for (u16 i = 0; i < eh->e_phnum; i++) {
+    err = -ENOMEM;
+    for (u16 i = 0; i < eh.e_phnum; i++) {
         const elf64_phdr_t* ph = &phdrs[i];
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
 
         u64 start = ph->p_vaddr & PAGE_MASK;
         u64 end   = (ph->p_vaddr + ph->p_memsz + USER_PAGE_SIZE - 1) & PAGE_MASK;
         for (u64 page = start; page < end; page += USER_PAGE_SIZE) {
-            if (!user_map(p, page, ph->p_flags & (PF_R | PF_W | PF_X))) return false;
+            if (!user_map(p, page, ph->p_flags & (PF_R | PF_W | PF_X))) goto out;
         }
-        if (ph->p_filesz &&
-            !user_copy_to(p, ph->p_vaddr, image + ph->p_offset, ph->p_filesz)) {
-            return false;
+        if (ph->p_filesz && !read_into(p, node, ph->p_offset, ph->p_vaddr, ph->p_filesz)) {
+            err = -EIO;
+            goto out;
         }
         if (end > image_end) image_end = end;
 
@@ -135,7 +182,12 @@ bool elf_load(process_t* p, const u8* image, u64 size, u64* entry_out, u64* imag
              ph->p_vaddr, ph->p_vaddr + ph->p_memsz, perms, ph->p_filesz);
     }
 
-    *image_end_out = image_end;
-    *entry_out = eh->e_entry;
-    return true;
+    out->entry = eh.e_entry;
+    out->image_end = image_end;
+    out->phdr = phdr_addr;
+    out->phnum = eh.e_phnum;
+    err = 0;
+out:
+    kfree(phdrs);
+    return err;
 }
