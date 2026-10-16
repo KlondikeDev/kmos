@@ -85,6 +85,31 @@ static void mark_dirty(uint32_t y_pixel) {
     if (y_pixel + FONT_HEIGHT > dirty_bottom) dirty_bottom = y_pixel + FONT_HEIGHT;
 }
 
+// The shadow buffer is a ring of text rows: scrolling moves which row is on
+// top (ring_top) instead of moving four megabytes of pixels, and the real
+// framebuffer is brought up to date once per flush, not once per line.
+static uint32_t ring_top;
+
+static uint32_t row_bytes(void) {
+    return FONT_HEIGHT * fb_pitch;
+}
+
+// Where pixel line `line` (0-15) of text row `row` lives in the shadow.
+static uint8_t* row_line(uint32_t row, uint32_t line) {
+    uint32_t rows = characters_tall ? characters_tall : 1;
+    return shadow + ((row + ring_top) % rows) * row_bytes() + line * fb_pitch;
+}
+
+// A colour (0xRRGGBB) as the framebuffer stores a 32-bit pixel.
+static uint32_t pack(uint32_t rgb) {
+    uint32_t r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+    return 0xFF000000u | (fb_red_field_pos == 0 ? (b << 16 | g << 8 | r) : (r << 16 | g << 8 | b));
+}
+
+static void fill32(uint32_t* p, uint32_t value, uint64_t count) {
+    __asm__ volatile("rep stosl" : "+D"(p), "+c"(count) : "a"(value) : "memory");
+}
+
 
 void terminal_init(void) {
     characters_wide = fb_width / FONT_WIDTH;
@@ -98,6 +123,7 @@ void terminal_init(void) {
 
 void terminal_clear(void) {
     memset(shadow, 0, fb_height * fb_pitch);
+    ring_top = 0;
     dirty_top = 0;
     dirty_bottom = fb_height;
     terminal_flush();
@@ -105,9 +131,8 @@ void terminal_clear(void) {
 
 
 void put_pixel(uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
-    if (x >= fb_width || y >= fb_height) return;
-    uint32_t offset = (y * fb_pitch) + (x * (fb_bpp / 8));
-    uint8_t *pixel = (uint8_t*)(shadow + offset);
+    if (x >= fb_width || y >= characters_tall * FONT_HEIGHT) return;
+    uint8_t *pixel = row_line(y / FONT_HEIGHT, y % FONT_HEIGHT) + x * (fb_bpp / 8);
 
     // Handle different color orders
     if (fb_red_field_pos == 0) {
@@ -115,27 +140,37 @@ void put_pixel(uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b) {
         pixel[0] = r;
         pixel[1] = g;
         pixel[2] = b;
-        pixel[3] = 0xFF;
+        if (fb_bpp == 32) pixel[3] = 0xFF;
     } else {
         // BGR: red at bit 16
         pixel[0] = b;
         pixel[1] = g;
         pixel[2] = r;
-        pixel[3] = 0xFF;
+        if (fb_bpp == 32) pixel[3] = 0xFF;
     }
 }
 
 void draw_char(uint32_t x,uint32_t y, unsigned char c,uint32_t fg_color,uint32_t bg_color) {
     mark_dirty(y);
     uint8_t *glyph = font8x16[(uint16_t)c];  // Get character's bitmap
-    
+    if (fb_bpp == 32 && y % FONT_HEIGHT == 0 && x + FONT_WIDTH <= fb_width &&
+        y / FONT_HEIGHT < characters_tall) {
+        // The usual case: whole 32-bit pixels, a row of the glyph at a time.
+        uint32_t fg = pack(fg_color), bg = pack(bg_color);
+        for (int row = 0; row < FONT_HEIGHT; row++) {
+            uint32_t* p = (uint32_t*)(row_line(y / FONT_HEIGHT, (uint32_t)row) + x * 4);
+            uint8_t bits = glyph[row];
+            for (int col = 0; col < FONT_WIDTH; col++) p[col] = (bits & (0x80 >> col)) ? fg : bg;
+        }
+        return;
+    }
     for (int row = 0; row < FONT_HEIGHT; row++) {
         uint16_t row_data = glyph[row];
-        
+
         for (int col = 0; col < FONT_WIDTH; col++) {
             // Extract bit: shift right by (7-col), mask with 1
             uint16_t bit = (row_data >> (7 - col)) & 1;
-            
+
             if (bit) {
                 // Draw foreground
                 put_pixel(x + col, y + row, (fg_color >> 16) & 0xFF, (fg_color >> 8) & 0xFF, fg_color & 0xFF);
@@ -211,24 +246,8 @@ void terminal_puts(const char* str) {
 
 void terminal_scroll(void) {
     uint64_t irq = irq_save();
-    uint64_t source = (uint64_t)shadow + (FONT_HEIGHT * fb_pitch);
-    uint64_t dest = (uint64_t)shadow;
-    uint32_t size = (characters_tall - 1) * FONT_HEIGHT * fb_pitch;
-    
-    memcpy((void*)dest, (void*)source, size);
-
-    uint32_t old_x = cursor_x;
-    for (uint32_t i = 0; i < characters_wide; i++) {
-        uint32_t pixel_x = i * FONT_WIDTH;
-        uint32_t pixel_y = (characters_tall - 1) * FONT_HEIGHT;
-        draw_char(pixel_x, pixel_y, ' ', color_bg, color_bg);
-    }
-
-    cursor_x = old_x;
+    console_scroll(1, color_bg);
     cursor_y = characters_tall - 1;
-    dirty_top = 0;
-    dirty_bottom = fb_height;
-    terminal_flush();
     irq_restore(irq);
 }
 
@@ -363,12 +382,41 @@ void terminal_flush(void) {
         irq_restore(irq);
         return;
     }
-    uint32_t offset = dirty_top * fb_pitch;
-    uint32_t size = (dirty_bottom - dirty_top) * fb_pitch;
-    memcpy((void*)(framebuffer_addr + offset), shadow + offset, size);
+    // Text row by text row, out of the ring and into place.
+    uint32_t first = dirty_top / FONT_HEIGHT, last = (dirty_bottom - 1) / FONT_HEIGHT;
+    if (last >= characters_tall) last = characters_tall - 1;
+    for (uint32_t row = first; row <= last; row++) {
+        memcpy((void*)(framebuffer_addr + row * row_bytes()), row_line(row, 0), row_bytes());
+    }
     dirty_top = UINT32_MAX;
     dirty_bottom = 0;
     irq_restore(irq);
+}
+
+// For terminal output: small changes (an echoed key, a cursor) go out at
+// once; big ones (a scrolled screen) wait for the timer, which pushes them
+// at most ~60 times a second -- a program printing thousands of lines then
+// pays for 60 screens a second, not one per line.
+static volatile bool flush_pending;
+static uint32_t last_flush_tick;
+
+void terminal_flush_lazy(void) {
+    if (dirty_top == UINT32_MAX) return;
+    if (dirty_bottom - dirty_top <= 2 * FONT_HEIGHT) {
+        terminal_flush();
+        flush_pending = false;
+        return;
+    }
+    flush_pending = true;
+}
+
+// From the timer interrupt (250 Hz).
+void console_tick(uint32_t now) {
+    if (flush_pending && now - last_flush_tick >= 4) {
+        flush_pending = false;
+        last_flush_tick = now;
+        terminal_flush();
+    }
 }
 
 // ---- cell-level helpers for the VT emulator (drivers/vt.c) ----
@@ -381,34 +429,63 @@ void console_move_cells(uint32_t dst_col, uint32_t dst_row, uint32_t src_col, ui
     uint32_t bpp = fb_bpp / 8;
     uint32_t bytes = cols * FONT_WIDTH * bpp;
     bool upward = dst_row < src_row || (dst_row == src_row && dst_col <= src_col);
-    for (uint32_t i = 0; i < rows * FONT_HEIGHT; i++) {
-        uint32_t line = upward ? i : rows * FONT_HEIGHT - 1 - i;
-        uint8_t* d = shadow + (dst_row * FONT_HEIGHT + line) * fb_pitch + dst_col * FONT_WIDTH * bpp;
-        uint8_t* s = shadow + (src_row * FONT_HEIGHT + line) * fb_pitch + src_col * FONT_WIDTH * bpp;
-        if (d < s) for (uint32_t b = 0; b < bytes; b++) d[b] = s[b];
-        else       for (uint32_t b = bytes; b-- > 0; ) d[b] = s[b];
+    for (uint32_t i = 0; i < rows; i++) {
+        uint32_t r = upward ? i : rows - 1 - i;
+        for (uint32_t line = 0; line < FONT_HEIGHT; line++) {
+            memmove(row_line(dst_row + r, line) + dst_col * FONT_WIDTH * bpp,
+                    row_line(src_row + r, line) + src_col * FONT_WIDTH * bpp, bytes);
+        }
     }
     mark_dirty(dst_row * FONT_HEIGHT);
     mark_dirty((dst_row + rows - 1) * FONT_HEIGHT);
 }
 
 void console_fill_cells(uint32_t col, uint32_t row, uint32_t cols, uint32_t rows, uint32_t bg) {
+    if (!cols || !rows) return;
+    if (fb_bpp != 32) {
+        for (uint32_t r = row; r < row + rows; r++)
+            for (uint32_t c = col; c < col + cols; c++) draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ' ', bg, bg);
+        return;
+    }
+    uint32_t value = pack(bg);
     for (uint32_t r = row; r < row + rows; r++) {
-        for (uint32_t c = col; c < col + cols; c++) {
-            draw_char(c * FONT_WIDTH, r * FONT_HEIGHT, ' ', bg, bg);
+        for (uint32_t line = 0; line < FONT_HEIGHT; line++) {
+            fill32((uint32_t*)(row_line(r, line) + col * FONT_WIDTH * 4), value, (uint64_t)cols * FONT_WIDTH);
         }
     }
+    mark_dirty(row * FONT_HEIGHT);
+    mark_dirty((row + rows - 1) * FONT_HEIGHT);
+}
+
+// Scroll the whole screen n text rows up (n > 0) or down (n < 0), bringing
+// in blank rows of colour bg: just a turn of the ring.
+void console_scroll(int n, uint32_t bg) {
+    uint32_t rows = characters_tall;
+    if (!rows) return;
+    while (n > 0) {
+        ring_top = (ring_top + 1) % rows;
+        console_fill_cells(0, rows - 1, characters_wide, 1, bg);
+        n--;
+    }
+    while (n < 0) {
+        ring_top = (ring_top + rows - 1) % rows;
+        console_fill_cells(0, 0, characters_wide, 1, bg);
+        n++;
+    }
+    dirty_top = 0;
+    dirty_bottom = rows * FONT_HEIGHT;
 }
 
 // Flip a cell's colours: the VT's cursor.
 void console_invert_cell(uint32_t col, uint32_t row) {
     uint32_t bpp = fb_bpp / 8;
     for (uint32_t y = 0; y < FONT_HEIGHT; y++) {
-        uint8_t* p = shadow + (row * FONT_HEIGHT + y) * fb_pitch + col * FONT_WIDTH * bpp;
-        for (uint32_t b = 0; b < FONT_WIDTH * bpp; b++) {
-            if (bpp == 4 && b % 4 == 3) continue;          // leave alpha alone
-            p[b] = (uint8_t)~p[b];
+        uint8_t* p = row_line(row, y) + col * FONT_WIDTH * bpp;
+        if (bpp == 4) {
+            for (uint32_t i = 0; i < FONT_WIDTH; i++) ((uint32_t*)p)[i] ^= 0x00FFFFFF;   // alpha stays
+            continue;
         }
+        for (uint32_t b = 0; b < FONT_WIDTH * bpp; b++) p[b] = (uint8_t)~p[b];
     }
     mark_dirty(row * FONT_HEIGHT);
 }

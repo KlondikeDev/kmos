@@ -79,7 +79,7 @@ static void show_cursor(void) {
 
 void vt_flush(void) {
     show_cursor();
-    terminal_flush();
+    terminal_flush_lazy();
 }
 
 void vt_init(void) {
@@ -100,6 +100,7 @@ static void scroll_up(u32 n) {
     fix_region();
     u32 height = bottom - top + 1;
     if (n > height) n = height;
+    if (top == 0 && bottom == rows() - 1) { console_scroll((int)n, color_bg); return; }   // the whole screen
     console_move_cells(0, top, 0, top + n, cols(), height - n);
     console_fill_cells(0, bottom - n + 1, cols(), n, color_bg);
 }
@@ -108,6 +109,7 @@ static void scroll_down(u32 n) {
     fix_region();
     u32 height = bottom - top + 1;
     if (n > height) n = height;
+    if (top == 0 && bottom == rows() - 1) { console_scroll(-(int)n, color_bg); return; }
     console_move_cells(0, top + n, 0, top, cols(), height - n);
     console_fill_cells(0, top, cols(), n, color_bg);
 }

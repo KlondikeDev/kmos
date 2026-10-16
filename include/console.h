@@ -43,12 +43,15 @@ void draw_cursor(void);
 void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...);
 void print_padded(const char* str, int width, char pad_char);
 void terminal_flush(void);
+void terminal_flush_lazy(void);           // now if small, else from the timer
+void console_tick(uint32_t now);          // the timer's chance to do that
 
 // Character-cell operations, for the VT emulator.
 void console_move_cells(uint32_t dst_col, uint32_t dst_row, uint32_t src_col, uint32_t src_row,
                         uint32_t cols, uint32_t rows);
 void console_fill_cells(uint32_t col, uint32_t row, uint32_t cols, uint32_t rows, uint32_t bg);
 void console_invert_cell(uint32_t col, uint32_t row);
+void console_scroll(int n, uint32_t bg);   // whole screen: n rows up (< 0: down)
 
 #define WHITE   0xFFFFFF
 #define BLACK   0x000000

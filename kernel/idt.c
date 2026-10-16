@@ -331,6 +331,7 @@ void irq_handler(registers_t* regs) {
     if(regs->int_no == 32){
         ticks++;
         time_on_tick();
+        console_tick(ticks);
         sched_tick();
     } else if (proc_current()->pid == 0) {
         // The keyboard may have woken a reader; don't leave it waiting for

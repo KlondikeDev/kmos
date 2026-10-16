@@ -4,9 +4,10 @@
 
 #include <types.h>
 
+// Fills eight bytes at a time (rep stosq), then the odd ones.
 void memset(void* ptr, uint8_t value, uint32_t size) {
-    uint8_t* p = (uint8_t*)ptr;
-    for (uint32_t i = 0; i < size; i++) {
-        p[i] = value;
-    }
+    uint64_t pattern = value * 0x0101010101010101ULL;
+    uint64_t words = size / 8, rest = size % 8;
+    __asm__ volatile("rep stosq" : "+D"(ptr), "+c"(words) : "a"(pattern) : "memory");
+    __asm__ volatile("rep stosb" : "+D"(ptr), "+c"(rest) : "a"(pattern) : "memory");
 }
