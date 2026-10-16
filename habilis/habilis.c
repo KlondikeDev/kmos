@@ -131,6 +131,13 @@ static void clear_screen(void) {
     out("\033[H\033[2J");
 }
 
+// One spinner for the whole boot (and shutdown): it keeps turning from one
+// service to the next rather than starting over at '/' for each.
+static unsigned spin_frame;
+static char spin(void) {
+    return "/|-\\"[spin_frame++ % 4];
+}
+
 // The terminal's cursor would sit blinking after the spinner.
 static void cursor(int visible) {
     out(visible ? "\033[?25h" : "\033[?25l");
@@ -265,13 +272,12 @@ static void reap(pid_t pid, int status);
 
 // Run a oneshot to the end, spinner turning. True if it succeeded.
 static int run_oneshot(service_t* s) {
-    static const char spinner[] = "/|-\\";
     logf_("starting %s: %s", s->name, s->exec);
     pid_t pid = spawn(s, 0);
     if (pid < 0) return 0;
     long waited = 0;
-    for (int frame = 0; ; frame++) {
-        status(s->description, spinner[frame % 4]);
+    for (;;) {
+        status(s->description, spin());
         int st;
         pid_t r = waitpid(pid, &st, WNOHANG);
         if (r == pid) {
@@ -318,7 +324,7 @@ static void start(service_t* s) {
     }
     int ok;
     if (s->type == DAEMON) {
-        status(s->description, '/');
+        status(s->description, spin());
         logf_("starting %s: %s", s->name, s->exec);
         ok = spawn(s, 0) > 0;
     } else {
@@ -379,12 +385,11 @@ static void on_signal(int sig) {
 }
 
 static void others_wait(long ms) {
-    static const char spinner[] = "/|-\\";
-    for (long t = 0, frame = 0; t < ms; t += 100, frame++) {
+    for (long t = 0; t < ms; t += 100) {
         while (waitpid(-1, NULL, WNOHANG) > 0) { }
         if (kill(-1, 0) < 0 && errno == ESRCH) return; // nobody left
         char buf[64];
-        snprintf(buf, sizeof(buf), "\033[1;1H\033[2KStopping... %c", spinner[frame % 4]);
+        snprintf(buf, sizeof(buf), "\033[1;1H\033[2KStopping... %c", spin());
         out(buf);
         sleep_ms(100);
     }
