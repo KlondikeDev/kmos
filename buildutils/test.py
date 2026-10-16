@@ -28,6 +28,7 @@ import re
 import socket
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 
@@ -41,19 +42,25 @@ UFS_PHASES = ["ufstest write", "ufstest verify"]
 FSCK = os.path.expanduser("~/opt/kunix-host/bin/fsck_ffs")
 
 
-def check_ufs_image(root):
-    """True if the host-side checkers find nothing wrong with ufs.img."""
-    img = os.path.join(root, "ufs.img")
-    ok = subprocess.run([sys.executable, os.path.join(root, "buildutils/ufsdiag.py"), img]).returncode == 0
+def check_ufs_image(root, img=None, quiet=False):
+    """True if the host-side checkers find nothing wrong with a UFS2 image
+    (the root image, ufs.img, unless told otherwise)."""
+    img = img or os.path.join(root, "ufs.img")
+    diag = subprocess.run([sys.executable, os.path.join(root, "buildutils/ufsdiag.py"), img],
+                          capture_output=quiet, text=True)
+    ok = diag.returncode == 0
+    if quiet and not ok:
+        print(f"{img}:\n{diag.stdout}")
     if os.path.exists(FSCK):
         out = subprocess.run([FSCK, "-n", img], capture_output=True, text=True).stdout
         # A clean check prints only its phases and the summary line.
         noise = [l for l in out.splitlines() if l.strip() and not l.startswith("**")
                  and "is not a disk device" not in l and not l.startswith("CONTINUE")
                  and " files, " not in l]
-        print("fsck_ffs: " + ("clean" if not noise else "PROBLEMS:\n" + "\n".join(noise)))
+        if not quiet or noise:
+            print(f"fsck_ffs {os.path.basename(img)}: " + ("clean" if not noise else "PROBLEMS:\n" + "\n".join(noise)))
         ok = ok and not noise
-    else:
+    elif not quiet:
         print("fsck_ffs not built (buildutils/fsck-ffs.sh); only ufsdiag.py checked the image")
     return ok
 
@@ -102,6 +109,12 @@ def main():
     drives = ["-drive", f"file={root}/disk.img,format=raw,if=ide,index=0"]
     if os.path.exists(os.path.join(root, "ufs.img")):
         drives += ["-drive", f"file={root}/ufs.img,format=raw,if=ide,index=1"]
+    # The home disk is yours, not the tests': they get a copy, checked after.
+    home = None
+    if os.path.exists(os.path.join(root, "home.img")):
+        home = os.path.join(work, "home.img")
+        shutil.copyfile(os.path.join(root, "home.img"), home)
+        drives += ["-drive", f"file={home},format=raw,if=ide,index=3"]
 
     qemu = subprocess.Popen(
         ["qemu-system-x86_64", "-cdrom", iso, "-boot", "d", *drives,
@@ -148,6 +161,12 @@ def main():
             sys.exit("no summary: the suite hung or the kernel died (see above)")
         passed, failed = int(summary.group(1)), int(summary.group(2))
         print(f"\n{passed} passed, {failed} failed")
+        time.sleep(1.5)                          # let the shell finish its writes (history)
+        qemu.kill()
+        qemu.wait()
+        if home and not check_ufs_image(root, home, quiet=True):
+            print("the home disk was left inconsistent")
+            failed += 1
         sys.exit(1 if failed else 0)
     finally:
         qemu.kill()

@@ -368,7 +368,7 @@ static void test_files(void) {
     CHECK("readdir /dev", names == 3);
 
     // Read the same file whole and in pieces with lseek.
-    fd = open("/README.TXT", O_RDONLY);
+    fd = open("/fat/README.TXT", O_RDONLY);
     char whole[256] = {0}, part[16] = {0};
     ssize_t n = fd >= 0 ? read(fd, whole, sizeof(whole) - 1) : -1;
     CHECK("fstat size matches read", fd >= 0 && fstat(fd, &st) == 0 && (ssize_t)st.st_size == n);
@@ -377,12 +377,12 @@ static void test_files(void) {
     CHECK("lseek + read", read(fd, part, 5) == 5 && memcmp(part, whole + 10, 5) == 0);
     close(fd);
 
-    CHECK("O_DIRECTORY on a file fails", open("/README.TXT", O_RDONLY | O_DIRECTORY) < 0 && errno == ENOTDIR);
+    CHECK("O_DIRECTORY on a file fails", open("/fat/README.TXT", O_RDONLY | O_DIRECTORY) < 0 && errno == ENOTDIR);
     CHECK("writing a directory fails", open("/", O_WRONLY) < 0 && errno == EISDIR);
 }
 
 static void test_writes(void) {
-    const char* path = "/KTEST.TMP";
+    const char* path = "/fat/KTEST.TMP";
     unlink(path);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     CHECK("create a file", fd >= 0);
@@ -435,55 +435,55 @@ static void test_writes(void) {
     close(b);
     CHECK("unlink", unlink(path) == 0 && stat(path, &st) < 0 && errno == ENOENT);
 
-    rmdir("/KTDIR/INNER.TXT");
-    unlink("/KTDIR/INNER.TXT");
-    rmdir("/KTDIR");
-    CHECK("mkdir", mkdir("/KTDIR", 0755) == 0 && stat("/KTDIR", &st) == 0 && S_ISDIR(st.st_mode));
-    fd = open("/KTDIR/INNER.TXT", O_WRONLY | O_CREAT);
+    rmdir("/fat/KTDIR/INNER.TXT");
+    unlink("/fat/KTDIR/INNER.TXT");
+    rmdir("/fat/KTDIR");
+    CHECK("mkdir", mkdir("/fat/KTDIR", 0755) == 0 && stat("/fat/KTDIR", &st) == 0 && S_ISDIR(st.st_mode));
+    fd = open("/fat/KTDIR/INNER.TXT", O_WRONLY | O_CREAT);
     write(fd, "inside", 6);
     close(fd);
-    CHECK("a file inside the new directory", stat("/KTDIR/INNER.TXT", &st) == 0 && st.st_size == 6);
-    CHECK("rmdir refuses a non-empty directory", rmdir("/KTDIR") < 0 && errno == ENOTEMPTY);
-    CHECK("unlink inside it", unlink("/KTDIR/INNER.TXT") == 0);
-    CHECK("rmdir an empty directory", rmdir("/KTDIR") == 0 && stat("/KTDIR", &st) < 0);
+    CHECK("a file inside the new directory", stat("/fat/KTDIR/INNER.TXT", &st) == 0 && st.st_size == 6);
+    CHECK("rmdir refuses a non-empty directory", rmdir("/fat/KTDIR") < 0 && errno == ENOTEMPTY);
+    CHECK("unlink inside it", unlink("/fat/KTDIR/INNER.TXT") == 0);
+    CHECK("rmdir an empty directory", rmdir("/fat/KTDIR") == 0 && stat("/fat/KTDIR", &st) < 0);
     // rename: within a directory, into another, over a file, and a
     // directory move that must repoint its "..".
-    unlink("/RN1.TXT"); unlink("/RN2.TXT"); unlink("/RNDIR/RN3.TXT"); rmdir("/RNDIR/SUB"); rmdir("/RNDIR"); rmdir("/RNSUB");
-    fd = open("/RN1.TXT", O_WRONLY | O_CREAT);
+    unlink("/fat/RN1.TXT"); unlink("/fat/RN2.TXT"); unlink("/fat/RNDIR/RN3.TXT"); rmdir("/fat/RNDIR/SUB"); rmdir("/fat/RNDIR"); rmdir("/fat/RNSUB");
+    fd = open("/fat/RN1.TXT", O_WRONLY | O_CREAT);
     write(fd, "renamed", 7);
     close(fd);
-    CHECK("rename a file", rename("/RN1.TXT", "/RN2.TXT") == 0 && stat("/RN1.TXT", &st) < 0 &&
-                           stat("/RN2.TXT", &st) == 0 && st.st_size == 7);
-    mkdir("/RNDIR", 0755);
-    CHECK("rename into another directory", rename("/RN2.TXT", "/RNDIR/RN3.TXT") == 0 &&
-                                           stat("/RNDIR/RN3.TXT", &st) == 0 && st.st_size == 7);
-    fd = open("/RN1.TXT", O_WRONLY | O_CREAT);
+    CHECK("rename a file", rename("/fat/RN1.TXT", "/fat/RN2.TXT") == 0 && stat("/fat/RN1.TXT", &st) < 0 &&
+                           stat("/fat/RN2.TXT", &st) == 0 && st.st_size == 7);
+    mkdir("/fat/RNDIR", 0755);
+    CHECK("rename into another directory", rename("/fat/RN2.TXT", "/fat/RNDIR/RN3.TXT") == 0 &&
+                                           stat("/fat/RNDIR/RN3.TXT", &st) == 0 && st.st_size == 7);
+    fd = open("/fat/RN1.TXT", O_WRONLY | O_CREAT);
     write(fd, "xx", 2);
     close(fd);
-    CHECK("rename replaces an existing file", rename("/RN1.TXT", "/RNDIR/RN3.TXT") == 0 &&
-                                              stat("/RNDIR/RN3.TXT", &st) == 0 && st.st_size == 2);
-    mkdir("/RNSUB", 0755);
-    CHECK("move a directory", rename("/RNSUB", "/RNDIR/SUB") == 0 && stat("/RNDIR/SUB", &st) == 0);
-    chdir("/RNDIR/SUB");
+    CHECK("rename replaces an existing file", rename("/fat/RN1.TXT", "/fat/RNDIR/RN3.TXT") == 0 &&
+                                              stat("/fat/RNDIR/RN3.TXT", &st) == 0 && st.st_size == 2);
+    mkdir("/fat/RNSUB", 0755);
+    CHECK("move a directory", rename("/fat/RNSUB", "/fat/RNDIR/SUB") == 0 && stat("/fat/RNDIR/SUB", &st) == 0);
+    chdir("/fat/RNDIR/SUB");
     char where[64] = {0};
     chdir("..");
     getcwd(where, sizeof(where));
     struct stat probe;
     CHECK("its \"..\" now leads to the new parent", stat("RN3.TXT", &probe) == 0);
     chdir("/");
-    CHECK("a directory cannot move into itself", rename("/RNDIR", "/RNDIR/SUB/X") < 0 && errno == EINVAL);
-    CHECK("rename across filesystems is EXDEV", rename("/RNDIR/RN3.TXT", "/dev/x") < 0 && errno == EXDEV);
-    unlink("/RNDIR/RN3.TXT"); rmdir("/RNDIR/SUB"); rmdir("/RNDIR");
+    CHECK("a directory cannot move into itself", rename("/fat/RNDIR", "/fat/RNDIR/SUB/X") < 0 && errno == EINVAL);
+    CHECK("rename across filesystems is EXDEV", rename("/fat/RNDIR/RN3.TXT", "/dev/x") < 0 && errno == EXDEV);
+    unlink("/fat/RNDIR/RN3.TXT"); rmdir("/fat/RNDIR/SUB"); rmdir("/fat/RNDIR");
 
     CHECK("the clock is set (after 2025)", time(NULL) > 1735689600L);
 
-    CHECK("names longer than 8.3 are refused", open("/a-very-long-name.text", O_WRONLY | O_CREAT) < 0);
-    int u = open("/ufs/ktest-ufs2-write.txt", O_RDWR | O_CREAT | O_TRUNC);
+    CHECK("names longer than 8.3 are refused", open("/fat/a-very-long-name.text", O_WRONLY | O_CREAT) < 0);
+    int u = open("/ktest-ufs2-write.txt", O_RDWR | O_CREAT | O_TRUNC);
     char ub[16] = "";
     int uok = u >= 0 && write(u, "ufs2 writes", 11) == 11 && lseek(u, 0, SEEK_SET) == 0 &&
               read(u, ub, sizeof(ub)) == 11 && memcmp(ub, "ufs2 writes", 11) == 0;
     if (u >= 0) close(u);
-    CHECK("UFS2 takes long names and writes", uok && unlink("/ufs/ktest-ufs2-write.txt") == 0);
+    CHECK("UFS2 (the root) takes long names and writes", uok && unlink("/ktest-ufs2-write.txt") == 0);
 }
 
 // Run lots of process and pipe churn; afterwards every physical page and
@@ -510,7 +510,7 @@ static void test_leaks(void) {
             while (read(fds[0], &c, 1) > 0) { }
             close(fds[0]);
             waitpid(pid, NULL, 0);
-            int fd = open("/README.TXT", O_RDONLY);
+            int fd = open("/fat/README.TXT", O_RDONLY);
             close(fd);
         }
     }
@@ -645,7 +645,7 @@ static void test_mmap(void) {
     CHECK("a syscall writing a COW page copies it", WIFEXITED(st) && WEXITSTATUS(st) == 0 && cow_buf[0] == 'A');
 
     // Files.
-    fd = open("/README.TXT", O_RDONLY);
+    fd = open("/fat/README.TXT", O_RDONLY);
     char whole[512];
     long n = read(fd, whole, sizeof(whole));
     char* f = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);

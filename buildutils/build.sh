@@ -110,17 +110,6 @@ primemeridian(){
     true
 }
 
-# /etc on the FAT32 disk, from etc/ in the tree. Only files that are not
-# there yet are copied, so edits made on Kunix (or with mtools) survive.
-etc(){
-    info "Installing /etc..."
-    mdir -i disk.img ::/ETC >/dev/null 2>&1 || mmd -i disk.img ::/ETC
-    for f in etc/*; do
-        name=$(basename "$f" | tr a-z A-Z)
-        mdir -i disk.img "::/ETC/$name" >/dev/null 2>&1 || mcopy -i disk.img "$f" "::/ETC/$name"
-    done
-}
-
 setup(){
     info "Setting up ISO image..."
     mkdir -p iso_root/boot/limine
@@ -153,21 +142,24 @@ disk(){
     fi
 }
 
-# Second disk: a UFS2 filesystem, mounted by the kernel at /ufs. Rebuilt from
-# scratch every time (it is read-only to Kunix, so nothing on it can be lost).
-# Needs NetBSD's makefs (Debian package "makefs").
+# The root filesystem: UFS2, on the second disk (primary slave). Rebuilt
+# from scratch every time from the tree -- /bin, /etc and the test data in
+# /test -- so anything written to it on Kunix is gone after the next build.
+# What should last belongs in /home (below). Needs NetBSD's makefs (Debian
+# package "makefs").
 ufs(){
     if ! command -v makefs >/dev/null; then
         info "makefs not installed; skipping ufs.img (sudo apt install makefs)"
         return
     fi
-    info "Building UFS2 image..."
+    info "Building the UFS2 root image..."
     rm -rf build/ufsroot
-    mkdir -p build/ufsroot/bin build/ufsroot/docs/deeper
+    mkdir -p build/ufsroot/bin build/ufsroot/etc build/ufsroot/test/docs/deeper
     cp build/user/*.elf build/ufsroot/bin/
     cp build/pm/* build/ufsroot/bin/ 2>/dev/null || true
     # busybox decides what to be from argv[0]: give it every applet name,
-    # as hard links (UFS2 keeps them; they cost no inodes).
+    # as hard links (UFS2 keeps them; they cost no inodes). Its "sh" (ash)
+    # is /bin/sh.
     if [ -x build/ufsroot/bin/busybox ]; then
         for applet in $(build/ufsroot/bin/busybox --list); do
             [ -e "build/ufsroot/bin/$applet" ] || ln build/ufsroot/bin/busybox "build/ufsroot/bin/$applet"
@@ -179,16 +171,34 @@ ufs(){
         name=$(basename "$elf" .elf)
         [ -e "build/ufsroot/bin/$name" ] || cp "$elf" "build/ufsroot/bin/$name"
     done
-    printf 'Hello from UFS2!\nThis file lives on the second disk.\n' > build/ufsroot/hello.txt
-    printf 'Nested three levels down.\n' > build/ufsroot/docs/deeper/nested.txt
-    printf 'A file whose name is far too long for FAT 8.3.\n' > build/ufsroot/docs/a-rather-long-file-name.txt
+    cp etc/* build/ufsroot/etc/
+    T=build/ufsroot/test
+    printf 'Hello from UFS2!\nThis file lives on the second disk.\n' > $T/hello.txt
+    printf 'Nested three levels down.\n' > $T/docs/deeper/nested.txt
+    printf 'A file whose name is far too long for FAT 8.3.\n' > $T/docs/a-rather-long-file-name.txt
     # Big enough to need indirect blocks: every line numbered, so a reader
     # can check nothing was skipped or repeated.
-    seq -f "line %06g of the big file" 1 110000 > build/ufsroot/big.txt
+    seq -f "line %06g of the big file" 1 110000 > $T/big.txt
+    chmod -R go-w build/ufsroot                         # whatever the host's umask was
     rm -f ufs.img
     # Room to write in: 64 MiB, and at least 8192 inodes free (makefs would
     # otherwise size the inode table to exactly what is on the image).
     makefs -t ffs -o version=2 -s 64m -f 8192 ufs.img build/ufsroot > /dev/null
+    python3 buildutils/ufschown.py ufs.img 0 0          # everything is root's
+}
+
+# Home directories: a UFS2 disk of their own (secondary slave), mounted at
+# /home. Made once, then never rebuilt or touched by the build -- it is
+# yours. (Delete home.img to start over.)
+home(){
+    [ -f home.img ] && return
+    command -v makefs >/dev/null || return
+    info "Creating the home disk (home.img)..."
+    rm -rf build/homeroot
+    mkdir -p build/homeroot/root
+    chmod 700 build/homeroot/root
+    makefs -t ffs -o version=2 -s 128m -f 16384 home.img build/homeroot > /dev/null
+    python3 buildutils/ufschown.py home.img 0 0
 }
 
 qemu(){
@@ -201,7 +211,8 @@ qemu(){
         -device e1000,netdev=net0 \
         -object filter-dump,id=f1,netdev=net0,file=network.pcap \
         -drive file=disk.img,format=raw,if=ide,index=0 \
-        $( [ -f ufs.img ] && echo "-drive file=ufs.img,format=raw,if=ide,index=1" )
+        $( [ -f ufs.img ] && echo "-drive file=ufs.img,format=raw,if=ide,index=1" ) \
+        $( [ -f home.img ] && echo "-drive file=home.img,format=raw,if=ide,index=3" )
 }
 
 main(){
@@ -210,9 +221,9 @@ main(){
     build
     link
     userland
-    etc
     primemeridian
     ufs
+    home
     setup
     cleaning
     qemu

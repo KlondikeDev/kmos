@@ -12,6 +12,7 @@
 #include <console.h>
 #include <klog.h>
 #include <klibc/string.h>
+#include <memset.h>
 
 static mount_t mounts[VFS_MAX_MOUNTS];
 static u32 mount_count = 0;
@@ -118,6 +119,9 @@ restart:;
     const char* rel;
     const mount_t* m = resolve_mount(path, &rel);
     if (!m) return -ENOENT;
+    // Drivers fill in what they know; the rest (attributes FAT32 or devfs
+    // do not keep) must read as zero, not as stack garbage.
+    memset(out, 0, sizeof(*out));
     out->mnt = m;
     i32 r = m->ops->root(out);
     if (r < 0) return r;
@@ -134,7 +138,8 @@ restart:;
         name[n] = '\0';
 
         if (out->type != VN_DIR) return -ENOTDIR;
-        vnode_t next;
+        vnode_t next = {0};
+        memset(&next, 0, sizeof(next));
         r = m->ops->lookup(out, name, &next);
         if (r < 0) return r;
         next.mnt = m;
@@ -250,6 +255,7 @@ static bool mount_child(const char* dir, u32 index, char* name_out, const mount_
 // that should show them go through vfs_readdir_path.
 i32 vfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* out) {
     if (dir->type != VN_DIR) return -ENOTDIR;
+    memset(out, 0, sizeof(*out));
     i32 r = dir->mnt->ops->readdir(dir, index, name_out, out);
     if (r == 1) out->mnt = dir->mnt;
     return r;
@@ -260,7 +266,7 @@ i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out) 
     char abs[VFS_PATH_MAX];
     i32 r = vfs_normalize(path, abs);
     if (r < 0) return r;
-    vnode_t dir;
+    vnode_t dir = {0};
     r = walk(abs, &dir, true);
     if (r < 0) return r;
     if (dir.type != VN_DIR) return -ENOTDIR;
@@ -269,6 +275,7 @@ i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out) 
     const mount_t* m;
     while (mount_child(abs, synthetic, name_out, &m)) {
         if (synthetic == index) {
+            memset(out, 0, sizeof(*out));
             out->mnt = m;
             r = m->ops->root(out);
             if (r < 0) return r;
@@ -286,20 +293,21 @@ i32 vfs_create(const char* path, u32 type, vnode_t* out) {
 
 i32 vfs_create_mode(const char* path, u32 type, u32 mode, vnode_t* out) {
     mode &= 07777 & ~proc_current()->umask;
-    vnode_t dir;
+    vnode_t dir = {0};
     char name[VFS_NAME_MAX];
     i32 r = vfs_lookup_parent(path, &dir, name);
     if (r < 0) return r;
-    vnode_t existing;
+    vnode_t existing = {0};
     if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
     if (!dir.mnt->ops->create) return -EROFS;
+    memset(out, 0, sizeof(*out));
     r = dir.mnt->ops->create(&dir, name, type, mode, out);
     if (r == 0) out->mnt = dir.mnt;
     return r;
 }
 
 i32 vfs_unlink(const char* path, bool want_dir) {
-    vnode_t dir, node;
+    vnode_t dir = {0}, node = {0};
     char name[VFS_NAME_MAX];
     i32 r = vfs_lookup_parent(path, &dir, name);
     if (r < 0) return r;
@@ -317,7 +325,7 @@ i32 vfs_unlink(const char* path, bool want_dir) {
 }
 
 i32 vfs_rename(const char* oldpath, const char* newpath) {
-    vnode_t olddir, newdir, node;
+    vnode_t olddir = {0}, newdir = {0}, node = {0};
     char oldname[VFS_NAME_MAX], newname[VFS_NAME_MAX];
     i32 r = vfs_lookup_parent(oldpath, &olddir, oldname);
     if (r < 0) return r;
@@ -331,7 +339,7 @@ i32 vfs_rename(const char* oldpath, const char* newpath) {
     // the others the locator is about to change under the open file.
     if (!node.mnt->ops->keeps_unlinked && vnode_is_open(&node)) return -EBUSY;
 
-    vnode_t existing;
+    vnode_t existing = {0};
     if (newdir.mnt->ops->lookup(&newdir, newname, &existing) == 0) {
         existing.mnt = newdir.mnt;
         if (existing.type == VN_DIR) return node.type == VN_DIR ? -ENOTEMPTY : -EISDIR;
@@ -354,7 +362,7 @@ i32 vfs_chdir(const char* path) {
     char abs[VFS_PATH_MAX];
     i32 r = vfs_normalize(path, abs);
     if (r < 0) return r;
-    vnode_t n;
+    vnode_t n = {0};
     r = walk(abs, &n, true);
     if (r < 0) return r;
     if (n.type != VN_DIR) return -ENOTDIR;
@@ -367,7 +375,7 @@ i32 vfs_chdir(const char* path) {
 }
 
 i64 vfs_read_file(const char* path, void* buf, u64 max) {
-    vnode_t node;
+    vnode_t node = {0};
     i32 r = vfs_lookup(path, &node);
     if (r < 0) return r;
     if (node.type == VN_DIR) return -EISDIR;
@@ -382,7 +390,7 @@ void vfs_list_mounts(void) {
 }
 
 i32 vfs_symlink(const char* target, const char* linkpath) {
-    vnode_t dir, existing, out;
+    vnode_t dir = {0}, existing = {0}, out = {0};
     char name[VFS_NAME_MAX];
     if (!target[0]) return -ENOENT;
     if (strlen(target) >= VFS_PATH_MAX) return -ENAMETOOLONG;
@@ -394,7 +402,7 @@ i32 vfs_symlink(const char* target, const char* linkpath) {
 }
 
 i32 vfs_link(const char* oldpath, const char* newpath) {
-    vnode_t node, dir, existing;
+    vnode_t node = {0}, dir = {0}, existing = {0};
     char name[VFS_NAME_MAX];
     i32 r = vfs_lookup_nofollow(oldpath, &node);
     if (r < 0) return r;
@@ -408,7 +416,7 @@ i32 vfs_link(const char* oldpath, const char* newpath) {
 }
 
 i64 vfs_readlink(const char* path, char* buf, u64 len) {
-    vnode_t node;
+    vnode_t node = {0};
     i32 r = vfs_lookup_nofollow(path, &node);
     if (r < 0) return r;
     if (node.type != VN_LNK || !node.mnt->ops->readlink) return -EINVAL;

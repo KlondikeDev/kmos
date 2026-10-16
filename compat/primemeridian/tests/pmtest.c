@@ -58,7 +58,7 @@ static void say(const char* fmt, ...) {
     else { failed++; say("FAIL %s  (line %d, errno %d: %s)\n", name, __LINE__, errno, strerror(errno)); } \
 } while (0)
 
-static const char* self = "/ufs/bin/pmtest";
+static const char* self = "/bin/pmtest";
 
 // ---------------------------------------------------------------------------
 
@@ -101,12 +101,12 @@ static void test_memory(void) {
 }
 
 static void test_files(void) {
-    FILE* f = fopen("/ufs/hello.txt", "r");
+    FILE* f = fopen("/test/hello.txt", "r");
     char line[128] = "";
     CHECK("stdio reads a UFS2 file", f && fgets(line, sizeof(line), f) && strcmp(line, "Hello from UFS2!\n") == 0);
     if (f) fclose(f);
 
-    DIR* d = opendir("/ufs/docs");
+    DIR* d = opendir("/test/docs");
     int saw_long = 0, saw_dir = 0;
     struct dirent* e;
     while (d && (e = readdir(d))) {
@@ -117,22 +117,22 @@ static void test_files(void) {
     CHECK("readdir (getdents64) with d_type", saw_long && saw_dir);
 
     struct stat st;
-    CHECK("stat a file", stat("/ufs/big.txt", &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 3080000);
-    CHECK("stat a directory", stat("/ufs/docs", &st) == 0 && S_ISDIR(st.st_mode));
-    CHECK("FAT32 files (no permissions on disk) look executable", stat("/BIN/LS.ELF", &st) == 0 && (st.st_mode & 0111));
-    CHECK("UFS2 reports its real modes", stat("/ufs/hello.txt", &st) == 0 && !(st.st_mode & 0111) &&
-          stat("/ufs/bin/zsh", &st) == 0 && (st.st_mode & 0111));
+    CHECK("stat a file", stat("/test/big.txt", &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 3080000);
+    CHECK("stat a directory", stat("/test/docs", &st) == 0 && S_ISDIR(st.st_mode));
+    CHECK("FAT32 files (no permissions on disk) look executable", stat("/fat/BIN/LS.ELF", &st) == 0 && (st.st_mode & 0111));
+    CHECK("UFS2 reports its real modes", stat("/test/hello.txt", &st) == 0 && !(st.st_mode & 0111) &&
+          stat("/bin/zsh", &st) == 0 && (st.st_mode & 0111));
 
-    f = fopen("/PMTEST.TXT", "w");
+    f = fopen("/fat/PMTEST.TXT", "w");
     int wrote = f && fprintf(f, "written by %s\n", "musl") > 0 && fclose(f) == 0;
-    f = fopen("/PMTEST.TXT", "r");
+    f = fopen("/fat/PMTEST.TXT", "r");
     CHECK("write and read back a FAT32 file", wrote && f && fgets(line, sizeof(line), f) &&
           strcmp(line, "written by musl\n") == 0);
     if (f) fclose(f);
-    CHECK("unlink", unlink("/PMTEST.TXT") == 0 && access("/PMTEST.TXT", F_OK) < 0);
+    CHECK("unlink", unlink("/fat/PMTEST.TXT") == 0 && access("/fat/PMTEST.TXT", F_OK) < 0);
 
     char cwd[256];
-    CHECK("chdir + getcwd", chdir("/ufs/docs") == 0 && getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/ufs/docs") == 0);
+    CHECK("chdir + getcwd", chdir("/test/docs") == 0 && getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/test/docs") == 0);
     CHECK("relative open", access("deeper/nested.txt", R_OK) == 0);
     int dfd = open("deeper", O_RDONLY | O_DIRECTORY);
     int nfd = dfd >= 0 ? openat(dfd, "nested.txt", O_RDONLY) : -1;

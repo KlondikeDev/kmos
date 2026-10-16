@@ -617,7 +617,7 @@ static void prompt(void) {
 int main(int argc, char** argv, char** envp) {
     (void)envp;
 
-    if (!getenv("PATH"))  setenv("PATH", "/bin:/ufs/bin", 1);
+    if (!getenv("PATH"))  setenv("PATH", "/bin:/fat/BIN", 1);
     if (!getenv("HOME"))  setenv("HOME", "/", 1);
     if (!getenv("SHELL")) setenv("SHELL", "/bin/sh", 1);
     if (!getenv("TERM"))  setenv("TERM", "linux", 1);   // what drivers/vt.c emulates

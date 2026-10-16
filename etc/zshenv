@@ -1,11 +1,13 @@
 # /etc/zshenv -- read by every zsh, interactive or not, before anything else.
 #
-# Kunix's own programs live on the FAT32 disk as /bin/NAME.ELF (and, where
-# busybox has no tool of that name, as /ufs/bin/name). Linux programs that
-# run through Prime Meridian -- zsh itself, busybox -- live in /ufs/bin.
-export PATH=/ufs/bin:/bin
+# / is UFS2: /bin holds zsh, busybox (and /bin/sh, which is its ash) and
+# Kunix's own programs (as name.elf, and by plain name where busybox has
+# no tool of that name). The FAT32 boot disk is at /fat, and home
+# directories live on their own disk at /home, which survives rebuilds.
+export PATH=/bin
 export TERM=${TERM:-linux}
-export HOME=${HOME:-/}
+export HOME=${HOME:-/home/root}
+[[ -d $HOME ]] || export HOME=/        # no home disk attached
 export USER=${USER:-root}
 export LOGNAME=${LOGNAME:-root}
-export SHELL=/ufs/bin/zsh
+export SHELL=/bin/zsh

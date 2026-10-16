@@ -84,10 +84,19 @@ void kernel_main(void) {
     pci_list_devices();
     identify_drive(0xA0);
     fat32_init();
-    vfs_mount("/", &fat32_vfs_ops);
-    // A second IDE disk (primary slave) holding UFS2 appears at /ufs.
-    void* ufs = identify_drive(0xB0) ? ufs2_mount(1) : NULL;
-    if (ufs) vfs_mount_with("/ufs", &ufs2_vfs_ops, ufs);
+    // The root is UFS2 on the primary slave when there is one, with the
+    // FAT32 boot disk beside it at /fat; without it, FAT32 is the root, as
+    // it used to be. Home directories have a UFS2 disk of their own on the
+    // secondary slave (the secondary master is the CD-ROM we booted from).
+    void* root = identify_drive(0xB0) ? ufs2_mount(1) : NULL;
+    if (root) {
+        vfs_mount_with("/", &ufs2_vfs_ops, root);
+        vfs_mount("/fat", &fat32_vfs_ops);
+    } else {
+        vfs_mount("/", &fat32_vfs_ops);
+    }
+    void* home = ata_present(3) ? ufs2_mount(3) : NULL;
+    if (home) vfs_mount_with("/home", &ufs2_vfs_ops, home);
     vfs_mount("/dev", &devfs_vfs_ops);
     vfs_mount("/proc", &procfs_vfs_ops);
     vfs_mount("/tmp", &tmpfs_vfs_ops);
@@ -124,8 +133,10 @@ void kernel_main(void) {
     // The first shell found wins: zsh (through Prime Meridian) as a login
     // shell, then Kunix's own ksh. (Until Habilis takes over as init.)
     static const char* const shells[][2] = {
-        { "/ufs/bin/zsh", "-zsh" },
-        { "/BIN/SH.ELF", "/BIN/SH.ELF" },
+        { "/bin/zsh", "-zsh" },
+        { "/bin/sh.elf", "/bin/sh.elf" },
+        { "/fat/BIN/SH.ELF", "/fat/BIN/SH.ELF" },
+        { "/BIN/SH.ELF", "/BIN/SH.ELF" },                 // FAT32 as the root
     };
     u64 flags = irq_save();
     i32 init_pid = -ENOENT;

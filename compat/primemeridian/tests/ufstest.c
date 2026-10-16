@@ -6,7 +6,7 @@
 
 // ufstest -- exercise the UFS2 driver through ordinary file I/O.
 //
-//   ufstest write    build a tree under /ufs/t, checking as it goes
+//   ufstest write    build a tree under /ufstest, checking as it goes
 //   ufstest verify   (after a reboot) check that everything written is
 //                    still there, byte for byte, then clean it all up
 //   ufstest          both, in one boot
@@ -36,7 +36,7 @@
 #define FS     1024ULL                 // fs_fsize
 #define NDADDR 12
 #define NINDIR (BS / 8)
-#define T      "/ufs/t"
+#define T      "/ufstest"
 
 static FILE* serial;
 static int passed, failed;
@@ -130,7 +130,7 @@ static const uint64_t far_triple = (NDADDR + NINDIR + NINDIR * NINDIR + 5) * BS 
 
 static void phase_write(void) {
     mkdir(T, 0755);
-    CHECK("mkdir /ufs/t", access(T, F_OK) == 0);
+    CHECK("mkdir /ufstest", access(T, F_OK) == 0);
 
     int ok = 1;
     for (unsigned i = 0; i < NSIZES; i++) {
@@ -250,12 +250,12 @@ static void phase_write(void) {
 }
 
 static const char long_target[] =
-    "/ufs/t/a/this/target/is/much/longer/than/the/one/hundred/and/twenty/bytes/"
+    "/ufstest/a/this/target/is/much/longer/than/the/one/hundred/and/twenty/bytes/"
     "that/fit/inside/an/inode/so/it/needs/a/real/block/of/its/own/to/live/in";
 
 static unsigned long long free_bytes(void) {
     struct statvfs v;
-    return statvfs("/ufs", &v) == 0 ? (unsigned long long)v.f_bfree * v.f_frsize : 0;
+    return statvfs("/", &v) == 0 ? (unsigned long long)v.f_bfree * v.f_frsize : 0;
 }
 
 static void phase_links_and_attrs(void) {
@@ -277,7 +277,7 @@ static void phase_links_and_attrs(void) {
     CHECK("a link to a directory, walked through",
           symlink("a", T "/dir-link") == 0 && mkdir(T "/a/sub", 0755) == 0 &&
           stat(T "/dir-link/sub", &st) == 0 && S_ISDIR(st.st_mode) && rmdir(T "/dir-link/sub") == 0);
-    CHECK("an absolute link", symlink("/ufs/t/target.txt", T "/abs-link") == 0 &&
+    CHECK("an absolute link", symlink("/ufstest/target.txt", T "/abs-link") == 0 &&
           stat(T "/abs-link", &st) == 0 && st.st_size == 10);
     errno = 0;
     CHECK("a dangling link is ENOENT to stat", symlink("nowhere", T "/dangling") == 0 &&
@@ -318,7 +318,8 @@ static void phase_links_and_attrs(void) {
 
     // Execute permission.
     fd = open(T "/script", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { write(fd, "#!/ufs/bin/sh\nexit 7\n", 21); close(fd); }
+    static const char script[] = "#!/bin/sh\nexit 7\n";
+    if (fd >= 0) { write(fd, script, strlen(script)); close(fd); }
     errno = 0;
     CHECK("exec without an x bit is EACCES", execl(T "/script", "script", (char*)0) < 0 && errno == EACCES);
     chmod(T "/script", 0755);

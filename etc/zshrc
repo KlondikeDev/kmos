@@ -2,8 +2,8 @@
 
 PROMPT='%n@%m %~ %# '
 
-# FAT32 only takes 8.3 names for now, so no ~/.zsh_history.
-HISTFILE=$HOME/ZHISTORY
+# Your own settings go in ~/.zshrc, on the home disk.
+HISTFILE=$HOME/.zsh_history
 HISTSIZE=1000
 SAVEHIST=1000
 setopt hist_ignore_dups inc_append_history interactive_comments
