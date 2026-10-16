@@ -187,6 +187,15 @@ static void test_time(void) {
     CHECK("nanosleep 50 ms", r == 0 && ms >= 45 && ms < 300);
     struct timeval tv;
     CHECK("gettimeofday", gettimeofday(&tv, NULL) == 0 && tv.tv_sec > 1735689600L);
+    struct timespec x, y;
+    clock_gettime(CLOCK_REALTIME, &x);
+    clock_gettime(CLOCK_REALTIME, &y);
+    CHECK("the clock never repeats itself", y.tv_sec > x.tv_sec || (y.tv_sec == x.tv_sec && y.tv_nsec > x.tv_nsec));
+    char t1[] = "/tmp/pmtestXXXXXX", t2[] = "/tmp/pmtestXXXXXX";
+    int f1 = mkstemp(t1), f2 = mkstemp(t2);
+    CHECK("mkstemp twice in a row, in /tmp (tmpfs)", f1 >= 0 && f2 >= 0 && strcmp(t1, t2) != 0);
+    if (f1 >= 0) { close(f1); unlink(t1); }
+    if (f2 >= 0) { close(f2); unlink(t2); }
 }
 
 static int cow_value = 1;

@@ -271,15 +271,70 @@ out:
     return ok;
 }
 
+static i32 load_depth(process_t* p, const char* path, u32 argc, const char* const* argv,
+                      u32 envc, const char* const* envp, registers_t* frame, u32 depth);
+
+#define SHEBANG_MAX   128      // the "#!interpreter arg" line, newline included
+#define SHEBANG_DEPTH 4        // scripts whose interpreter is a script...
+
+// A "#!" script: run its interpreter instead, as
+//   interpreter [optional-arg] script argv[1] ... argv[argc-1]
+// The optional argument is everything after the interpreter's name, as one
+// word -- Linux's (and most systems') rule.
+static i32 load_script(process_t* p, const char* path, char* head, u32 argc,
+                       const char* const* argv, u32 envc, const char* const* envp,
+                       registers_t* frame, u32 depth) {
+    if (depth >= SHEBANG_DEPTH) return -ENOEXEC;
+    char* nl = head;
+    while (*nl && *nl != '\n') nl++;
+    if (!*nl) return -ENOEXEC;                         // no newline: line too long
+    *nl = '\0';
+    char* s = head + 2;
+    while (*s == ' ' || *s == '\t') s++;
+    char* interp = s;
+    while (*s && *s != ' ' && *s != '\t') s++;
+    if (*s) *s++ = '\0';
+    while (*s == ' ' || *s == '\t') s++;
+    char* opt = s;
+    char* end = opt + strlen(opt);
+    while (end > opt && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r')) *--end = '\0';
+    if (!*interp) return -ENOEXEC;
+
+    u32 n = 1 + (*opt ? 1 : 0) + 1 + (argc > 1 ? argc - 1 : 0);
+    if (n > USER_MAX_ARGS) return -E2BIG;
+    const char** v = kmalloc(n * sizeof(char*));
+    if (!v) return -ENOMEM;
+    u32 i = 0;
+    v[i++] = interp;
+    if (*opt) v[i++] = opt;
+    v[i++] = path;
+    for (u32 k = 1; k < argc; k++) v[i++] = argv[k];
+    i32 r = load_depth(p, interp, n, v, envc, envp, frame, depth + 1);
+    kfree(v);
+    return r;
+}
+
 // Read an executable and map it, plus a stack carrying args, into p's
 // address space (whatever p->space currently is).
 static i32 load_into(process_t* p, const char* path, u32 argc, const char* const* argv,
                      u32 envc, const char* const* envp, registers_t* frame) {
+    return load_depth(p, path, argc, argv, envc, envp, frame, 0);
+}
+
+static i32 load_depth(process_t* p, const char* path, u32 argc, const char* const* argv,
+                      u32 envc, const char* const* envp, registers_t* frame, u32 depth) {
     vnode_t node;
     i32 r = vfs_lookup(path, &node);
     if (r < 0) return r;
     if (node.type != VN_REG) return -EACCES;
     if (node.size > USER_MAX_IMAGE) return -E2BIG;
+
+    char head[SHEBANG_MAX];
+    i64 got = vfs_read(&node, 0, head, sizeof(head) - 1);
+    if (got >= 2 && head[0] == '#' && head[1] == '!') {
+        head[got] = '\0';
+        return load_script(p, path, head, argc, argv, envc, envp, frame, depth);
+    }
 
     elf_info_t info;
     r = elf_load(p, &node, &info);

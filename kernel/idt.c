@@ -13,6 +13,7 @@
 #include <gdt.h>
 #include <usermode.h>
 #include <mman.h>
+#include <ktime.h>
 #include <proc.h>
 #include <signal.h>
 #include <syscall.h>
@@ -329,6 +330,7 @@ void irq_handler(registers_t* regs) {
 
     if(regs->int_no == 32){
         ticks++;
+        time_on_tick();
         sched_tick();
     } else if (proc_current()->pid == 0) {
         // The keyboard may have woken a reader; don't leave it waiting for

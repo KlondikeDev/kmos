@@ -94,6 +94,10 @@ u64 rtc_now(void) {
     return boot_epoch + (u64)(ticks - boot_ticks) / 250;     // PIT at 250 Hz
 }
 
+u64 rtc_epoch_of_tick0_ms(void) {
+    return boot_epoch * 1000 - (u64)boot_ticks * 4;
+}
+
 u64 rtc_now_ms(void) {
     return boot_epoch * 1000 + (u64)(ticks - boot_ticks) * 4;
 }

@@ -15,13 +15,22 @@
 #include <serial.h>
 #include <rtc.h>
 
-enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_COUNT };
+enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_FD,
+       DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_COUNT };
+
+// fd/N nodes: DEV_FD_BASE + N. Opening them (or stdin/stdout/stderr) is
+// handled by file_open, which hands back the descriptor's own file.
+#define DEV_FD_BASE 0x1000
 
 static const char* const dev_names[DEV_COUNT] = {
     [DEV_TTY]  = "tty",
     [DEV_NULL] = "null",
     [DEV_ZERO] = "zero",
     [DEV_SERIAL] = "serial",   // COM1, write-only: logs and test results
+    [DEV_FD] = "fd",
+    [DEV_STDIN] = "stdin",
+    [DEV_STDOUT] = "stdout",
+    [DEV_STDERR] = "stderr",
 };
 
 static void make_node(u64 id, vnode_t* out) {
@@ -29,7 +38,7 @@ static void make_node(u64 id, vnode_t* out) {
     out->aux = 0;
     out->size = 0;
     out->mtime = rtc_now();                // devices are always "now"
-    out->type = id == DEV_ROOT ? VN_DIR : VN_CHR;
+    out->type = (id == DEV_ROOT || id == DEV_FD) ? VN_DIR : VN_CHR;
 }
 
 static i32 devfs_root(vnode_t* out) {
@@ -43,6 +52,16 @@ static bool name_eq(const char* a, const char* b) {
 }
 
 static i32 devfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
+    if (dir->id == DEV_FD) {
+        u64 n = 0;
+        if (!*name) return -ENOENT;
+        for (const char* c = name; *c; c++) {
+            if (*c < '0' || *c > '9' || n > 1000) return -ENOENT;
+            n = n * 10 + (u64)(*c - '0');
+        }
+        make_node(DEV_FD_BASE + n, out);
+        return 0;
+    }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     for (u64 id = DEV_TTY; id < DEV_COUNT; id++) {
         if (name_eq(name, dev_names[id])) {
@@ -54,6 +73,7 @@ static i32 devfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
 }
 
 static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* out) {
+    if (dir->id == DEV_FD) return 0;                 // its entries are per-process
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     u64 id = DEV_TTY + index;
     if (id >= DEV_COUNT) return 0;

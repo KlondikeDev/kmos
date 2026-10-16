@@ -20,6 +20,8 @@ void rtc_init(void);
 u64 rtc_now(void);
 // The same, in milliseconds (4 ms resolution: the PIT tick).
 u64 rtc_now_ms(void);
+// The wall-clock time (ms since 1970) at which `ticks` was zero.
+u64 rtc_epoch_of_tick0_ms(void);
 
 void rtc_to_date(u64 epoch, rtc_date_t* out);
 u64 rtc_from_date(const rtc_date_t* d);       // the inverse

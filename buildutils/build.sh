@@ -43,6 +43,8 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/mman.c -o mman.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/vt.c -o vt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/procfs.c -o procfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/tmpfs.c -o tmpfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/time.c -o time.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/ksnprintf.c -o ksnprintf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/syscall.c -o pm_syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/signal.c -o pm_signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
@@ -56,7 +58,7 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o procfs.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o procfs.o tmpfs.o time.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
@@ -98,6 +100,10 @@ primemeridian(){
     info "Building Prime Meridian test programs..."
     for src in compat/primemeridian/tests/*.c; do
         "$MUSL_GCC" -static -O2 -Wall -Wextra -o "build/pm/$(basename "$src" .c)" "$src"
+    done
+    # ...and the test scripts (#! zsh), installed without their extension.
+    for src in compat/primemeridian/tests/*.zsh; do
+        install -m 755 "$src" "build/pm/$(basename "$src" .zsh)"
     done
     # Ported software (zsh, busybox, ...), if it has been built.
     [ -d "$PM_PREFIX/bin" ] && cp "$PM_PREFIX"/bin/* build/pm/ 2>/dev/null

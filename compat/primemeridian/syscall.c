@@ -34,6 +34,7 @@
 #include <memcpy.h>
 #include <errno.h>
 #include <rtc.h>
+#include <ktime.h>
 #include <pit.h>
 #include <msr.h>
 #include <gdt.h>
@@ -210,11 +211,22 @@ static i64 l_getdents64(u64 fd, u64 buf, u64 count) {
     if (f->node->type != VN_DIR || !f->path) return -ENOTDIR;
     if (!uok(buf, count, true)) return -EFAULT;
 
+    // Positions 0 and 1 are "." and "..", as Linux lists them; the
+    // filesystem's own entries follow.
     u64 off = 0;
     for (;;) {
         char name[VFS_NAME_MAX];
         vnode_t n;
-        i32 r = vfs_readdir_path(f->path, (u32)f->pos, name, &n);
+        i32 r;
+        if (f->pos < 2) {
+            name[0] = '.';
+            name[1] = f->pos ? '.' : '\0';
+            name[2] = '\0';
+            n = *f->node;
+            r = 1;
+        } else {
+            r = vfs_readdir_path(f->path, (u32)(f->pos - 2), name, &n);
+        }
         if (r < 0) return off ? (i64)off : r;
         if (r == 0) break;
         u64 len = strlen(name);
@@ -600,37 +612,37 @@ static u64 uptime_ms(void) {
 
 static i64 l_clock_gettime(u64 clk, u64 uts) {
     if (!uok(uts, sizeof(l_timespec_t), true)) return -EFAULT;
-    u64 ms;
+    u64 ns;
     switch (clk) {
         case L_CLOCK_REALTIME:
         case L_CLOCK_REALTIME_COARSE:
-            ms = rtc_now_ms();
+            ns = time_real_ns();
             break;
         case L_CLOCK_MONOTONIC:
         case L_CLOCK_MONOTONIC_RAW:
         case L_CLOCK_MONOTONIC_COARSE:
         case L_CLOCK_BOOTTIME:
-            ms = uptime_ms();
+            ns = time_boot_ns();
             break;
         case L_CLOCK_PROCESS_CPUTIME_ID:
         case L_CLOCK_THREAD_CPUTIME_ID:
-            ms = (u64)me()->cpu_ticks * 4;
+            ns = (u64)me()->cpu_ticks * 4000000ULL;
             break;
         default:
             return -EINVAL;
     }
     l_timespec_t* ts = (l_timespec_t*)uts;
-    ts->tv_sec = (i64)(ms / 1000);
-    ts->tv_nsec = (i64)(ms % 1000) * 1000000;
+    ts->tv_sec = (i64)(ns / 1000000000ULL);
+    ts->tv_nsec = (i64)(ns % 1000000000ULL);
     return 0;
 }
 
 static i64 l_gettimeofday(u64 utv, u64 utz) {
     if (utv) {
         if (!uok(utv, sizeof(l_timeval_t), true)) return -EFAULT;
-        u64 ms = rtc_now_ms();
-        ((l_timeval_t*)utv)->tv_sec = (i64)(ms / 1000);
-        ((l_timeval_t*)utv)->tv_usec = (i64)(ms % 1000) * 1000;
+        u64 us = time_real_ns() / 1000;
+        ((l_timeval_t*)utv)->tv_sec = (i64)(us / 1000000);
+        ((l_timeval_t*)utv)->tv_usec = (i64)(us % 1000000);
     }
     if (utz) {
         if (!uok(utz, 8, true)) return -EFAULT;
@@ -670,7 +682,7 @@ static i64 l_clock_nanosleep(u64 clk, u64 flags, u64 ureq, u64 urem) {
     i64 r = timespec_ms(ureq, &ms);
     if (r < 0) return r;
     if (flags & 1) {                                   // TIMER_ABSTIME
-        u64 now = clk == L_CLOCK_REALTIME ? rtc_now_ms() : uptime_ms();
+        u64 now = (clk == L_CLOCK_REALTIME ? time_real_ns() : time_boot_ns()) / 1000000;
         ms = (u64)ms > now ? ms - (i64)now : 0;
         urem = 0;
     }

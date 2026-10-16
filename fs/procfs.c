@@ -40,7 +40,9 @@ enum {
     P_ROOT = 1, P_SELF, P_MEMINFO, P_UPTIME, P_LOADAVG, P_STAT, P_VERSION,
     P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_GLOBAL_END,
 };
-enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_END };
+enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_END };
+// .../fd/N nodes (opening them is file_open's job: it shares descriptor N).
+#define F_FD_ENTRY 0x80
 
 static const char* const global_names[P_GLOBAL_END] = {
     [P_SELF] = "self", [P_MEMINFO] = "meminfo", [P_UPTIME] = "uptime",
@@ -49,6 +51,7 @@ static const char* const global_names[P_GLOBAL_END] = {
 };
 static const char* const proc_file_names[F_END] = {
     [F_STAT] = "stat", [F_STATUS] = "status", [F_CMDLINE] = "cmdline", [F_COMM] = "comm",
+    [F_FD] = "fd",
 };
 
 static void make_node(u64 id, vnode_t* out) {
@@ -56,8 +59,9 @@ static void make_node(u64 id, vnode_t* out) {
     out->aux = 0;
     out->size = 0;                   // generated: unknown until read, as on Linux
     out->mtime = rtc_now();
-    bool dir = id == P_ROOT || id == P_SELF || (id >= 256 && (id & 0xFF) == F_DIR);
-    out->type = dir ? VN_DIR : VN_REG;
+    u64 kind = id & 0xFF;
+    bool dir = id == P_ROOT || id == P_SELF || (id >= 256 && (kind == F_DIR || kind == F_FD));
+    out->type = dir ? VN_DIR : (id >= 256 && kind >= F_FD_ENTRY) ? VN_CHR : VN_REG;
 }
 
 static process_t* live(i32 pid) {
@@ -108,6 +112,13 @@ static i32 procfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
         }
         return -ENOENT;
     }
+    if (dir->id >= 256 && (dir->id & 0xFF) == F_FD) {
+        process_t* p = live((i32)(dir->id >> 8));
+        i32 fd;
+        if (!p || !parse_pid(name, &fd) || fd >= MAX_FDS || !p->fds[fd]) return -ENOENT;
+        make_node((dir->id & ~0xFFULL) | (u64)(F_FD_ENTRY + fd), out);
+        return 0;
+    }
     return -ENOTDIR;
 }
 
@@ -130,6 +141,17 @@ static i32 procfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t
                 make_node((u64)p->pid << 8, out);
                 return 1;
             }
+        }
+        return 0;
+    }
+    if (dir->id >= 256 && (dir->id & 0xFF) == F_FD) {
+        process_t* p = live((i32)(dir->id >> 8));
+        if (!p) return 0;
+        for (i32 fd = 0; fd < MAX_FDS; fd++) {
+            if (!p->fds[fd] || index--) continue;
+            ksnprintf(name_out, VFS_NAME_MAX, "%d", fd);
+            make_node((dir->id & ~0xFFULL) | (u64)(F_FD_ENTRY + fd), out);
+            return 1;
         }
         return 0;
     }

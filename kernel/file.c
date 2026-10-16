@@ -121,9 +121,57 @@ static file_t* file_alloc(const file_ops_t* ops, u32 flags) {
     return f;
 }
 
+// The number at the start of s, and where it ends; -1 if none.
+static i32 leading_number(const char* s, const char** end) {
+    i32 n = 0;
+    if (*s < '0' || *s > '9') return -1;
+    while (*s >= '0' && *s <= '9') {
+        if (n > 1000000) return -1;
+        n = n * 10 + (*s++ - '0');
+    }
+    *end = s;
+    return n;
+}
+
+// /dev/fd/N, /proc/self/fd/N (and /proc/<own pid>/fd/N), /dev/stdin,
+// /dev/stdout, /dev/stderr name descriptors the opener already has:
+// opening one shares that open file (as on the BSDs; for pipes and
+// terminals that is also all Linux does). Shells use them for process
+// substitution, <(command).
+static i32 open_fd_alias(const char* path, file_t** out) {
+    char abs[VFS_PATH_MAX];
+    if (vfs_normalize(path, abs) < 0) return 1;
+    const char* num = NULL;
+    i32 fd = -1;
+    if (!strcmp(abs, "/dev/stdin")) fd = 0;
+    else if (!strcmp(abs, "/dev/stdout")) fd = 1;
+    else if (!strcmp(abs, "/dev/stderr")) fd = 2;
+    else if (!strncmp(abs, "/dev/fd/", 8)) num = abs + 8;
+    else if (!strncmp(abs, "/proc/self/fd/", 14)) num = abs + 14;
+    else if (!strncmp(abs, "/proc/", 6)) {
+        const char* end = NULL;
+        if (leading_number(abs + 6, &end) != proc_current()->pid || strncmp(end, "/fd/", 4)) return 1;
+        num = end + 4;
+    } else {
+        return 1;                                    // not an alias
+    }
+    if (num) {
+        const char* end = NULL;
+        fd = leading_number(num, &end);
+        if (fd < 0 || *end) return -ENOENT;
+    }
+    file_t* f = fd_get(proc_current(), fd);
+    if (!f) return -ENOENT;
+    file_ref(f);
+    *out = f;
+    return 0;
+}
+
 i32 file_open(const char* path, u32 flags, file_t** out) {
     u32 acc = flags & O_ACCMODE;
     if (acc == 3) return -EINVAL;
+    i32 alias = open_fd_alias(path, out);
+    if (alias <= 0) return alias;
 
     vnode_t node;
     i32 r = vfs_lookup(path, &node);

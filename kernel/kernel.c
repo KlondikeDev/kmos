@@ -27,6 +27,7 @@
 #include <vt.h>
 #include <primemeridian.h>
 #include <procfs.h>
+#include <tmpfs.h>
 #include <ata.h>
 #include <fat32.h>
 #include <vfs.h>
@@ -90,6 +91,7 @@ void kernel_main(void) {
     }
     vfs_mount("/dev", &devfs_vfs_ops);
     vfs_mount("/proc", &procfs_vfs_ops);
+    vfs_mount("/tmp", &tmpfs_vfs_ops);
     tty_init();
 
     // Give the kernel task stdin/stdout/stderr on the terminal. Every

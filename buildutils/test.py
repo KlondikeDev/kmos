@@ -12,7 +12,8 @@ then run from the repository root:
 
     python3 buildutils/test.py            # the whole suite
     python3 buildutils/test.py --mem 48M  # on a smaller machine
-    python3 buildutils/test.py --command /ufs/bin/pmtest   # Prime Meridian's suite
+    python3 buildutils/test.py --command pmtest   # Prime Meridian's suite
+    python3 buildutils/test.py --all              # ktest, pmtest and pmsmoke
 
 Each suite writes its results to /dev/serial; this script types the command
 into the shell through QEMU's monitor, follows the serial log until the
@@ -29,6 +30,10 @@ import sys
 import tempfile
 import time
 
+# ktest: the native syscall suite. pmtest: Linux programs through Prime
+# Meridian (musl). pmsmoke: zsh and busybox, as a user drives them.
+SUITES = ["ktest", "pmtest", "pmsmoke"]
+
 KEYS = {" ": "spc", "\n": "ret", ".": "dot", "/": "slash", "-": "minus"}
 
 
@@ -38,7 +43,19 @@ def main():
     ap.add_argument("--timeout", type=float, default=180, help="seconds to wait")
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
     ap.add_argument("--log", help="also save the whole serial log here")
+    ap.add_argument("--all", action="store_true",
+                    help="run every suite (ktest, pmtest, pmsmoke), each in a fresh boot")
     args = ap.parse_args()
+
+    if args.all:
+        failures = 0
+        for suite in SUITES:
+            print(f"==== {suite}", flush=True)
+            rc = subprocess.run([sys.executable, os.path.abspath(__file__), "--mem", args.mem,
+                                 "--timeout", str(args.timeout), "--command", suite]).returncode
+            failures += rc != 0
+        print(f"\n{len(SUITES) - failures} of {len(SUITES)} suites passed")
+        sys.exit(1 if failures else 0)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     iso = os.path.join(root, "build/binaries/kunix-kodiak.iso")
