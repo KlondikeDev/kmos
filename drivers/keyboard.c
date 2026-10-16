@@ -110,9 +110,64 @@ void keyboard_init() {
     }
 }
 
+static int kbd_mode = KBD_XLATE;
+
+void keyboard_set_mode(int mode) {
+    kbd_mode = mode;
+    shiftDown = ctrlDown = altDown = false;     // whatever was held went by raw
+}
+
+int keyboard_mode(void) {
+    return kbd_mode;
+}
+
+// Linux's keycodes for the 0xE0-prefixed scancodes; the others are the
+// scancode itself.
+static uint8_t e0_keycode(int code) {
+    switch (code) {
+        case 0x1C: return 96;   // keypad Enter
+        case 0x1D: return 97;   // right Ctrl
+        case 0x35: return 98;   // keypad /
+        case 0x37: return 99;   // Print Screen
+        case 0x38: return 100;  // right Alt
+        case 0x47: return 102;  // Home
+        case 0x48: return 103;  // Up
+        case 0x49: return 104;  // Page Up
+        case 0x4B: return 105;  // Left
+        case 0x4D: return 106;  // Right
+        case 0x4F: return 107;  // End
+        case 0x50: return 108;  // Down
+        case 0x51: return 109;  // Page Down
+        case 0x52: return 110;  // Insert
+        case 0x53: return 111;  // Delete
+        case 0x5B: return 125;  // left Windows
+        case 0x5C: return 126;  // right Windows
+        case 0x5D: return 127;  // Menu
+        default:   return 0;
+    }
+}
+
 void read_key() {
     static bool extended = false;   // saw an 0xE0 prefix byte
+    if ((inb(0x64) & 0x21) == 0x21) return;     // the mouse's byte: IRQ 12 takes it
     int scancode = inb(DATA_PORT);
+
+    if (kbd_mode == KBD_RAW) {
+        tty_input(&tty_console, (char)scancode);
+        return;
+    }
+    if (kbd_mode == KBD_MEDIUMRAW) {
+        if (scancode == 0xE0) { extended = true; return; }
+        uint8_t release = scancode & 0x80, code = scancode & 0x7F;
+        if (extended) {
+            extended = false;
+            if (code == 0x2A || code == 0x36) return;    // fake shifts
+            code = e0_keycode(code);
+            if (!code) return;
+        }
+        tty_input(&tty_console, (char)(code | release));
+        return;
+    }
 
     // Extended keys (arrows, right-ctrl, keypad-/, ...) arrive as 0xE0 + code,
     // some with fake-shift bytes (0xE0 0x2A / 0xE0 0xAA) that must not touch

@@ -376,9 +376,21 @@ void terminal_printf(uint32_t fg, uint32_t bg, const char* format, ...) {
     terminal_flush();
 }
 
+// KD_GRAPHICS: a program (the X server) owns the screen. The console goes
+// on drawing into its shadow, just not onto the screen, so that handing
+// the screen back shows the text as it now stands.
+static bool graphics;
+static int32_t graphics_owner;
+
 void terminal_flush(void) {
     uint64_t irq = irq_save();
     if (dirty_top == UINT32_MAX) {
+        irq_restore(irq);
+        return;
+    }
+    if (graphics) {
+        dirty_top = UINT32_MAX;
+        dirty_bottom = 0;
         irq_restore(irq);
         return;
     }
@@ -391,6 +403,32 @@ void terminal_flush(void) {
     dirty_top = UINT32_MAX;
     dirty_bottom = 0;
     irq_restore(irq);
+}
+
+void console_set_graphics(bool on, int32_t owner) {
+    uint64_t irq = irq_save();
+    bool was = graphics;
+    graphics = on;
+    graphics_owner = on ? owner : 0;
+    if (was && !on) {
+        dirty_top = 0;                 // the whole screen is ours again
+        dirty_bottom = characters_tall * FONT_HEIGHT;
+        terminal_flush();
+    }
+    irq_restore(irq);
+}
+
+bool console_graphics(void) {
+    return graphics;
+}
+
+// A process is gone: if it had the screen, the console takes it back (and
+// the keyboard its usual mode), so that a crashed X server does not leave
+// a dead screen behind.
+void console_process_gone(int32_t pid) {
+    if (!graphics || graphics_owner != pid) return;
+    keyboard_set_mode(KBD_XLATE);
+    console_set_graphics(false, 0);
 }
 
 // For terminal output: small changes (an echoed key, a cursor) go out at

@@ -4,6 +4,7 @@
 
 #include <types.h>
 #include <console.h>
+#include <mouse.h>
 #include <io.h>
 #include <idt.h>
 #include <serial.h>
@@ -318,6 +319,8 @@ void idt_gate_setting(){
 void irq_handler(registers_t* regs) {
     if (regs->int_no == 33) {  // IRQ1 = keyboard
         read_key();
+    } else if (regs->int_no == 44) {   // IRQ12 = PS/2 mouse
+        mouse_irq();
     }
 
     // Send EOI to PIC. This must happen before scheduling: the switch may not

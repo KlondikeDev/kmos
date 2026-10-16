@@ -112,6 +112,9 @@ typedef struct {
     // The system is going down: write everything out and mark the
     // filesystem clean.
     void (*shutdown)(const struct mount* m);
+    // A device whose memory programs may map (the framebuffer): the
+    // physical address behind [off, off + len), which must be contiguous.
+    i64 (*mmap)(vnode_t* node, u64 off, u64 len);
     bool keeps_unlinked;
 } vfs_ops_t;
 

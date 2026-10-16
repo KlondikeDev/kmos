@@ -15,6 +15,7 @@
 #include <serial.h>
 #include <pit.h>
 #include <keyboard.h>
+#include <mouse.h>
 #include <console.h>
 #include <panic.h>
 #include <cpuid.h>
@@ -124,6 +125,7 @@ void kernel_main(void) {
     terminal_printf(SILVER, BLACK, "Copyright (C) 2025, 2026\nJoseph Jones - Released under the terms of the Kunix License v1.0 or later.\n\n");
     terminal_printf(SILVER, BLACK, "For more information on how to use Kunix, see the wiki:\nhttps://wiki.kunix.org\n");
     keyboard_init();
+    mouse_init();
 
     // The console belongs to the ring 3 shell when there is one on disk. The
     // kernel shell is the fallback, and takes over again whenever no user

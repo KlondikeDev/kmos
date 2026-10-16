@@ -232,9 +232,20 @@ i64 mm_mmap(u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     // File mappings are copied in whole now. Writes cannot reach the file,
     // so a shared writable one is refused rather than silently diverging.
     file_t* f = NULL;
+    i64 device = -1;                   // a device's physical memory, mapped as is
     if (!anon) {
         f = fd_get(p, (i32)fd);
         if (!f) return -EBADF;
+        if (f->node && f->node->type == VN_CHR && f->node->mnt && f->node->mnt->ops->mmap) {
+            if (!shared) return -EINVAL;
+            if ((f->flags & O_ACCMODE) == O_WRONLY) return -EACCES;
+            if ((prot & PROT_WRITE) && (f->flags & O_ACCMODE) == O_RDONLY) return -EACCES;
+            device = f->node->mnt->ops->mmap(f->node, off, len);
+            if (device < 0) return device;
+            f = NULL;
+        }
+    }
+    if (f) {
         if (!f->node || f->node->type != VN_REG) return -ENODEV;
         if ((f->flags & O_ACCMODE) == O_WRONLY) return -EACCES;
         if (shared && (prot & PROT_WRITE)) return -ENODEV;
@@ -262,7 +273,7 @@ i64 mm_mmap(u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     }
 
     u64 end = addr + len;
-    bool eager = shared || f || (flags & MAP_POPULATE) != 0;
+    bool eager = shared || f || device >= 0 || (flags & MAP_POPULATE) != 0;
     if (eager && p->user_pages + len / PAGE > USER_MAX_PAGES) return -ENOMEM;
 
     // MAP_FIXED replaces whatever was there.
@@ -271,6 +282,17 @@ i64 mm_mmap(u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     unmap_pages(p, addr, end);
     if (!vma_insert(p, addr, end, (u32)prot, shared ? VMA_SHARED : 0)) return -ENOMEM;
 
+    if (device >= 0) {
+        // Device memory belongs to no one: the frame allocator never hands
+        // it out and pmm_free leaves it alone, so unmapping, exit and fork
+        // (which shares it, as MAP_SHARED) need nothing more.
+        for (u64 va = addr; va < end; va += PAGE) {
+            u64 frame = (u64)device + (va - addr);
+            if (!vmm_map_in(p->space, va, frame, pte_flags(frame, (u32)prot, true))) goto oom;
+            p->user_pages++;
+        }
+        return (i64)addr;
+    }
     if (eager) {
         vma_t* v = vma_find(p, addr);
         u64 filled = 0;

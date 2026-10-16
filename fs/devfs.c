@@ -12,6 +12,10 @@
 //   ptmx        a new pseudo-terminal pair per open (file_open again)
 //   pts/N       pseudo-terminal slaves
 //   null, zero, serial (COM1), fd/N and std{in,out,err}
+//   fb0         the framebuffer (drivers/fb.c), which programs may mmap
+//   input/mice  the mouse, as 3-byte PS/2 packets (drivers/mouse.c)
+//   tty0, tty1  the console again: Linux's names for "the current virtual
+//               terminal" and the first one, which is all there is here
 
 #include <types.h>
 #include <devfs.h>
@@ -24,9 +28,13 @@
 #include <rtc.h>
 #include <kprintf.h>
 #include <klibc/string.h>
+#include <fb.h>
+#include <mouse.h>
 
 enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_FD,
-       DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_CONSOLE, DEV_PTMX, DEV_PTS, DEV_COUNT };
+       DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_CONSOLE, DEV_PTMX, DEV_PTS,
+       DEV_FB0, DEV_INPUT, DEV_TTY0, DEV_TTY1, DEV_COUNT };
+#define DEV_MICE 0x3000              // input/mice
 
 // fd/N nodes: DEV_FD_BASE + N. Opening them (or stdin/stdout/stderr) is
 // handled by file_open, which hands back the descriptor's own file.
@@ -45,14 +53,18 @@ static const char* const dev_names[DEV_COUNT] = {
     [DEV_CONSOLE] = "console",
     [DEV_PTMX] = "ptmx",
     [DEV_PTS] = "pts",
+    [DEV_FB0] = "fb0",
+    [DEV_INPUT] = "input",
+    [DEV_TTY0] = "tty0",
+    [DEV_TTY1] = "tty1",
 };
 
 static void make_node(u64 id, vnode_t* out) {
     out->id = id;
     out->aux = 0;
-    out->size = 0;
+    out->size = id == DEV_FB0 ? fb_info()->size : 0;
     out->mtime = rtc_now();                // devices are always "now"
-    out->type = (id == DEV_ROOT || id == DEV_FD || id == DEV_PTS) ? VN_DIR : VN_CHR;
+    out->type = (id == DEV_ROOT || id == DEV_FD || id == DEV_PTS || id == DEV_INPUT) ? VN_DIR : VN_CHR;
 }
 
 static i32 devfs_root(vnode_t* out) {
@@ -83,6 +95,11 @@ static i32 devfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
         make_node(DEV_PTS_BASE + n, out);
         return 0;
     }
+    if (dir->id == DEV_INPUT) {
+        if (strcmp(name, "mice")) return -ENOENT;
+        make_node(DEV_MICE, out);
+        return 0;
+    }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     for (u64 id = DEV_TTY; id < DEV_COUNT; id++) {
         if (!strcmp(name, dev_names[id])) {
@@ -104,6 +121,12 @@ static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t*
         }
         return 0;
     }
+    if (dir->id == DEV_INPUT) {
+        if (index) return 0;
+        strcpy(name_out, "mice");
+        make_node(DEV_MICE, out);
+        return 1;
+    }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     u64 id = DEV_TTY + index;
     if (id >= DEV_COUNT) return 0;
@@ -116,7 +139,7 @@ static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t*
 // terminal (or the console, for the kernel and its first children).
 tty_t* devfs_tty(const vnode_t* node) {
     if (!node->mnt || node->mnt->ops != &devfs_vfs_ops) return NULL;
-    if (node->id == DEV_CONSOLE) return &tty_console;
+    if (node->id == DEV_CONSOLE || node->id == DEV_TTY0 || node->id == DEV_TTY1) return &tty_console;
     if (node->id == DEV_TTY) {
         tty_t* c = proc_current()->ctty;
         return c ? c : &tty_console;
@@ -131,6 +154,18 @@ bool devfs_is_tty(const vnode_t* node) {
 
 bool devfs_is_ptmx(const vnode_t* node) {
     return node->mnt && node->mnt->ops == &devfs_vfs_ops && node->id == DEV_PTMX;
+}
+
+static bool is_devfs(const vnode_t* node) {
+    return node->mnt && node->mnt->ops == &devfs_vfs_ops;
+}
+
+bool devfs_is_fb(const vnode_t* node) {
+    return is_devfs(node) && node->id == DEV_FB0;
+}
+
+bool devfs_is_mouse(const vnode_t* node) {
+    return is_devfs(node) && node->id == DEV_MICE;
 }
 
 i32 devfs_pts_number(const vnode_t* node) {
@@ -149,6 +184,8 @@ static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
         case DEV_ZERO:
             memset(buf, 0, (u32)(len > 0xFFFFFFFFULL ? 0xFFFFFFFFULL : len));
             return (i64)len;
+        case DEV_FB0:  return fb_read(off, buf, len);
+        case DEV_MICE: return mouse_read(buf, len, false);
         default:       return -ENXIO;
     }
 }
@@ -160,6 +197,8 @@ static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
     switch (node->id) {
         case DEV_NULL:
         case DEV_ZERO: return (i64)len;
+        case DEV_FB0:  return fb_write(off, buf, len);
+        case DEV_MICE: return mouse_write(buf, len);
         case DEV_SERIAL: {
             const char* p = (const char*)buf;
             for (u64 i = 0; i < len; i++) kserialputchar(p[i]);
@@ -180,6 +219,14 @@ static i32 devfs_open(vnode_t* node, u32 flags) {
     return 0;
 }
 
+// mmap of the framebuffer: the physical memory behind [off, off + len).
+static i64 devfs_mmap(vnode_t* node, u64 off, u64 len) {
+    if (node->id != DEV_FB0) return -ENODEV;
+    const fb_info_t* fb = fb_info();
+    if (off > fb->size || len > fb->size - off) return -EINVAL;
+    return (i64)(fb->phys + off);
+}
+
 static void devfs_release(vnode_t* node) {
     i32 n = devfs_pts_number(node);
     if (n >= 0) pty_slave_closed((u32)n);
@@ -194,4 +241,5 @@ const vfs_ops_t devfs_vfs_ops = {
     .readdir = devfs_readdir,
     .open = devfs_open,
     .release = devfs_release,
+    .mmap = devfs_mmap,
 };

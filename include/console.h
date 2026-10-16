@@ -45,6 +45,11 @@ void print_padded(const char* str, int width, char pad_char);
 void terminal_flush(void);
 void terminal_flush_lazy(void);           // now if small, else from the timer
 void console_tick(uint32_t now);          // the timer's chance to do that
+// KD_GRAPHICS: a program has the screen; the console stops drawing on it
+// (until handed back, or until `owner` exits).
+void console_set_graphics(bool on, int32_t owner);
+bool console_graphics(void);
+void console_process_gone(int32_t pid);
 
 // Character-cell operations, for the VT emulator.
 void console_move_cells(uint32_t dst_col, uint32_t dst_row, uint32_t src_col, uint32_t src_row,

@@ -108,7 +108,7 @@ i64 sys_open(u64 path, u64 flags, u64 mode) {
 i64 sys_lseek(u64 fd, i64 off, u64 whence) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type == VN_FIFO || f->node->type == VN_CHR) return -ESPIPE;
+    if (f->node->type == VN_FIFO || (f->node->type == VN_CHR && !devfs_is_fb(f->node))) return -ESPIPE;
     i64 base;
     switch (whence) {
         case SEEK_SET: base = 0; break;

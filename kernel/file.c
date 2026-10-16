@@ -15,6 +15,7 @@
 #include <klibc/string.h>
 #include <devfs.h>
 #include <tty.h>
+#include <mouse.h>
 
 // ---------------------------------------------------------------------------
 // Open vnodes
@@ -78,11 +79,18 @@ static void vnode_release(vnode_t* n) {
 // Files backed by the VFS
 // ---------------------------------------------------------------------------
 
+// Files whose offset moves as they are read and written: regular files,
+// and the framebuffer (a device, but one you can seek in).
+static bool positioned(const file_t* f) {
+    return f->node->type == VN_REG || devfs_is_fb(f->node);
+}
+
 static i64 vnode_file_read(file_t* f, void* buf, u64 len) {
     tty_t* t = devfs_tty(f->node);
     if (t) return tty_read(t, buf, len, (f->flags & O_NONBLOCK) != 0);
+    if (devfs_is_mouse(f->node)) return mouse_read(buf, len, (f->flags & O_NONBLOCK) != 0);
     i64 n = vfs_read(f->node, f->pos, buf, len);
-    if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
+    if (n > 0 && positioned(f)) f->pos += (u64)n;
     return n;
 }
 
@@ -91,7 +99,7 @@ static i64 vnode_file_write(file_t* f, const void* buf, u64 len) {
     if (t) return tty_write(t, buf, len, (f->flags & O_NONBLOCK) != 0);
     if (f->node->type == VN_REG && (f->flags & O_APPEND)) f->pos = f->node->size;
     i64 n = vfs_write(f->node, f->pos, buf, len);
-    if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
+    if (n > 0 && positioned(f)) f->pos += (u64)n;
     return n;
 }
 
@@ -103,6 +111,7 @@ static void vnode_file_release(file_t* f) {
 static u32 vnode_file_poll(file_t* f) {
     tty_t* t = devfs_tty(f->node);
     if (t) return (tty_readable(t) ? POLLIN : 0) | POLLOUT | (t->hung_up ? POLLHUP : 0);
+    if (devfs_is_mouse(f->node)) return (mouse_readable() ? POLLIN : 0) | POLLOUT;
     return POLLIN | POLLOUT;           // disks and the other devices never block
 }
 

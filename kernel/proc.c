@@ -21,6 +21,7 @@
 
 #include <types.h>
 #include <proc.h>
+#include <console.h>
 #include <file.h>
 #include <signal.h>
 #include <errno.h>
@@ -169,6 +170,7 @@ void proc_start(process_t* p, u64 entry, u64 user_sp, u64 argc, u64 argv, u64 en
 }
 
 void proc_free(process_t* p) {
+    console_process_gone(p->pid);   // it may have had the screen (X)
     fd_close_all(p);
     if (p->space && p->space != vmm_kernel_space()) {
         vmm_destroy_space(p->space);

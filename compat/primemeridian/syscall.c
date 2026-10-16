@@ -405,7 +405,7 @@ static i64 l_rw_vec(u64 fd, u64 iov, u64 n, bool write) {
 static i64 l_pread(u64 fd, u64 buf, u64 len, i64 off, bool write) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type != VN_REG) return -ESPIPE;
+    if (f->node->type != VN_REG && !devfs_is_fb(f->node)) return -ESPIPE;   // the framebuffer seeks too
     if (off < 0) return -EINVAL;
     if (!uok(buf, len, !write)) return -EFAULT;
     u32 acc = f->flags & O_ACCMODE;
@@ -522,6 +522,8 @@ static i64 l_fchdir(u64 fd) {
 // Terminals
 // ---------------------------------------------------------------------------
 
+bool pm_display_ioctl(file_t* f, u32 req, u64 arg, i64* r);   // display.c
+
 static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
     req = (u32)req;                  // an unsigned int to Linux; libc may sign-extend it
     process_t* p = me();
@@ -537,6 +539,9 @@ static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
             else f->flags &= ~(u32)O_NONBLOCK;
             return 0;
     }
+
+    i64 r;
+    if (pm_display_ioctl(f, (u32)req, arg, &r)) return r;   // fb0, the console's KD_*/VT_*
 
     // A pty master: its own requests, then everything a terminal takes
     // (applying to the slave, as on Linux).

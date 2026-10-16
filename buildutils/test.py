@@ -13,7 +13,7 @@ then run from the repository root:
     python3 buildutils/test.py            # the whole suite
     python3 buildutils/test.py --mem 48M  # on a smaller machine
     python3 buildutils/test.py --command pmtest   # Prime Meridian's suite
-    python3 buildutils/test.py --all              # ktest, pmtest, pmsmoke and ufs
+    python3 buildutils/test.py --all              # every suite, each in a fresh boot
     python3 buildutils/test.py --suite ufs        # just the UFS2 write/reboot/fsck test
 
 Each suite writes its results to /dev/serial; this script types the command
@@ -35,10 +35,11 @@ import time
 # ktest: the native syscall suite. pmtest: Linux programs through Prime
 # Meridian (musl). pmsmoke: zsh and busybox, as a user drives them.
 # permtest: users and permissions (root dropping to an ordinary user).
+# fbtest: the framebuffer, mouse and raw keyboard, as the X server uses them.
 # ufs: the UFS2 driver -- one boot writes a tree, a second boot checks and
 # removes it, then the host checks the image (ufsdiag.py, and FreeBSD's
 # fsck_ffs if buildutils/fsck-ffs.sh has built it).
-SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "ufs"]
+SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "fbtest", "ufs"]
 UFS_PHASES = ["ufstest write", "ufstest verify"]
 FSCK = os.path.expanduser("~/opt/kunix-host/bin/fsck_ffs")
 
@@ -75,7 +76,7 @@ def main():
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
     ap.add_argument("--log", help="also save the whole serial log here")
     ap.add_argument("--all", action="store_true",
-                    help="run every suite (ktest, pmtest, pmsmoke, permtest, ufs), each in a fresh boot")
+                    help="run every suite (" + ", ".join(SUITES) + "), each in a fresh boot")
     ap.add_argument("--suite", help="run one suite by name (as --all would)")
     args = ap.parse_args()
 
@@ -166,7 +167,22 @@ def main():
             time.sleep(2.5)                      # login, then zsh starting up
         type_line(args.command)
 
-        summary = wait_for(r"\w+: (\d+) passed, (\d+) failed", deadline)
+        # A test may need input only the machine can give -- the mouse
+        # moving, keys pressed while it reads them raw. It asks with a serial
+        # line "monitor: <command>", which goes to QEMU's monitor as is.
+        sent = 0
+        summary = None
+        while time.time() < deadline and qemu.poll() is None:
+            out = log()
+            requests = re.findall(r"^monitor: (.+?)\r?$", out, re.M)
+            for c in requests[sent:]:
+                mon.sendall((c + "\n").encode())
+                time.sleep(0.05)
+            sent = len(requests)
+            summary = re.search(r"\w+: (\d+) passed, (\d+) failed", out)
+            if summary:
+                break
+            time.sleep(0.2)
         out = log()
         for line in out.splitlines():
             if line.startswith(("PASS ", "FAIL ")) or "PANIC" in line:

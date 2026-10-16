@@ -17,4 +17,6 @@ bool devfs_is_tty(const vnode_t* node);
 struct tty;
 struct tty* devfs_tty(const vnode_t* node);     // the terminal behind a node, or NULL
 bool devfs_is_ptmx(const vnode_t* node);
+bool devfs_is_fb(const vnode_t* node);
+bool devfs_is_mouse(const vnode_t* node);
 i32 devfs_pts_number(const vnode_t* node);      // /dev/pts/N: N; otherwise -1
