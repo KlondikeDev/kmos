@@ -206,6 +206,7 @@ typedef struct {
 #define L_DT_CHR  2
 #define L_DT_DIR  4
 #define L_DT_REG  8
+#define L_DT_LNK  10
 
 typedef struct {
     u64 iov_base;

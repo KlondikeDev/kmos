@@ -8,6 +8,10 @@
 // we can safely run, then reads each PT_LOAD segment from the file straight
 // into the frames backing the virtual addresses it asks for.
 //
+// Its complaints go to the serial port only: programs probe with execve and
+// fall back (a shell running a script), so a file that is not an
+// executable is ordinary, not an error.
+//
 // Everything in the file is untrusted. Every offset and size is checked
 // against the file length, and every address against the user window,
 // before anything is dereferenced or mapped.
@@ -24,35 +28,35 @@
 
 static bool elf_check_header(const elf64_ehdr_t* eh, u64 size) {
     if (size < sizeof(elf64_ehdr_t)) {
-        klog(LOG_ERROR, "elf: file too small for a header (%lu bytes)\n", size);
+        kserialoutf("elf: file too small for a header (%lu bytes)\n", size);
         return false;
     }
     if (eh->e_ident[0] != ELFMAG0 || eh->e_ident[1] != ELFMAG1 ||
         eh->e_ident[2] != ELFMAG2 || eh->e_ident[3] != ELFMAG3) {
-        klog(LOG_ERROR, "elf: bad magic\n");
+        kserialoutf("elf: bad magic\n");
         return false;
     }
     if (eh->e_ident[EI_CLASS] != ELFCLASS64 || eh->e_ident[EI_DATA] != ELFDATA2LSB ||
         eh->e_ident[EI_VERSION] != EV_CURRENT) {
-        klog(LOG_ERROR, "elf: not a little-endian ELF64 file\n");
+        kserialoutf("elf: not a little-endian ELF64 file\n");
         return false;
     }
     if (eh->e_type != ET_EXEC) {
         // ET_DYN would need relocation, which we do not do.
-        klog(LOG_ERROR, "elf: not a static executable (e_type=%u)\n", eh->e_type);
+        kserialoutf("elf: not a static executable (e_type=%u)\n", eh->e_type);
         return false;
     }
     if (eh->e_machine != EM_X86_64) {
-        klog(LOG_ERROR, "elf: not an x86_64 binary (e_machine=%u)\n", eh->e_machine);
+        kserialoutf("elf: not an x86_64 binary (e_machine=%u)\n", eh->e_machine);
         return false;
     }
     if (eh->e_phentsize != sizeof(elf64_phdr_t) || eh->e_phnum == 0) {
-        klog(LOG_ERROR, "elf: no usable program headers\n");
+        kserialoutf("elf: no usable program headers\n");
         return false;
     }
     u64 table = (u64)eh->e_phnum * sizeof(elf64_phdr_t);
     if (eh->e_phoff > size || table > size - eh->e_phoff) {
-        klog(LOG_ERROR, "elf: program header table runs past end of file\n");
+        kserialoutf("elf: program header table runs past end of file\n");
         return false;
     }
     return true;
@@ -60,18 +64,18 @@ static bool elf_check_header(const elf64_ehdr_t* eh, u64 size) {
 
 static bool elf_check_segment(const elf64_phdr_t* ph, u64 size) {
     if (ph->p_memsz < ph->p_filesz) {
-        klog(LOG_ERROR, "elf: segment memsz < filesz\n");
+        kserialoutf("elf: segment memsz < filesz\n");
         return false;
     }
     if (ph->p_offset > size || ph->p_filesz > size - ph->p_offset) {
-        klog(LOG_ERROR, "elf: segment data runs past end of file\n");
+        kserialoutf("elf: segment data runs past end of file\n");
         return false;
     }
     // [vaddr, vaddr + memsz) must sit inside the load window. Written so that
     // a huge memsz cannot wrap around and sneak past the upper bound.
     if (ph->p_vaddr < USER_CODE_BASE || ph->p_vaddr > USER_LOAD_LIMIT ||
         ph->p_memsz > USER_LOAD_LIMIT - ph->p_vaddr) {
-        klog(LOG_ERROR, "elf: segment 0x%lx+0x%lx outside user window\n",
+        kserialoutf("elf: segment 0x%lx+0x%lx outside user window\n",
              ph->p_vaddr, ph->p_memsz);
         return false;
     }
@@ -101,12 +105,12 @@ i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out) {
     u64 size = node->size;
     elf64_ehdr_t eh;
     if (size < sizeof(eh) || vfs_read(node, 0, &eh, sizeof(eh)) != (i64)sizeof(eh)) {
-        klog(LOG_ERROR, "elf: file too small for a header (%lu bytes)\n", size);
+        kserialoutf("elf: file too small for a header (%lu bytes)\n", size);
         return -ENOEXEC;
     }
     if (!elf_check_header(&eh, size)) return -ENOEXEC;
     if (eh.e_phnum > ELF_MAX_PHDRS) {
-        klog(LOG_ERROR, "elf: %u program headers is too many\n", eh.e_phnum);
+        kserialoutf("elf: %u program headers is too many\n", eh.e_phnum);
         return -ENOEXEC;
     }
 
@@ -124,7 +128,7 @@ i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out) {
     for (u16 i = 0; i < eh.e_phnum; i++) {
         const elf64_phdr_t* ph = &phdrs[i];
         if (ph->p_type == PT_INTERP) {
-            klog(LOG_ERROR, "elf: dynamically linked; only static programs run so far\n");
+            kserialoutf("elf: dynamically linked; only static programs run so far\n");
             goto out;
         }
         if (ph->p_type == PT_PHDR) phdr_addr = ph->p_vaddr;
@@ -143,11 +147,11 @@ i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out) {
         }
     }
     if (!any_load) {
-        klog(LOG_ERROR, "elf: no loadable segments\n");
+        kserialoutf("elf: no loadable segments\n");
         goto out;
     }
     if (!entry_ok) {
-        klog(LOG_ERROR, "elf: entry point 0x%lx is not in an executable segment\n", eh.e_entry);
+        kserialoutf("elf: entry point 0x%lx is not in an executable segment\n", eh.e_entry);
         goto out;
     }
 

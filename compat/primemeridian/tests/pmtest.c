@@ -119,7 +119,9 @@ static void test_files(void) {
     struct stat st;
     CHECK("stat a file", stat("/ufs/big.txt", &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 3080000);
     CHECK("stat a directory", stat("/ufs/docs", &st) == 0 && S_ISDIR(st.st_mode));
-    CHECK("regular files look executable", stat("/ufs/hello.txt", &st) == 0 && (st.st_mode & 0111));
+    CHECK("FAT32 files (no permissions on disk) look executable", stat("/BIN/LS.ELF", &st) == 0 && (st.st_mode & 0111));
+    CHECK("UFS2 reports its real modes", stat("/ufs/hello.txt", &st) == 0 && !(st.st_mode & 0111) &&
+          stat("/ufs/bin/zsh", &st) == 0 && (st.st_mode & 0111));
 
     f = fopen("/PMTEST.TXT", "w");
     int wrote = f && fprintf(f, "written by %s\n", "musl") > 0 && fclose(f) == 0;

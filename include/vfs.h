@@ -28,6 +28,7 @@
 #define VN_DIR  2
 #define VN_CHR  3              // character device
 #define VN_FIFO 4              // pipe
+#define VN_LNK  5              // symbolic link
 
 struct mount;
 
@@ -37,8 +38,34 @@ typedef struct {
     u64 aux;                   // driver's extra locator (e.g. where its dir entry lives)
     u64 size;
     u64 mtime;                 // last modified, seconds since 1970 (0: unknown)
+    u64 atime, ctime;          // last read, last changed (inode); 0: as mtime
     u32 type;                  // VN_*
+    // Ownership and permissions, from filesystems that keep them. mode is
+    // the permission bits only (07777); 0 means the filesystem has none,
+    // and callers make something sensible up.
+    u32 mode;
+    u32 uid, gid;
+    u32 nlink;                 // 0: unknown
 } vnode_t;
+
+// Attribute changes (setattr): which fields of vattr_t to apply.
+#define VATTR_MODE  0x1
+#define VATTR_UID   0x2
+#define VATTR_GID   0x4
+#define VATTR_ATIME 0x8
+#define VATTR_MTIME 0x10
+typedef struct {
+    u32 mode, uid, gid;
+    u64 atime, mtime;
+} vattr_t;
+
+// Space and inodes, in units of bsize bytes (statfs).
+typedef struct {
+    u64 bsize;
+    u64 blocks, bfree, bavail;
+    u64 files, ffree;
+    u32 namemax;
+} vfs_statfs_t;
 
 // Every operation returns a value >= 0 on success or -errno. A driver leaves
 // an operation NULL if it does not support it; the VFS then reports EROFS
@@ -52,14 +79,30 @@ typedef struct {
     i64 (*write)(vnode_t* node, u64 off, const void* buf, u64 len);
     // index-th entry of a directory, "." and ".." excluded: 1 found, 0 end.
     i32 (*readdir)(const vnode_t* dir, u32 index, char* name_out, vnode_t* out);
-    // Make a new empty file (VN_REG) or directory (VN_DIR) in dir.
-    i32 (*create)(const vnode_t* dir, const char* name, u32 type, vnode_t* out);
+    // Make a new empty file (VN_REG) or directory (VN_DIR) in dir, with
+    // permission bits `mode` (umask already applied).
+    i32 (*create)(const vnode_t* dir, const char* name, u32 type, u32 mode, vnode_t* out);
     i32 (*unlink)(const vnode_t* dir, const char* name);    // files and empty dirs
     i32 (*truncate)(vnode_t* node, u64 size);
     // Move olddir/oldname to newdir/newname (same filesystem), replacing a
     // file already at the destination.
     i32 (*rename)(const vnode_t* olddir, const char* oldname,
                   const vnode_t* newdir, const char* newname);
+
+    // Optional, for filesystems that have them.
+    i64 (*readlink)(vnode_t* node, char* buf, u64 len);     // bytes, no NUL
+    i32 (*symlink)(const vnode_t* dir, const char* name, const char* target, vnode_t* out);
+    i32 (*link)(const vnode_t* dir, const char* name, const vnode_t* target);
+    i32 (*setattr)(vnode_t* node, u32 mask, const vattr_t* a);
+    // Refresh node's size, times, mode and links from the filesystem (for
+    // fstat on a file opened long ago).
+    i32 (*getattr)(vnode_t* node);
+    i32 (*statfs)(const struct mount* m, vfs_statfs_t* out);
+    // The last open file on node is gone. With keeps_unlinked set, the
+    // driver lets open files be unlinked (and renamed over): it keeps the
+    // object until this is called -- the Unix rule.
+    void (*release)(vnode_t* node);
+    bool keeps_unlinked;
 } vfs_ops_t;
 
 typedef struct mount {
@@ -78,8 +121,10 @@ const mount_t* vfs_mount_at(u32 i);      // the i-th mount, NULL past the end
 // Normalise `path` against the current process's working directory.
 i32 vfs_normalize(const char* path, char* out);
 
-// Resolve a path to a node.
+// Resolve a path to a node, following symbolic links (all of them, or all
+// but a final one with _nofollow -- for lstat, readlink, unlink...).
 i32 vfs_lookup(const char* path, vnode_t* out);
+i32 vfs_lookup_nofollow(const char* path, vnode_t* out);
 // Resolve the directory a path would live in, and its final component --
 // for creating and deleting. Fails with EEXIST/ENOENT as appropriate only in
 // the caller; this just splits and resolves.
@@ -90,7 +135,14 @@ i64 vfs_write(vnode_t* node, u64 off, const void* buf, u64 len);
 i32 vfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* out);
 // Same, by path, with mount points that live in the directory listed first.
 i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out);
-i32 vfs_create(const char* path, u32 type, vnode_t* out);
+i32 vfs_create(const char* path, u32 type, vnode_t* out);     // mode 0666/0777 & ~umask
+i32 vfs_create_mode(const char* path, u32 type, u32 mode, vnode_t* out);
+i32 vfs_symlink(const char* target, const char* linkpath);
+i32 vfs_link(const char* oldpath, const char* newpath);
+i64 vfs_readlink(const char* path, char* buf, u64 len);
+i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a);
+void vfs_getattr(vnode_t* node);         // bring an open file's node up to date
+i32 vfs_statfs(const vnode_t* node, vfs_statfs_t* out);
 i32 vfs_unlink(const char* path, bool want_dir);
 i32 vfs_truncate(vnode_t* node, u64 size);
 i32 vfs_rename(const char* oldpath, const char* newpath);

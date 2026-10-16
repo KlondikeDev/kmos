@@ -42,9 +42,11 @@
 #include <rtc.h>
 #include <usermode.h>
 #include <klibc/string.h>
+#include <file.h>
 
 typedef struct {
     u8 drive;
+    const struct mount* self;    // where it is mounted (set at the first root())
     ufs2_fs_t fs;                // the superblock, in memory
     u8* sbbuf;                   // fs_sbsize bytes: what gets written back
     u64 sbloc;
@@ -450,6 +452,13 @@ static void inode_free(ufs_t* u, u32 ino, bool dir) {
     cg_changed(u, cg, false);
 }
 
+// A short symlink keeps its target in the block pointers themselves
+// (di_db/di_ib) and holds no blocks: those pointers are text, not addresses.
+static bool fast_link(ufs_t* u, const ufs2_dinode_t* ip) {
+    return (ip->di_mode & UFS2_IFMT) == UFS2_IFLNK && ip->di_blocks == 0 &&
+           ip->di_size < (u64)u->fs.fs_maxsymlinklen;
+}
+
 static void touch(ufs2_dinode_t* ip, bool modified) {
     i64 now = (i64)rtc_now();
     ip->di_ctime = now;
@@ -715,6 +724,13 @@ static i32 trim_indirect(ufs_t* u, ufs2_dinode_t* ip, i64* ptr, u32 level, i64 f
 
 // Shrink (or grow) a file to `size`, giving back what it no longer needs.
 static i32 truncate_inode(ufs_t* u, u32 ino, ufs2_dinode_t* ip, u64 size) {
+    if (fast_link(u, ip)) {
+        // Only ever truncated to nothing, as the link goes away.
+        memset(ip->di_db, 0, sizeof(ip->di_db));
+        memset(ip->di_ib, 0, sizeof(ip->di_ib));
+        ip->di_size = 0;
+        return write_inode(u, ino, ip) ? 0 : -EIO;
+    }
     u64 old = ip->di_size;
     if (size > u->fs.fs_maxfilesize) return -EFBIG;
     if (size == old) {
@@ -935,20 +951,34 @@ static u8 dtype_of(u16 mode) {
 // VFS interface. A vnode's id is its inode number.
 // ---------------------------------------------------------------------------
 
+static void fill_node(u32 ino, const ufs2_dinode_t* ip, vnode_t* out) {
+    u32 fmt = ip->di_mode & UFS2_IFMT;
+    out->id = ino;
+    out->aux = 0;
+    out->size = ip->di_size;
+    out->mtime = ip->di_mtime > 0 ? (u64)ip->di_mtime : 0;
+    out->atime = ip->di_atime > 0 ? (u64)ip->di_atime : 0;
+    out->ctime = ip->di_ctime > 0 ? (u64)ip->di_ctime : 0;
+    out->type = fmt == UFS2_IFDIR ? VN_DIR : fmt == UFS2_IFREG ? VN_REG :
+                fmt == UFS2_IFLNK ? VN_LNK : fmt == UFS2_IFIFO ? VN_FIFO : VN_CHR;
+    // 07777 permissions; a file with none at all still needs to look
+    // "known", so mode 0 is reported as such only by filesystems without.
+    out->mode = ip->di_mode & 07777;
+    if (!out->mode) out->mode = 01000000;            // (masked off again by stat)
+    out->uid = ip->di_uid;
+    out->gid = ip->di_gid;
+    out->nlink = ip->di_nlink > 0 ? (u32)ip->di_nlink : 0;
+}
+
 static i32 node_from_inode(ufs_t* u, u32 ino, vnode_t* out) {
     ufs2_dinode_t ip;
     if (!read_inode(u, ino, &ip)) return -EIO;
-    u32 fmt = ip.di_mode & UFS2_IFMT;
-    out->id = ino;
-    out->aux = 0;
-    out->size = ip.di_size;
-    out->mtime = ip.di_mtime > 0 ? (u64)ip.di_mtime : 0;
-    out->type = fmt == UFS2_IFDIR ? VN_DIR : fmt == UFS2_IFREG ? VN_REG :
-                fmt == UFS2_IFIFO ? VN_FIFO : VN_CHR;
+    fill_node(ino, &ip, out);
     return 0;
 }
 
 static i32 ufs2_root(vnode_t* out) {
+    U(out)->self = out->mnt;
     return node_from_inode(U(out), UFS2_ROOT_INO, out);
 }
 
@@ -1046,6 +1076,8 @@ static i32 ufs2_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* 
     return e < 0 ? e : 1;
 }
 
+static i32 free_inode(ufs_t* u, u32 ino, ufs2_dinode_t* ip_in);
+
 // Drop one link to an inode; free it with the last.
 static i32 drop_link(ufs_t* u, u32 ino) {
     ufs2_dinode_t ip;
@@ -1058,6 +1090,20 @@ static i32 drop_link(ufs_t* u, u32 ino) {
         touch(&ip, false);
         return write_inode(u, ino, &ip) ? 0 : -EIO;
     }
+    // Still open somewhere: it lives on, nameless, until the last close
+    // (ufs2_release). Should the machine stop first, fsck reclaims it.
+    vnode_t probe = { .mnt = u->self, .id = ino };
+    if (vnode_is_open(&probe)) {
+        touch(&ip, false);
+        return write_inode(u, ino, &ip) ? 0 : -EIO;
+    }
+    return free_inode(u, ino, &ip);
+}
+
+// Give an inode with no links left, and everything it holds, back.
+static i32 free_inode(ufs_t* u, u32 ino, ufs2_dinode_t* ip_in) {
+    ufs2_dinode_t ip = *ip_in;
+    bool dir = (ip.di_mode & UFS2_IFMT) == UFS2_IFDIR;
     i32 r = truncate_inode(u, ino, &ip, 0);
     if (r < 0) return r;
     u32 gen = ip.di_gen;
@@ -1076,7 +1122,7 @@ static i32 adjust_nlink(ufs_t* u, u32 ino, i32 delta) {
     return write_inode(u, ino, &ip) ? 0 : -EIO;
 }
 
-static i32 ufs2_create(const vnode_t* dirnode, const char* name, u32 type, vnode_t* out) {
+static i32 ufs2_create(const vnode_t* dirnode, const char* name, u32 type, u32 mode, vnode_t* out) {
     ufs_t* u = U(dirnode);
     i32 r = begin_write(u);
     if (r < 0) return r;
@@ -1089,7 +1135,7 @@ static i32 ufs2_create(const vnode_t* dirnode, const char* name, u32 type, vnode
     if (!ino) { commit(u); return -ENOSPC; }
     ufs2_dinode_t ip;
     memset(&ip, 0, sizeof(ip));
-    ip.di_mode = dir ? (UFS2_IFDIR | 0755) : (UFS2_IFREG | 0644);
+    ip.di_mode = (u16)((dir ? UFS2_IFDIR : UFS2_IFREG) | (mode & 07777));
     ip.di_nlink = dir ? 2 : 1;
     ip.di_gen = (u32)weak_random() | 1;
     i64 now = (i64)rtc_now();
@@ -1212,6 +1258,124 @@ static i32 ufs2_rename(const vnode_t* olddir, const char* oldname,
     return r < 0 ? r : c;
 }
 
+static i64 ufs2_readlink(vnode_t* node, char* buf, u64 len) {
+    ufs_t* u = U(node);
+    ufs2_dinode_t ip;
+    if (!read_inode(u, (u32)node->id, &ip)) return -EIO;
+    if ((ip.di_mode & UFS2_IFMT) != UFS2_IFLNK) return -EINVAL;
+    if (len > ip.di_size) len = ip.di_size;
+    if (fast_link(u, &ip)) {
+        memcpy(buf, (const u8*)ip.di_db, len);
+        return (i64)len;
+    }
+    return read_data(u, &ip, 0, buf, len) ? (i64)len : -EIO;
+}
+
+static i32 ufs2_symlink(const vnode_t* dirnode, const char* name, const char* target, vnode_t* out) {
+    ufs_t* u = U(dirnode);
+    i32 r = begin_write(u);
+    if (r < 0) return r;
+    u32 len = (u32)strlen(name), tlen = (u32)strlen(target);
+    if (len == 0 || len > 255) return -ENAMETOOLONG;
+    u32 pino = (u32)dirnode->id;
+    u32 ino = inode_alloc(u, cg_of_ino(u, pino), false);
+    if (!ino) { commit(u); return -ENOSPC; }
+    ufs2_dinode_t ip;
+    memset(&ip, 0, sizeof(ip));
+    ip.di_mode = UFS2_IFLNK | 0777;
+    ip.di_nlink = 1;
+    ip.di_gen = (u32)weak_random() | 1;
+    i64 now = (i64)rtc_now();
+    ip.di_atime = ip.di_mtime = ip.di_ctime = ip.di_birthtime = now;
+    if (tlen < (u32)u->fs.fs_maxsymlinklen) {
+        memcpy((u8*)ip.di_db, target, tlen);            // a fast link: no blocks
+        ip.di_size = tlen;
+        r = write_inode(u, ino, &ip) ? 0 : -EIO;
+    } else {
+        r = write_inode(u, ino, &ip) ? 0 : -EIO;
+        if (r == 0) {
+            i64 w = write_data(u, ino, &ip, 0, target, tlen);
+            if (w < 0) r = (i32)w;
+        }
+    }
+    if (r == 0) r = dir_add(u, pino, name, len, ino, UFS2_DT_LNK);
+    if (r < 0) {
+        if (read_inode(u, ino, &ip)) free_inode(u, ino, &ip);
+        commit(u);
+        return r;
+    }
+    r = node_from_inode(u, ino, out);
+    i32 c = commit(u);
+    return r < 0 ? r : c;
+}
+
+static i32 ufs2_link(const vnode_t* dirnode, const char* name, const vnode_t* target) {
+    ufs_t* u = U(dirnode);
+    i32 r = begin_write(u);
+    if (r < 0) return r;
+    u32 len = (u32)strlen(name), ino = (u32)target->id;
+    if (len == 0 || len > 255) return -ENAMETOOLONG;
+    ufs2_dinode_t ip;
+    if (!read_inode(u, ino, &ip)) return -EIO;
+    if ((ip.di_mode & UFS2_IFMT) == UFS2_IFDIR) return -EPERM;
+    if (ip.di_nlink >= 32767) return -EMLINK;
+    ip.di_nlink++;
+    touch(&ip, false);
+    if (!write_inode(u, ino, &ip)) return -EIO;
+    r = dir_add(u, (u32)dirnode->id, name, len, ino, dtype_of(ip.di_mode));
+    if (r < 0) adjust_nlink(u, ino, -1);
+    i32 c = commit(u);
+    return r < 0 ? r : c;
+}
+
+static i32 ufs2_setattr(vnode_t* node, u32 mask, const vattr_t* a) {
+    ufs_t* u = U(node);
+    i32 r = begin_write(u);
+    if (r < 0) return r;
+    u32 ino = (u32)node->id;
+    ufs2_dinode_t ip;
+    if (!read_inode(u, ino, &ip)) return -EIO;
+    if (mask & VATTR_MODE) ip.di_mode = (u16)((ip.di_mode & UFS2_IFMT) | (a->mode & 07777));
+    if (mask & VATTR_UID) ip.di_uid = a->uid;
+    if (mask & VATTR_GID) ip.di_gid = a->gid;
+    if (mask & VATTR_ATIME) { ip.di_atime = (i64)a->atime; ip.di_atimensec = 0; }
+    if (mask & VATTR_MTIME) { ip.di_mtime = (i64)a->mtime; ip.di_mtimensec = 0; }
+    touch(&ip, false);
+    if (!write_inode(u, ino, &ip)) return -EIO;
+    fill_node(ino, &ip, node);
+    return commit(u);
+}
+
+static i32 ufs2_statfs(const struct mount* m, vfs_statfs_t* out) {
+    ufs_t* u = (ufs_t*)m->priv;
+    const ufs2_fs_t* fs = &u->fs;
+    u64 free = (u64)fs->fs_cstotal.cs_nbfree * u->frag + (u64)fs->fs_cstotal.cs_nffree;
+    u64 reserve = (u64)fs->fs_dsize * (u64)fs->fs_minfree / 100;
+    out->bsize = u->fsize;
+    out->blocks = (u64)fs->fs_dsize;
+    out->bfree = free;
+    out->bavail = free > reserve ? free - reserve : 0;
+    out->files = (u64)u->ncg * u->ipg;
+    out->ffree = (u64)fs->fs_cstotal.cs_nifree;
+    out->namemax = 255;
+    return 0;
+}
+
+static i32 ufs2_getattr(vnode_t* node) {
+    return node_from_inode(U(node), (u32)node->id, node);
+}
+
+// The last open of an inode closed: if its last link went meanwhile, now
+// it can go too.
+static void ufs2_release(vnode_t* node) {
+    ufs_t* u = U(node);
+    ufs2_dinode_t ip;
+    if (!read_inode(u, (u32)node->id, &ip) || ip.di_mode == 0 || ip.di_nlink > 0) return;
+    if (begin_write(u) < 0) return;
+    free_inode(u, (u32)node->id, &ip);
+    commit(u);
+}
+
 const vfs_ops_t ufs2_vfs_ops = {
     .type = "ufs2",
     .root = ufs2_root,
@@ -1223,6 +1387,14 @@ const vfs_ops_t ufs2_vfs_ops = {
     .unlink = ufs2_unlink,
     .truncate = ufs2_truncate,
     .rename = ufs2_rename,
+    .readlink = ufs2_readlink,
+    .symlink = ufs2_symlink,
+    .link = ufs2_link,
+    .setattr = ufs2_setattr,
+    .statfs = ufs2_statfs,
+    .getattr = ufs2_getattr,
+    .release = ufs2_release,
+    .keeps_unlinked = true,
 };
 
 // ---------------------------------------------------------------------------

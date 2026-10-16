@@ -66,6 +66,8 @@ bool vnode_is_open(const vnode_t* n) {
 static void vnode_release(vnode_t* n) {
     open_vnode_t* o = (open_vnode_t*)n;
     if (--o->refs) return;
+    // The last open is gone: a file unlinked meanwhile can go now.
+    if (n->mnt && n->mnt->ops->release) n->mnt->ops->release(n);
     for (open_vnode_t** pp = &open_vnodes; *pp; pp = &(*pp)->next) {
         if (*pp == o) { *pp = o->next; break; }
     }
@@ -168,6 +170,10 @@ static i32 open_fd_alias(const char* path, file_t** out) {
 }
 
 i32 file_open(const char* path, u32 flags, file_t** out) {
+    return file_open_mode(path, flags, 0666, out);
+}
+
+i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
     u32 acc = flags & O_ACCMODE;
     if (acc == 3) return -EINVAL;
     i32 alias = open_fd_alias(path, out);
@@ -176,7 +182,7 @@ i32 file_open(const char* path, u32 flags, file_t** out) {
     vnode_t node;
     i32 r = vfs_lookup(path, &node);
     if (r == -ENOENT && (flags & O_CREAT)) {
-        r = vfs_create(path, VN_REG, &node);
+        r = vfs_create_mode(path, VN_REG, mode, &node);
     } else if (r == 0 && (flags & O_CREAT) && (flags & O_EXCL)) {
         return -EEXIST;
     }

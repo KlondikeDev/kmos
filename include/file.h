@@ -71,6 +71,8 @@ struct file {
 
 // Open a path. Returns 0 and the new file, or -errno.
 i32 file_open(const char* path, u32 flags, file_t** out);
+// The same, with the permission bits for O_CREAT (the umask applies).
+i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out);
 void file_ref(file_t* f);
 // Is some open file using this node? (Unlinking one is refused for now.)
 bool vnode_is_open(const vnode_t* n);

@@ -99,12 +99,25 @@ bool vfs_mount_with(const char* point, const vfs_ops_t* ops, void* priv) {
     return true;
 }
 
-// Walk an absolute, normalised path to a node.
-static i32 walk(const char* abs, vnode_t* out) {
-    const char* rel;
-    const mount_t* m = resolve_mount(abs, &rel);
-    if (!m) return -ENOENT;
+#define VFS_MAX_LINKS 32       // symbolic links followed in one lookup
 
+// Walk an absolute, normalised path to a node. Symbolic links met on the way
+// are followed by splicing their target into the path and starting again
+// (a relative target is relative to the link's directory); a link as the
+// final component only if follow_last is set.
+//
+// ".." was folded away textually before the walk, so "a/link/.." is "a" --
+// the shell's view (as with zsh's default CHASE_LINKS off) rather than the
+// target's parent.
+static i32 walk(const char* abs_in, vnode_t* out, bool follow_last) {
+    char path[VFS_PATH_MAX];
+    strcpy(path, abs_in);
+    u32 links = 0;
+
+restart:;
+    const char* rel;
+    const mount_t* m = resolve_mount(path, &rel);
+    if (!m) return -ENOENT;
     out->mnt = m;
     i32 r = m->ops->root(out);
     if (r < 0) return r;
@@ -115,6 +128,7 @@ static i32 walk(const char* abs, vnode_t* out) {
     while (*p) {
         while (*p == '/') p++;
         if (!*p) break;
+        const char* start = p;
         u32 n = 0;
         while (*p && *p != '/') name[n++] = *p++;
         name[n] = '\0';
@@ -124,6 +138,36 @@ static i32 walk(const char* abs, vnode_t* out) {
         r = m->ops->lookup(out, name, &next);
         if (r < 0) return r;
         next.mnt = m;
+
+        const char* rest = p;
+        while (*rest == '/') rest++;
+        if (next.type == VN_LNK && (*rest || follow_last)) {
+            if (++links > VFS_MAX_LINKS || !m->ops->readlink) return -ELOOP;
+            char target[VFS_PATH_MAX];
+            i64 len = m->ops->readlink(&next, target, sizeof(target) - 1);
+            if (len < 0) return (i32)len;
+            if (len == 0) return -ENOENT;
+            target[len] = '\0';
+            // new path = (target is absolute ? "" : the link's directory)
+            //            + "/" + target + "/" + the rest
+            char spliced[VFS_PATH_MAX * 2];
+            u32 k = 0;
+            if (target[0] != '/') {
+                u32 dirlen = (u32)(start - path);
+                for (u32 i = 0; i < dirlen; i++) spliced[k++] = path[i];
+                spliced[k++] = '/';
+            }
+            for (i64 i = 0; i < len; i++) spliced[k++] = target[i];
+            if (*rest) {
+                spliced[k++] = '/';
+                for (const char* c = rest; *c && k < sizeof(spliced) - 1; c++) spliced[k++] = *c;
+            }
+            spliced[k] = '\0';
+            if (spliced[0] != '/') return -ENOENT;
+            r = vfs_normalize(spliced, path);
+            if (r < 0) return r;
+            goto restart;
+        }
         *out = next;
     }
     return 0;
@@ -133,7 +177,14 @@ i32 vfs_lookup(const char* path, vnode_t* out) {
     char abs[VFS_PATH_MAX];
     i32 r = vfs_normalize(path, abs);
     if (r < 0) return r;
-    return walk(abs, out);
+    return walk(abs, out, true);
+}
+
+i32 vfs_lookup_nofollow(const char* path, vnode_t* out) {
+    char abs[VFS_PATH_MAX];
+    i32 r = vfs_normalize(path, abs);
+    if (r < 0) return r;
+    return walk(abs, out, false);
 }
 
 i32 vfs_lookup_parent(const char* path, vnode_t* dir_out, char* name_out) {
@@ -154,7 +205,7 @@ i32 vfs_lookup_parent(const char* path, vnode_t* dir_out, char* name_out) {
 
     if (slash == 1) { abs[1] = '\0'; }                   // parent is "/"
     else abs[slash - 1] = '\0';
-    r = walk(abs, dir_out);
+    r = walk(abs, dir_out, true);
     if (r < 0) return r;
     return dir_out->type == VN_DIR ? 0 : -ENOTDIR;
 }
@@ -210,7 +261,7 @@ i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out) 
     i32 r = vfs_normalize(path, abs);
     if (r < 0) return r;
     vnode_t dir;
-    r = walk(abs, &dir);
+    r = walk(abs, &dir, true);
     if (r < 0) return r;
     if (dir.type != VN_DIR) return -ENOTDIR;
 
@@ -230,6 +281,11 @@ i32 vfs_readdir_path(const char* path, u32 index, char* name_out, vnode_t* out) 
 }
 
 i32 vfs_create(const char* path, u32 type, vnode_t* out) {
+    return vfs_create_mode(path, type, type == VN_DIR ? 0777 : 0666, out);
+}
+
+i32 vfs_create_mode(const char* path, u32 type, u32 mode, vnode_t* out) {
+    mode &= 07777 & ~proc_current()->umask;
     vnode_t dir;
     char name[VFS_NAME_MAX];
     i32 r = vfs_lookup_parent(path, &dir, name);
@@ -237,7 +293,7 @@ i32 vfs_create(const char* path, u32 type, vnode_t* out) {
     vnode_t existing;
     if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
     if (!dir.mnt->ops->create) return -EROFS;
-    r = dir.mnt->ops->create(&dir, name, type, out);
+    r = dir.mnt->ops->create(&dir, name, type, mode, out);
     if (r == 0) out->mnt = dir.mnt;
     return r;
 }
@@ -255,7 +311,7 @@ i32 vfs_unlink(const char* path, bool want_dir) {
     // Unix would keep an open file's data alive until the last close; the
     // drivers cannot do that yet, and freeing it under an open descriptor
     // would let later writes land in someone else's blocks. So: refuse.
-    if (vnode_is_open(&node)) return -EBUSY;
+    if (!dir.mnt->ops->keeps_unlinked && vnode_is_open(&node)) return -EBUSY;
     if (!dir.mnt->ops->unlink) return -EROFS;
     return dir.mnt->ops->unlink(&dir, name);
 }
@@ -271,7 +327,9 @@ i32 vfs_rename(const char* oldpath, const char* newpath) {
     if (r < 0) return r;
     node.mnt = olddir.mnt;
     if (olddir.mnt != newdir.mnt) return -EXDEV;      // across filesystems: copy instead
-    if (vnode_is_open(&node)) return -EBUSY;          // its locator is about to change
+    // Drivers whose ids are stable (inode numbers) can move open files; for
+    // the others the locator is about to change under the open file.
+    if (!node.mnt->ops->keeps_unlinked && vnode_is_open(&node)) return -EBUSY;
 
     vnode_t existing;
     if (newdir.mnt->ops->lookup(&newdir, newname, &existing) == 0) {
@@ -279,7 +337,7 @@ i32 vfs_rename(const char* oldpath, const char* newpath) {
         if (existing.type == VN_DIR) return node.type == VN_DIR ? -ENOTEMPTY : -EISDIR;
         if (node.type == VN_DIR) return -ENOTDIR;
         if (existing.mnt->ops == node.mnt->ops && existing.id == node.id && existing.aux == node.aux) return 0;
-        if (vnode_is_open(&existing)) return -EBUSY;
+        if (!existing.mnt->ops->keeps_unlinked && vnode_is_open(&existing)) return -EBUSY;
     }
     if (!olddir.mnt->ops->rename) return -EROFS;
     return olddir.mnt->ops->rename(&olddir, oldname, &newdir, newname);
@@ -297,7 +355,7 @@ i32 vfs_chdir(const char* path) {
     i32 r = vfs_normalize(path, abs);
     if (r < 0) return r;
     vnode_t n;
-    r = walk(abs, &n);
+    r = walk(abs, &n, true);
     if (r < 0) return r;
     if (n.type != VN_DIR) return -ENOTDIR;
     char* cwd = proc_current()->cwd;
@@ -321,4 +379,57 @@ void vfs_list_mounts(void) {
     for (u32 i = 0; i < mount_count; i++) {
         terminal_printf(SILVER, BLACK, "%s on %s\n", mounts[i].ops->type, mounts[i].point);
     }
+}
+
+i32 vfs_symlink(const char* target, const char* linkpath) {
+    vnode_t dir, existing, out;
+    char name[VFS_NAME_MAX];
+    if (!target[0]) return -ENOENT;
+    if (strlen(target) >= VFS_PATH_MAX) return -ENAMETOOLONG;
+    i32 r = vfs_lookup_parent(linkpath, &dir, name);
+    if (r < 0) return r;
+    if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
+    if (!dir.mnt->ops->symlink) return -EPERM;           // FAT32 has none
+    return dir.mnt->ops->symlink(&dir, name, target, &out);
+}
+
+i32 vfs_link(const char* oldpath, const char* newpath) {
+    vnode_t node, dir, existing;
+    char name[VFS_NAME_MAX];
+    i32 r = vfs_lookup_nofollow(oldpath, &node);
+    if (r < 0) return r;
+    if (node.type == VN_DIR) return -EPERM;              // no hard links to directories
+    r = vfs_lookup_parent(newpath, &dir, name);
+    if (r < 0) return r;
+    if (dir.mnt != node.mnt) return -EXDEV;
+    if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
+    if (!dir.mnt->ops->link) return -EPERM;
+    return dir.mnt->ops->link(&dir, name, &node);
+}
+
+i64 vfs_readlink(const char* path, char* buf, u64 len) {
+    vnode_t node;
+    i32 r = vfs_lookup_nofollow(path, &node);
+    if (r < 0) return r;
+    if (node.type != VN_LNK || !node.mnt->ops->readlink) return -EINVAL;
+    return node.mnt->ops->readlink(&node, buf, len);
+}
+
+i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a) {
+    // Filesystems without attributes (FAT32, devices) quietly keep none:
+    // with no users there is nobody to refuse.
+    if (!node->mnt || !node->mnt->ops->setattr) return 0;
+    return node->mnt->ops->setattr(node, mask, a);
+}
+
+i32 vfs_statfs(const vnode_t* node, vfs_statfs_t* out) {
+    for (u32 i = 0; i < sizeof(*out); i++) ((u8*)out)[i] = 0;
+    out->bsize = 4096;
+    out->namemax = VFS_NAME_MAX - 1;
+    if (!node->mnt || !node->mnt->ops->statfs) return 0;
+    return node->mnt->ops->statfs(node->mnt, out);
+}
+
+void vfs_getattr(vnode_t* node) {
+    if (node->mnt && node->mnt->ops->getattr) node->mnt->ops->getattr(node);
 }

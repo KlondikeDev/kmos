@@ -63,7 +63,9 @@ void __libk_start(int argc, char** argv, char** envp) {
 // ---------------------------------------------------------------------------
 
 int open(const char* path, int flags, ...) {
-    return (int)check(syscall3(SYS_OPEN, (long)path, flags, 0));
+    // Kunix's own programs have always called open(path, O_CREAT) without a
+    // mode, so it cannot be read safely: new files get 0666, less the umask.
+    return (int)check(syscall3(SYS_OPEN, (long)path, flags, (flags & O_CREAT) ? 0666 : 0));
 }
 int close(int fd)                          { return (int)check(syscall3(SYS_CLOSE, fd, 0, 0)); }
 ssize_t read(int fd, void* buf, size_t n)  { return check(syscall3(SYS_READ, fd, (long)buf, (long)n)); }

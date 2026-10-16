@@ -656,7 +656,8 @@ static void make_entry(dirent_t* e, const uint8_t name[11], uint8_t attr, uint32
     e->create_time = e->write_time = (uint16_t)now;
 }
 
-static i32 fat_create(const vnode_t* dir, const char* name, uint32_t type, vnode_t* out) {
+static i32 fat_create(const vnode_t* dir, const char* name, uint32_t type, u32 mode, vnode_t* out) {
+    (void)mode;                                  // FAT32 keeps no permissions
     uint8_t short_name[11];
     i32 r = to_83(name, short_name);
     if (r < 0) return r;

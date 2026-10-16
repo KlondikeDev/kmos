@@ -84,12 +84,12 @@ static i32 path_at(i64 dirfd, u64 upath, char* out) {
     return 0;
 }
 
-static i64 open_kpath(const char* kpath, u64 flags) {
+static i64 open_kpath(const char* kpath, u64 flags, u64 mode) {
     file_t* f;
     // O_PATH descriptors are only good for *at() and fstat: a read-only
     // open serves.
     if (flags & 010000000) flags = (flags & ~(010000000ULL | O_ACCMODE)) | O_RDONLY;
-    i32 r = file_open(kpath, (u32)flags, &f);
+    i32 r = file_open_mode(kpath, (u32)flags, (u32)mode & 07777, &f);
     if (r < 0) return r;
     i32 fd = fd_install(me(), f, 0);
     if (fd < 0) {
@@ -110,11 +110,14 @@ static void to_lstat(const vnode_t* n, l_stat_t* st) {
     memset(st, 0, sizeof(*st));
     st->st_dev = k.st_dev + 1;
     st->st_ino = k.st_ino ? k.st_ino : 1;
-    st->st_nlink = n->type == VN_DIR ? 2 : 1;
+    // With attributes known (mode set), 0 links is a fact: an unlinked open file.
+    st->st_nlink = (n->nlink || n->mode) ? n->nlink : (n->type == VN_DIR ? 2 : 1);
     st->st_mode = k.st_mode;
-    // No permissions yet: every regular file counts as executable, so
-    // shells will run what PATH finds.
-    if ((st->st_mode & S_IFMT) == S_IFREG) st->st_mode = S_IFREG | 0755;
+    // A filesystem without permissions (FAT32): every regular file counts
+    // as executable, so shells will run what PATH finds.
+    if (!n->mode && (st->st_mode & S_IFMT) == S_IFREG) st->st_mode = S_IFREG | 0755;
+    st->st_uid = n->uid;
+    st->st_gid = n->gid;
     if (devfs_is_tty(n)) {
         st->st_mode = S_IFCHR | 0620;
         st->st_rdev = (4 << 8) | 1;                    // like /dev/tty1
@@ -122,15 +125,17 @@ static void to_lstat(const vnode_t* n, l_stat_t* st) {
         st->st_rdev = (1 << 8) | (u32)n->id;
     }
     st->st_size = (i64)k.st_size;
-    st->st_atime = st->st_mtime = st->st_ctime = (i64)n->mtime;
+    st->st_mtime = (i64)n->mtime;
+    st->st_atime = (i64)(n->atime ? n->atime : n->mtime);
+    st->st_ctime = (i64)(n->ctime ? n->ctime : n->mtime);
     st->st_blksize = 4096;
     st->st_blocks = (i64)((k.st_size + 511) / 512);
 }
 
-static i64 stat_kpath(const char* kpath, u64 out) {
+static i64 stat_kpath(const char* kpath, u64 out, bool follow) {
     if (!uok(out, sizeof(l_stat_t), true)) return -EFAULT;
     vnode_t n;
-    i32 r = vfs_lookup(kpath, &n);
+    i32 r = follow ? vfs_lookup(kpath, &n) : vfs_lookup_nofollow(kpath, &n);
     if (r < 0) return r;
     to_lstat(&n, (l_stat_t*)out);
     return 0;
@@ -140,6 +145,7 @@ static i64 l_fstat(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!uok(out, sizeof(l_stat_t), true)) return -EFAULT;
+    vfs_getattr(f->node);
     to_lstat(f->node, (l_stat_t*)out);
     return 0;
 }
@@ -152,7 +158,7 @@ static i64 l_newfstatat(i64 dirfd, u64 path, u64 out, u64 flags) {
     char kpath[VFS_PATH_MAX];
     i32 r = path_at(dirfd, path, kpath);
     if (r < 0) return r;
-    return stat_kpath(kpath, out);
+    return stat_kpath(kpath, out, !(flags & L_AT_SYMLINK_NOFOLLOW));
 }
 
 static i64 l_statfs_fill(const vnode_t* n, u64 out) {
@@ -162,9 +168,18 @@ static i64 l_statfs_fill(const vnode_t* n, u64 out) {
     const char* type = n->mnt && n->mnt->ops ? n->mnt->ops->type : "";
     if (!strcmp(type, "fat32")) s.f_type = 0x4d44;          // MSDOS_SUPER_MAGIC
     else if (!strcmp(type, "ufs2")) s.f_type = 0x19540119;  // UFS2_MAGIC
+    else if (!strcmp(type, "tmpfs")) s.f_type = 0x01021994; // TMPFS_MAGIC
+    else if (!strcmp(type, "proc")) s.f_type = 0x9fa0;      // PROC_SUPER_MAGIC
     else s.f_type = 0x1373;                                 // DEVFS
-    s.f_bsize = s.f_frsize = 4096;
-    s.f_namelen = 255;
+    vfs_statfs_t v;
+    vfs_statfs(n, &v);
+    s.f_bsize = s.f_frsize = (i64)v.bsize;
+    s.f_blocks = v.blocks;
+    s.f_bfree = v.bfree;
+    s.f_bavail = v.bavail;
+    s.f_files = v.files;
+    s.f_ffree = v.ffree;
+    s.f_namelen = v.namemax;
     memcpy((void*)out, &s, sizeof(s));
     return 0;
 }
@@ -185,20 +200,131 @@ static i64 l_fstatfs(u64 fd, u64 out) {
     return l_statfs_fill(f->node, out);
 }
 
-// The path must exist; then the call is a no-op (no permissions, no
-// timestamps to set yet).
-static i64 exists_at(i64 dirfd, u64 path) {
+// Resolve a *at() path to a node, following a final symlink or not.
+static i64 node_at(i64 dirfd, u64 path, bool follow, vnode_t* n) {
     char kpath[VFS_PATH_MAX];
     i32 r = path_at(dirfd, path, kpath);
     if (r < 0) return r;
-    vnode_t n;
-    return vfs_lookup(kpath, &n);
+    return follow ? vfs_lookup(kpath, n) : vfs_lookup_nofollow(kpath, n);
 }
 
-static i64 l_readlinkat(i64 dirfd, u64 path) {
-    // Nothing is a symlink: an existing path is "not a link".
-    i64 r = exists_at(dirfd, path);
-    return r < 0 ? r : -EINVAL;
+// access(): everyone is root, so reading and writing are always allowed --
+// but executing needs an x bit, where the filesystem keeps permissions.
+#define L_X_OK 1
+static i64 l_access(i64 dirfd, u64 path, u64 mode, u64 flags) {
+    vnode_t n;
+    i64 r = node_at(dirfd, path, !(flags & L_AT_SYMLINK_NOFOLLOW), &n);
+    if (r < 0) return r;
+    if ((mode & L_X_OK) && n.mode && n.type != VN_DIR && !(n.mode & 0111)) return -EACCES;
+    return 0;
+}
+
+static i64 l_readlinkat(i64 dirfd, u64 path, u64 buf, u64 size) {
+    if ((i64)size <= 0) return -EINVAL;
+    char kpath[VFS_PATH_MAX], target[VFS_PATH_MAX];
+    i64 r = path_at(dirfd, path, kpath);
+    if (r < 0) return r;
+    if (!uok(buf, size, true)) return -EFAULT;
+    r = vfs_readlink(kpath, target, sizeof(target));
+    if (r < 0) return r;
+    if ((u64)r > size) r = (i64)size;                  // truncated, as Linux does
+    memcpy((void*)buf, target, (u64)r);
+    return r;
+}
+
+static i64 l_symlinkat(u64 target, i64 dirfd, u64 linkpath) {
+    char t[VFS_PATH_MAX], kpath[VFS_PATH_MAX];
+    i32 r = copy_path(t, target);
+    if (r < 0) return r;
+    r = path_at(dirfd, linkpath, kpath);
+    if (r < 0) return r;
+    return vfs_symlink(t, kpath);
+}
+
+#define L_AT_SYMLINK_FOLLOW 0x400
+static i64 l_linkat(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath, u64 flags) {
+    char from[VFS_PATH_MAX], to[VFS_PATH_MAX];
+    i32 r = path_at(olddirfd, oldpath, from);
+    if (r < 0) return r;
+    r = path_at(newdirfd, newpath, to);
+    if (r < 0) return r;
+    if (flags & L_AT_SYMLINK_FOLLOW) {
+        // Link to what the old path names, not to a symlink there.
+        vnode_t n;
+        r = vfs_lookup(from, &n);
+        if (r < 0) return r;
+    }
+    return vfs_link(from, to);
+}
+
+// chown/chmod/utimes, on a path (follow or not) or a descriptor (path 0).
+static i64 setattr_at(i64 dirfd, u64 path, bool follow, u32 mask, const vattr_t* a) {
+    vnode_t node;
+    vnode_t* n = &node;
+    if (path) {
+        i64 r = node_at(dirfd, path, follow, &node);
+        if (r < 0) return r;
+    } else {
+        file_t* f = fd_get(me(), (i32)dirfd);
+        if (!f) return -EBADF;
+        n = f->node;
+    }
+    return vfs_setattr(n, mask, a);
+}
+
+static i64 l_chmod(i64 dirfd, u64 path, u64 mode, bool follow) {
+    vattr_t a = { .mode = (u32)mode & 07777 };
+    return setattr_at(dirfd, path, follow, VATTR_MODE, &a);
+}
+
+static i64 l_chown(i64 dirfd, u64 path, u64 uid, u64 gid, bool follow) {
+    vattr_t a = { .uid = (u32)uid, .gid = (u32)gid };
+    u32 mask = ((u32)uid != 0xFFFFFFFF ? VATTR_UID : 0) | ((u32)gid != 0xFFFFFFFF ? VATTR_GID : 0);
+    return setattr_at(dirfd, path, follow, mask, &a);
+}
+
+// utimensat: times[2] = { atime, mtime }, each a timespec, UTIME_NOW or
+// UTIME_OMIT; NULL means both now.
+#define L_UTIME_NOW  ((1L << 30) - 1)
+#define L_UTIME_OMIT ((1L << 30) - 2)
+static i64 l_utimensat(i64 dirfd, u64 path, u64 utimes, u64 flags) {
+    vattr_t a;
+    u32 mask = VATTR_ATIME | VATTR_MTIME;
+    a.atime = a.mtime = rtc_now();
+    if (utimes) {
+        if (!uok(utimes, 2 * sizeof(l_timespec_t), false)) return -EFAULT;
+        const l_timespec_t* t = (const l_timespec_t*)utimes;
+        if (t[0].tv_nsec == L_UTIME_OMIT) mask &= ~VATTR_ATIME;
+        else if (t[0].tv_nsec != L_UTIME_NOW) a.atime = (u64)t[0].tv_sec;
+        if (t[1].tv_nsec == L_UTIME_OMIT) mask &= ~VATTR_MTIME;
+        else if (t[1].tv_nsec != L_UTIME_NOW) a.mtime = (u64)t[1].tv_sec;
+    }
+    return setattr_at(dirfd, path, !(flags & L_AT_SYMLINK_NOFOLLOW), mask, &a);
+}
+
+static i64 l_utimes(u64 path, u64 utv, bool timeval) {
+    vattr_t a;
+    a.atime = a.mtime = rtc_now();
+    if (utv) {
+        if (timeval) {                                   // utimes: timeval[2]
+            if (!uok(utv, 2 * sizeof(l_timeval_t), false)) return -EFAULT;
+            a.atime = (u64)((const l_timeval_t*)utv)[0].tv_sec;
+            a.mtime = (u64)((const l_timeval_t*)utv)[1].tv_sec;
+        } else {                                         // utime: { actime, modtime }
+            if (!uok(utv, 16, false)) return -EFAULT;
+            a.atime = ((const u64*)utv)[0];
+            a.mtime = ((const u64*)utv)[1];
+        }
+    }
+    return setattr_at(L_AT_FDCWD, path, true, VATTR_ATIME | VATTR_MTIME, &a);
+}
+
+static i64 l_mkdirat(i64 dirfd, u64 path, u64 mode) {
+    char kpath[VFS_PATH_MAX];
+    vnode_t n;
+    i32 r = path_at(dirfd, path, kpath);
+    if (r < 0) return r;
+    return vfs_create_mode(kpath, VN_DIR, (u32)mode & 07777, &n);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +366,7 @@ static i64 l_getdents64(u64 fd, u64 buf, u64 count) {
         d->d_off = (i64)f->pos + 1;
         d->d_reclen = (u16)reclen;
         d->d_type = n.type == VN_DIR ? L_DT_DIR : n.type == VN_CHR ? L_DT_CHR :
-                    n.type == VN_FIFO ? L_DT_FIFO : L_DT_REG;
+                    n.type == VN_FIFO ? L_DT_FIFO : n.type == VN_LNK ? L_DT_LNK : L_DT_REG;
         memcpy(d->d_name, name, len + 1);
         f->pos++;
         off += reclen;
@@ -1066,7 +1192,7 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_openat: {
             char kpath[VFS_PATH_MAX];
             r = path_at((i64)a, b, kpath);
-            if (r == 0) r = open_kpath(kpath, c);
+            if (r == 0) r = open_kpath(kpath, c, d);
             break;
         }
         case LNX_creat:       r = sys_open(a, O_CREAT | O_WRONLY | O_TRUNC, b); break;
@@ -1075,7 +1201,7 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_lstat: {
             char kpath[VFS_PATH_MAX];
             r = copy_path(kpath, a);
-            if (r == 0) r = stat_kpath(kpath, b);
+            if (r == 0) r = stat_kpath(kpath, b, nr == LNX_stat);
             break;
         }
         case LNX_fstat:       r = l_fstat(a, b); break;
@@ -1087,9 +1213,9 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_pwrite64:    r = l_pread(a, b, c, (i64)d, true); break;
         case LNX_readv:       r = l_rw_vec(a, b, c, false); break;
         case LNX_writev:      r = l_rw_vec(a, b, c, true); break;
-        case LNX_access:      r = exists_at(L_AT_FDCWD, a); break;
-        case LNX_faccessat:
-        case LNX_faccessat2:  r = exists_at((i64)a, b); break;
+        case LNX_access:      r = l_access(L_AT_FDCWD, a, b, 0); break;
+        case LNX_faccessat:   r = l_access((i64)a, b, c, 0); break;
+        case LNX_faccessat2:  r = l_access((i64)a, b, c, d); break;
         case LNX_pipe:        r = sys_pipe(a); break;
         case LNX_pipe2:       r = l_pipe2(a, b); break;
         case LNX_dup:         r = sys_dup(a); break;
@@ -1102,16 +1228,10 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_getcwd:      r = sys_getcwd(a, b); if (r >= 0) r++; break;   // Linux counts the NUL
         case LNX_chdir:       r = sys_chdir(a); break;
         case LNX_fchdir:      r = l_fchdir(a); break;
-        case LNX_mkdir:       r = sys_path_op(a, SYS_MKDIR); break;
+        case LNX_mkdir:       r = l_mkdirat(L_AT_FDCWD, a, b); break;
         case LNX_rmdir:       r = sys_path_op(a, SYS_RMDIR); break;
         case LNX_unlink:      r = sys_path_op(a, SYS_UNLINK); break;
-        case LNX_mkdirat: {
-            char kpath[VFS_PATH_MAX];
-            vnode_t n;
-            r = path_at((i64)a, b, kpath);
-            if (r == 0) r = vfs_create(kpath, VN_DIR, &n);
-            break;
-        }
+        case LNX_mkdirat:     r = l_mkdirat((i64)a, b, c); break;
         case LNX_unlinkat: {
             char kpath[VFS_PATH_MAX];
             r = path_at((i64)a, b, kpath);
@@ -1134,18 +1254,23 @@ static void pm_dispatch(registers_t* regs) {
         }
         case LNX_truncate:    r = l_truncate(a, (i64)b); break;
         case LNX_ftruncate:   r = sys_ftruncate(a, (i64)b); break;
-        case LNX_readlink:    r = l_readlinkat(L_AT_FDCWD, a); break;
-        case LNX_readlinkat:  r = l_readlinkat((i64)a, b); break;
-        case LNX_link: case LNX_linkat:
-        case LNX_symlink: case LNX_symlinkat:
-        case LNX_mknod:       r = -EPERM; break;        // FAT32 has no links or nodes
-        case LNX_chmod: case LNX_chown: case LNX_lchown:
-        case LNX_utime: case LNX_utimes:
-                              r = exists_at(L_AT_FDCWD, a); break;
-        case LNX_fchmodat: case LNX_fchownat:
-                              r = exists_at((i64)a, b); break;
-        case LNX_utimensat:   r = b ? exists_at((i64)a, b) : (fd_get(p, (i32)a) ? 0 : -EBADF); break;
-        case LNX_fchmod: case LNX_fchown:
+        case LNX_readlink:    r = l_readlinkat(L_AT_FDCWD, a, b, c); break;
+        case LNX_readlinkat:  r = l_readlinkat((i64)a, b, c, d); break;
+        case LNX_symlink:     r = l_symlinkat(a, L_AT_FDCWD, b); break;
+        case LNX_symlinkat:   r = l_symlinkat(a, (i64)b, c); break;
+        case LNX_link:        r = l_linkat(L_AT_FDCWD, a, L_AT_FDCWD, b, 0); break;
+        case LNX_linkat:      r = l_linkat((i64)a, b, (i64)c, d, e); break;
+        case LNX_mknod:       r = -EPERM; break;        // no device or FIFO nodes on disk yet
+        case LNX_chmod:       r = l_chmod(L_AT_FDCWD, a, b, true); break;
+        case LNX_fchmod:      r = l_chmod((i64)a, 0, b, true); break;
+        case LNX_fchmodat:    r = l_chmod((i64)a, b, c, true); break;
+        case LNX_chown:       r = l_chown(L_AT_FDCWD, a, b, c, true); break;
+        case LNX_lchown:      r = l_chown(L_AT_FDCWD, a, b, c, false); break;
+        case LNX_fchown:      r = l_chown((i64)a, 0, b, c, true); break;
+        case LNX_fchownat:    r = l_chown((i64)a, b, c, d, !(e & L_AT_SYMLINK_NOFOLLOW)); break;
+        case LNX_utime:       r = l_utimes(a, b, false); break;
+        case LNX_utimes:      r = l_utimes(a, b, true); break;
+        case LNX_utimensat:   r = l_utimensat((i64)a, b, c, d); break;
         case LNX_fsync: case LNX_fdatasync:
         case LNX_flock: case LNX_fadvise64:
                               r = fd_get(p, (i32)a) ? 0 : -EBADF; break;

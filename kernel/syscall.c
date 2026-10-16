@@ -90,12 +90,11 @@ i64 sys_write(u64 fd, u64 buf, u64 len) {
 }
 
 i64 sys_open(u64 path, u64 flags, u64 mode) {
-    (void)mode;                                      // no permissions yet
     char kpath[VFS_PATH_MAX];
     i32 r = copy_path(kpath, path);
     if (r < 0) return r;
     file_t* f;
-    r = file_open(kpath, (u32)flags, &f);
+    r = file_open_mode(kpath, (u32)flags, (u32)mode & 07777, &f);
     if (r < 0) return r;
     i32 fd = fd_install(me(), f, 0);
     if (fd < 0) {
@@ -132,14 +131,19 @@ void fill_stat(const vnode_t* n, kstat_t* st) {
         case VN_DIR:  st->st_mode = S_IFDIR | 0755; break;
         case VN_CHR:  st->st_mode = S_IFCHR | 0666; break;
         case VN_FIFO: st->st_mode = S_IFIFO | 0600; break;
+        case VN_LNK:  st->st_mode = S_IFLNK | 0777; break;
         default:      st->st_mode = S_IFREG | 0644; break;
     }
+    // Filesystems that keep permissions (UFS2, tmpfs) say what they are.
+    if (n->mode) st->st_mode = (st->st_mode & S_IFMT) | (n->mode & 07777);
+    if (n->nlink || n->mode) st->st_nlink = n->nlink;
 }
 
 static i64 sys_fstat(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!user_range_ok(out, sizeof(kstat_t), true)) return -EFAULT;
+    vfs_getattr(f->node);
     fill_stat(f->node, (kstat_t*)out);
     return 0;
 }

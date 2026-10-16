@@ -27,6 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define BS     8192ULL                 // fs_bsize
@@ -246,7 +249,126 @@ static void phase_write(void) {
           size_of(T "/renamed-with-a-name-that-is-rather-long.txt") == 11);
 }
 
+static const char long_target[] =
+    "/ufs/t/a/this/target/is/much/longer/than/the/one/hundred/and/twenty/bytes/"
+    "that/fit/inside/an/inode/so/it/needs/a/real/block/of/its/own/to/live/in";
+
+static unsigned long long free_bytes(void) {
+    struct statvfs v;
+    return statvfs("/ufs", &v) == 0 ? (unsigned long long)v.f_bfree * v.f_frsize : 0;
+}
+
+static void phase_links_and_attrs(void) {
+    struct stat st, lst;
+    int fd = open(T "/target.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) { write(fd, "the target", 10); close(fd); }
+
+    // Symbolic links.
+    char buf[512];
+    ssize_t n;
+    CHECK("symlink (short: kept in the inode)", symlink("target.txt", T "/short-link") == 0);
+    CHECK("readlink", (n = readlink(T "/short-link", buf, sizeof(buf))) == 10 && memcmp(buf, "target.txt", 10) == 0);
+    CHECK("stat follows it, lstat does not",
+          stat(T "/short-link", &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 10 &&
+          lstat(T "/short-link", &lst) == 0 && S_ISLNK(lst.st_mode) && lst.st_size == 10);
+    CHECK("symlink (long: needs a block)", sizeof(long_target) > 121 && symlink(long_target, T "/long-link") == 0 &&
+          (n = readlink(T "/long-link", buf, sizeof(buf))) == (ssize_t)strlen(long_target) &&
+          memcmp(buf, long_target, (size_t)n) == 0);
+    CHECK("a link to a directory, walked through",
+          symlink("a", T "/dir-link") == 0 && mkdir(T "/a/sub", 0755) == 0 &&
+          stat(T "/dir-link/sub", &st) == 0 && S_ISDIR(st.st_mode) && rmdir(T "/dir-link/sub") == 0);
+    CHECK("an absolute link", symlink("/ufs/t/target.txt", T "/abs-link") == 0 &&
+          stat(T "/abs-link", &st) == 0 && st.st_size == 10);
+    errno = 0;
+    CHECK("a dangling link is ENOENT to stat", symlink("nowhere", T "/dangling") == 0 &&
+          stat(T "/dangling", &st) < 0 && errno == ENOENT && lstat(T "/dangling", &lst) == 0);
+    errno = 0;
+    CHECK("a loop is ELOOP", symlink("loop2", T "/loop1") == 0 && symlink("loop1", T "/loop2") == 0 &&
+          open(T "/loop1", O_RDONLY) < 0 && errno == ELOOP);
+    CHECK("unlink removes the link, not the target", unlink(T "/abs-link") == 0 &&
+          lstat(T "/abs-link", &lst) < 0 && stat(T "/target.txt", &st) == 0);
+
+    // Hard links.
+    struct stat a, b;
+    CHECK("link", link(T "/target.txt", T "/hard.txt") == 0 && stat(T "/target.txt", &a) == 0 &&
+          stat(T "/hard.txt", &b) == 0 && a.st_ino == b.st_ino && a.st_nlink == 2);
+    fd = open(T "/hard.txt", O_WRONLY | O_APPEND);
+    if (fd >= 0) { write(fd, "!", 1); close(fd); }
+    CHECK("both names see one file", stat(T "/target.txt", &a) == 0 && a.st_size == 11);
+    errno = 0;
+    CHECK("no hard links to directories", link(T "/a", T "/a-hard") < 0 && errno == EPERM);
+
+    // Permissions, owners, times.
+    CHECK("chmod", chmod(T "/target.txt", 0600) == 0 && stat(T "/target.txt", &a) == 0 && (a.st_mode & 07777) == 0600);
+    CHECK("chown", chown(T "/target.txt", 1234, 5678) == 0 && stat(T "/target.txt", &a) == 0 &&
+          a.st_uid == 1234 && a.st_gid == 5678);
+    CHECK("lchown changes the link itself", lchown(T "/short-link", 42, 43) == 0 &&
+          lstat(T "/short-link", &lst) == 0 && lst.st_uid == 42 && stat(T "/short-link", &a) == 0 && a.st_uid == 1234);
+    struct timeval tv[2] = { { 1000000000, 0 }, { 1100000000, 0 } };
+    CHECK("utimes", utimes(T "/target.txt", tv) == 0 && stat(T "/target.txt", &a) == 0 &&
+          a.st_mtime == 1100000000 && a.st_atime == 1000000000);
+    mode_t old = umask(027);
+    fd = open(T "/umasked", O_WRONLY | O_CREAT, 0666);
+    if (fd >= 0) close(fd);
+    mkdir(T "/umasked-dir", 0777);
+    umask(old);
+    CHECK("new files and directories get mode & ~umask",
+          stat(T "/umasked", &a) == 0 && (a.st_mode & 0777) == 0640 &&
+          stat(T "/umasked-dir", &b) == 0 && (b.st_mode & 0777) == 0750);
+
+    // Execute permission.
+    fd = open(T "/script", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) { write(fd, "#!/ufs/bin/sh\nexit 7\n", 21); close(fd); }
+    errno = 0;
+    CHECK("exec without an x bit is EACCES", execl(T "/script", "script", (char*)0) < 0 && errno == EACCES);
+    chmod(T "/script", 0755);
+    pid_t pid = fork();
+    if (pid == 0) { execl(T "/script", "script", (char*)0); _exit(99); }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    CHECK("...and runs once chmod +x", WIFEXITED(status) && WEXITSTATUS(status) == 7);
+
+    // Space accounting, and files that outlive their names.
+    unsigned long long before = free_bytes();
+    fd = open(T "/doomed.bin", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    int ok = fd >= 0 && write_pattern(fd, 300, 0, 1 << 20) == 0;
+    unsigned long long during = free_bytes();
+    CHECK("statvfs sees a megabyte go", before > 0 && before - during >= (1 << 20) && before - during < (1 << 20) + 64 * 1024);
+    ok = ok && unlink(T "/doomed.bin") == 0 && access(T "/doomed.bin", F_OK) < 0;
+    CHECK("an open file can be unlinked...", ok && fstat(fd, &a) == 0 && a.st_nlink == 0);
+    ok = write_pattern(fd, 300, 1 << 20, 4096) == 0 && check_range(fd, 300, 0, (1 << 20) + 4096, 0) == 0;
+    CHECK("...and is still there to read and write", ok);
+    close(fd);
+    CHECK("...until the last close gives the space back", free_bytes() == before);
+    fd = open(T "/victim", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) write(fd, "victim", 6);
+    int fd2 = open(T "/winner", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd2 >= 0) { write(fd2, "winner", 6); close(fd2); }
+    char six[6];
+    CHECK("renaming over an open file leaves it readable", rename(T "/winner", T "/victim") == 0 &&
+          pread(fd, six, 6, 0) == 6 && memcmp(six, "victim", 6) == 0 && size_of(T "/victim") == 6);
+    if (fd >= 0) close(fd);
+}
+
+static void verify_links_and_attrs(void) {
+    struct stat a, lst;
+    char buf[512];
+    ssize_t n;
+    CHECK("after reboot: symlinks", (n = readlink(T "/long-link", buf, sizeof(buf))) == (ssize_t)strlen(long_target) &&
+          lstat(T "/short-link", &lst) == 0 && S_ISLNK(lst.st_mode) && lst.st_uid == 42 &&
+          stat(T "/short-link", &a) == 0 && a.st_size == 11);
+    CHECK("after reboot: hard links, modes, owners, times",
+          stat(T "/hard.txt", &a) == 0 && a.st_nlink == 2 && (a.st_mode & 07777) == 0600 &&
+          a.st_uid == 1234 && a.st_mtime == 1100000000);
+    const char* gone[] = { "short-link", "long-link", "dir-link", "dangling", "loop1", "loop2", "hard.txt",
+                           "target.txt", "umasked", "script", "victim" };
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(gone) / sizeof(gone[0]); i++) ok = ok && unlink(P(T "/%s", gone[i])) == 0;
+    CHECK("remove the links and the rest", ok && rmdir(T "/umasked-dir") == 0);
+}
+
 static void phase_verify(void) {
+    verify_links_and_attrs();
     int ok = 1;
     for (unsigned i = 0; i < NSIZES; i++) {
         int fd = open(P(T "/size-%llu.bin", (unsigned long long)sizes[i]), O_RDONLY);
@@ -287,7 +409,7 @@ int main(int argc, char** argv) {
     serial = fopen("/dev/serial", "w");
     const char* mode = argc > 1 ? argv[1] : "both";
     say("ufstest: starting (%s)\n", mode);
-    if (strcmp(mode, "verify") != 0) phase_write();
+    if (strcmp(mode, "verify") != 0) { phase_write(); phase_links_and_attrs(); }
     if (strcmp(mode, "write") != 0) phase_verify();
     say("ufstest: %d passed, %d failed\n", passed, failed);
     return failed;

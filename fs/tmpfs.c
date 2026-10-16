@@ -20,13 +20,16 @@
 #include <memset.h>
 #include <errno.h>
 #include <rtc.h>
+#include <file.h>
 #include <klibc/string.h>
 
 #define TMPFS_MAX_BYTES (32 * MB)       // all file contents together
 
 typedef struct tnode {
     char name[VFS_NAME_MAX];
-    u32 type;                           // VN_REG or VN_DIR
+    u32 type;                           // VN_REG, VN_DIR or VN_LNK (target in data)
+    u32 mode, uid, gid;
+    bool orphan;                        // unlinked while open: freed on release
     u8* data;
     u64 size, cap;
     u64 mtime;
@@ -35,7 +38,7 @@ typedef struct tnode {
     struct tnode* next;                 // next sibling
 } tnode_t;
 
-static tnode_t root = { .name = "", .type = VN_DIR };
+static tnode_t root = { .name = "", .type = VN_DIR, .mode = 01777 };   // like /tmp everywhere
 static u64 used_bytes;
 
 static tnode_t* T(const vnode_t* n) {
@@ -47,7 +50,12 @@ static void fill(tnode_t* t, vnode_t* out) {
     out->aux = 0;
     out->size = t->size;
     out->mtime = t->mtime;
+    out->atime = out->ctime = t->mtime;
     out->type = t->type;
+    out->mode = t->mode;
+    out->uid = t->uid;
+    out->gid = t->gid;
+    out->nlink = t->type == VN_DIR ? 2 : 1;
 }
 
 static tnode_t* find(tnode_t* dir, const char* name) {
@@ -149,7 +157,7 @@ static i32 tmpfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t*
     return 1;
 }
 
-static i32 tmpfs_create(const vnode_t* dir, const char* name, u32 type, vnode_t* out) {
+static i32 tmpfs_create(const vnode_t* dir, const char* name, u32 type, u32 mode, vnode_t* out) {
     if (T(dir)->type != VN_DIR) return -ENOTDIR;
     if (strlen(name) >= VFS_NAME_MAX) return -ENAMETOOLONG;
     tnode_t* t = kmalloc(sizeof(tnode_t));
@@ -157,6 +165,7 @@ static i32 tmpfs_create(const vnode_t* dir, const char* name, u32 type, vnode_t*
     memset(t, 0, sizeof(*t));
     strcpy(t->name, name);
     t->type = type == VN_DIR ? VN_DIR : VN_REG;
+    t->mode = mode & 07777;
     t->mtime = rtc_now();
     attach(T(dir), t);
     fill(t, out);
@@ -171,12 +180,64 @@ static void destroy(tnode_t* t) {
     kfree(t);
 }
 
+// Gone from the tree: free it now, or at its last close if it is open.
+static void discard(const struct mount* m, tnode_t* t) {
+    detach(t);
+    vnode_t probe = { .mnt = m, .id = (u64)t };
+    if (vnode_is_open(&probe)) t->orphan = true;
+    else destroy(t);
+}
+
 static i32 tmpfs_unlink(const vnode_t* dir, const char* name) {
     tnode_t* t = find(T(dir), name);
     if (!t) return -ENOENT;
     if (t->type == VN_DIR && t->children) return -ENOTEMPTY;
-    detach(t);
-    destroy(t);
+    discard(dir->mnt, t);
+    return 0;
+}
+
+static void tmpfs_release(vnode_t* node) {
+    tnode_t* t = T(node);
+    if (t->orphan) destroy(t);
+}
+
+static i32 tmpfs_symlink(const vnode_t* dir, const char* name, const char* target, vnode_t* out) {
+    i32 r = tmpfs_create(dir, name, VN_REG, 0777, out);
+    if (r < 0) return r;
+    tnode_t* t = T(out);
+    t->type = VN_LNK;
+    u64 len = strlen(target);
+    if ((r = reserve(t, len)) < 0) { detach(t); destroy(t); return r; }
+    memcpy(t->data, target, len);
+    t->size = len;
+    fill(t, out);
+    return 0;
+}
+
+static i64 tmpfs_readlink(vnode_t* node, char* buf, u64 len) {
+    tnode_t* t = T(node);
+    if (t->type != VN_LNK) return -EINVAL;
+    if (len > t->size) len = t->size;
+    memcpy(buf, t->data, len);
+    return (i64)len;
+}
+
+static i32 tmpfs_setattr(vnode_t* node, u32 mask, const vattr_t* a) {
+    tnode_t* t = T(node);
+    if (mask & VATTR_MODE) t->mode = a->mode & 07777;
+    if (mask & VATTR_UID) t->uid = a->uid;
+    if (mask & VATTR_GID) t->gid = a->gid;
+    if (mask & VATTR_MTIME) t->mtime = a->mtime;
+    fill(t, node);
+    return 0;
+}
+
+static i32 tmpfs_statfs(const struct mount* m, vfs_statfs_t* out) {
+    (void)m;
+    out->bsize = 4096;
+    out->blocks = TMPFS_MAX_BYTES / 4096;
+    out->bfree = out->bavail = (TMPFS_MAX_BYTES - used_bytes) / 4096;
+    out->namemax = VFS_NAME_MAX - 1;
     return 0;
 }
 
@@ -193,8 +254,7 @@ static i32 tmpfs_rename(const vnode_t* olddir, const char* oldname,
     if (existing == t) return 0;
     if (existing) {
         if (existing->type == VN_DIR && existing->children) return -ENOTEMPTY;
-        detach(existing);
-        destroy(existing);
+        discard(newdir->mnt, existing);
     }
     detach(t);
     strcpy(t->name, newname);
@@ -213,4 +273,10 @@ const vfs_ops_t tmpfs_vfs_ops = {
     .unlink = tmpfs_unlink,
     .truncate = tmpfs_truncate,
     .rename = tmpfs_rename,
+    .readlink = tmpfs_readlink,
+    .symlink = tmpfs_symlink,
+    .setattr = tmpfs_setattr,
+    .statfs = tmpfs_statfs,
+    .release = tmpfs_release,
+    .keeps_unlinked = true,
 };

@@ -327,6 +327,8 @@ static i32 load_depth(process_t* p, const char* path, u32 argc, const char* cons
     i32 r = vfs_lookup(path, &node);
     if (r < 0) return r;
     if (node.type != VN_REG) return -EACCES;
+    // Even root needs an execute bit -- where the filesystem keeps them.
+    if (node.mode && !(node.mode & 0111)) return -EACCES;
     if (node.size > USER_MAX_IMAGE) return -E2BIG;
 
     char head[SHEBANG_MAX];
