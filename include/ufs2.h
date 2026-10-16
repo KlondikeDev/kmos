@@ -181,6 +181,7 @@ _Static_assert(sizeof(ufs2_dinode_t) == 256, "ufs2_dinode_t must be 256 bytes");
 #define UFS2_IFBLK 0060000
 #define UFS2_IFREG 0100000
 #define UFS2_IFLNK 0120000
+#define UFS2_IFSOCK 0140000
 
 // Directory entry header; the name (d_namlen bytes, then a NUL) follows, and
 // d_reclen covers the whole record including padding.
@@ -197,6 +198,7 @@ typedef struct PACKED {
 #define UFS2_DT_DIR     4
 #define UFS2_DT_REG     8
 #define UFS2_DT_LNK     10
+#define UFS2_DT_SOCK    12
 
 // The space a directory entry with an n-byte name needs (DIRSIZ).
 #define UFS2_DIRSIZ(n) ((sizeof(ufs2_direct_t) + (n) + 1 + 3) & ~3u)

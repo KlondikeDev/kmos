@@ -48,6 +48,11 @@ typedef struct {
     i32 ppid;
     i32 pgid;         // process group, for job control and terminal signals
     i32 sid;          // session
+    // Credentials: real, effective and saved user and group ids, and the
+    // supplementary groups. 0 is root.
+    u32 uid, euid, suid, gid, egid, sgid;
+    u32 groups[16];
+    u32 ngroups;
     struct tty* ctty; // controlling terminal (of the session), or NULL
     u32 umask;
     proc_state_t state;

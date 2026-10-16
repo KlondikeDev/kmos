@@ -132,6 +132,7 @@ void fill_stat(const vnode_t* n, kstat_t* st) {
         case VN_CHR:  st->st_mode = S_IFCHR | 0666; break;
         case VN_FIFO: st->st_mode = S_IFIFO | 0600; break;
         case VN_LNK:  st->st_mode = S_IFLNK | 0777; break;
+        case VN_SOCK: st->st_mode = S_IFSOCK | 0777; break;
         default:      st->st_mode = S_IFREG | 0644; break;
     }
     // Filesystems that keep permissions (UFS2, tmpfs) say what they are.

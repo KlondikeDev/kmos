@@ -112,6 +112,10 @@ process_t* proc_alloc(const char* name, process_t* parent) {
     p->pgid = parent->pid == 0 ? p->pid : parent->pgid;
     p->sid = parent->pid == 0 ? p->pid : parent->sid;
     p->ctty = parent->ctty;
+    p->uid = parent->uid; p->euid = parent->euid; p->suid = parent->suid;
+    p->gid = parent->gid; p->egid = parent->egid; p->sgid = parent->sgid;
+    for (u32 g = 0; g < 16; g++) p->groups[g] = parent->groups[g];
+    p->ngroups = parent->ngroups;
     p->umask = parent->pid == 0 ? 022 : parent->umask;
     p->state = PROC_EMBRYO;
     p->start_tick = ticks;

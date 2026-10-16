@@ -353,7 +353,8 @@ static i64 procfs_readlink(vnode_t* node, char* buf, u64 len) {
         struct file* f = p->fds[kind - F_FD_ENTRY];
         if (!f) return -ENOENT;
         if (f->path) s = f->path;
-        else ksnprintf(tmp, sizeof(tmp), "pipe:[%lu]", (u64)f->node >> 4);
+        else ksnprintf(tmp, sizeof(tmp), "%s:[%lu]", f->node && f->node->type == VN_SOCK ? "socket" : "pipe",
+                       (u64)f->node >> 4);
     } else {
         return -EINVAL;
     }

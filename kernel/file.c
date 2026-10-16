@@ -225,6 +225,7 @@ i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
     }
     if (r < 0) return r;
 
+    if (node.type == VN_SOCK) return -ENXIO;          // connect(), not open()
     if (node.type == VN_DIR) {
         if (acc != O_RDONLY) return -EISDIR;
     } else if (flags & O_DIRECTORY) {

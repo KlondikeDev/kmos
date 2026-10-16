@@ -84,6 +84,7 @@
 #define S_IFDIR 0040000
 #define S_IFREG 0100000
 #define S_IFLNK 0120000
+#define S_IFSOCK 0140000
 
 typedef struct {
     u64 st_dev;

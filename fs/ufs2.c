@@ -943,6 +943,7 @@ static u8 dtype_of(u16 mode) {
         case UFS2_IFLNK: return UFS2_DT_LNK;
         case UFS2_IFCHR: return UFS2_DT_CHR;
         case UFS2_IFIFO: return UFS2_DT_FIFO;
+        case UFS2_IFSOCK: return UFS2_DT_SOCK;
         default:         return UFS2_DT_UNKNOWN;
     }
 }
@@ -960,7 +961,8 @@ static void fill_node(u32 ino, const ufs2_dinode_t* ip, vnode_t* out) {
     out->atime = ip->di_atime > 0 ? (u64)ip->di_atime : 0;
     out->ctime = ip->di_ctime > 0 ? (u64)ip->di_ctime : 0;
     out->type = fmt == UFS2_IFDIR ? VN_DIR : fmt == UFS2_IFREG ? VN_REG :
-                fmt == UFS2_IFLNK ? VN_LNK : fmt == UFS2_IFIFO ? VN_FIFO : VN_CHR;
+                fmt == UFS2_IFLNK ? VN_LNK : fmt == UFS2_IFIFO ? VN_FIFO :
+                fmt == UFS2_IFSOCK ? VN_SOCK : VN_CHR;
     // 07777 permissions; a file with none at all still needs to look
     // "known", so mode 0 is reported as such only by filesystems without.
     out->mode = ip->di_mode & 07777;
@@ -1135,7 +1137,8 @@ static i32 ufs2_create(const vnode_t* dirnode, const char* name, u32 type, u32 m
     if (!ino) { commit(u); return -ENOSPC; }
     ufs2_dinode_t ip;
     memset(&ip, 0, sizeof(ip));
-    ip.di_mode = (u16)((dir ? UFS2_IFDIR : UFS2_IFREG) | (mode & 07777));
+    u32 fmt = dir ? UFS2_IFDIR : type == VN_SOCK ? UFS2_IFSOCK : UFS2_IFREG;
+    ip.di_mode = (u16)(fmt | (mode & 07777));
     ip.di_nlink = dir ? 2 : 1;
     ip.di_gen = (u32)weak_random() | 1;
     i64 now = (i64)rtc_now();
@@ -1151,7 +1154,7 @@ static i32 ufs2_create(const vnode_t* dirnode, const char* name, u32 type, u32 m
         i64 w = write_data(u, ino, &ip, 0, chunk, UFS2_DIRBLKSIZ);
         if (w < 0) { r = (i32)w; goto undo; }
     }
-    r = dir_add(u, pino, name, len, ino, dir ? UFS2_DT_DIR : UFS2_DT_REG);
+    r = dir_add(u, pino, name, len, ino, dtype_of(ip.di_mode));
     if (r < 0) goto undo;
     if (dir && (r = adjust_nlink(u, pino, 1)) < 0) goto out;
 

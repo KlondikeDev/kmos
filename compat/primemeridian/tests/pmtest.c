@@ -15,10 +15,13 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pty.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -284,11 +287,151 @@ static void test_pty(void) {
         execl("/bin/sh", "sh", "-c", "echo inside; tty", (char*)0);
         _exit(127);
     }
-    CHECK("forkpty: a shell runs on it, and tty(1) names it",
-          pid > 0 && read_until(m, buf, sizeof(buf), "inside\r\n") && read_until(m, buf + strlen(buf), sizeof(buf) - strlen(buf), name));
+    int saw = pid > 0 && read_until(m, buf, sizeof(buf), "inside\r\n");
+    saw = saw && (strstr(buf, name) || read_until(m, buf + strlen(buf), sizeof(buf) - strlen(buf), name));
+    if (!saw) {
+        for (char* c = buf; *c; c++) if (*c == '\r') *c = '|';
+        say("   (master read \"%s\", wanted %s)\n", buf, name);
+    }
+    CHECK("forkpty: a shell runs on it, and tty(1) names it", saw);
     waitpid(pid, &status, 0);
     CHECK("...and the master reads EIO once it is gone", read(m, buf, sizeof(buf)) < 0 && errno == EIO);
     close(m);
+}
+
+static socklen_t un_addr(struct sockaddr_un* a, const char* path, int abstract) {
+    memset(a, 0, sizeof(*a));
+    a->sun_family = AF_UNIX;
+    size_t n = strlen(path);
+    if (abstract) { memcpy(a->sun_path + 1, path, n); return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n); }
+    memcpy(a->sun_path, path, n);
+    return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
+}
+
+static void test_sockets(void) {
+    int sv[2];
+    char buf[256];
+    CHECK("socketpair (stream)", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    CHECK("bytes both ways", write(sv[0], "ping", 4) == 4 && read(sv[1], buf, sizeof(buf)) == 4 &&
+          memcmp(buf, "ping", 4) == 0 && send(sv[1], "pong", 4, 0) == 4 && recv(sv[0], buf, 4, 0) == 4);
+    shutdown(sv[0], SHUT_WR);
+    CHECK("shutdown(SHUT_WR) is EOF for the other side", read(sv[1], buf, sizeof(buf)) == 0);
+    close(sv[0]);
+    signal(SIGPIPE, SIG_IGN);
+    errno = 0;
+    CHECK("writing to a closed peer is EPIPE", write(sv[1], "x", 1) < 0 && errno == EPIPE);
+    signal(SIGPIPE, SIG_DFL);
+    close(sv[1]);
+
+    CHECK("socketpair (datagram)", socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0);
+    send(sv[0], "one", 3, 0);
+    send(sv[0], "second", 6, 0);
+    struct msghdr mh = { 0 };
+    struct iovec iov = { buf, 2 };
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    ssize_t n1 = recvmsg(sv[1], &mh, 0);
+    int trunc = mh.msg_flags & MSG_TRUNC;
+    ssize_t n2 = recv(sv[1], buf, sizeof(buf), 0);
+    CHECK("datagrams keep their boundaries (and MSG_TRUNC)", n1 == 2 && trunc && n2 == 6 && memcmp(buf, "second", 6) == 0);
+    close(sv[0]);
+    close(sv[1]);
+
+    // A server on a path.
+    struct sockaddr_un a;
+    socklen_t al = un_addr(&a, "/tmp/pmtest.sock", 0);
+    unlink("/tmp/pmtest.sock");
+    int srv = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    CHECK("bind to a path makes a socket file", srv >= 0 && bind(srv, (struct sockaddr*)&a, al) == 0);
+    struct stat st;
+    CHECK("...which stat calls a socket", stat("/tmp/pmtest.sock", &st) == 0 && S_ISSOCK(st.st_mode));
+    errno = 0;
+    int dup = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK("binding the same path again is EADDRINUSE", bind(dup, (struct sockaddr*)&a, al) < 0 && errno == EADDRINUSE);
+    close(dup);
+    int c0 = socket(AF_UNIX, SOCK_STREAM, 0);
+    errno = 0;
+    CHECK("connect before listen is ECONNREFUSED", connect(c0, (struct sockaddr*)&a, al) < 0 && errno == ECONNREFUSED);
+    close(c0);
+    CHECK("listen", listen(srv, 4) == 0);
+    fcntl(srv, F_SETFL, O_NONBLOCK);
+    errno = 0;
+    CHECK("non-blocking accept with nobody waiting is EAGAIN", accept(srv, NULL, NULL) < 0 && errno == EAGAIN);
+    fcntl(srv, F_SETFL, 0);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        int c = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (connect(c, (struct sockaddr*)&a, al) < 0) _exit(1);
+        write(c, "hello server", 12);
+        char r[32];
+        ssize_t k = read(c, r, sizeof(r));
+        _exit(k == 5 && memcmp(r, "hi yo", 5) == 0 ? 0 : 2);
+    }
+    struct pollfd pl = { .fd = srv, .events = POLLIN };
+    CHECK("poll says a connection is waiting", poll(&pl, 1, 2000) == 1 && (pl.revents & POLLIN));
+    int conn = accept(srv, NULL, NULL);
+    ssize_t k = conn >= 0 ? read(conn, buf, sizeof(buf)) : -1;
+    CHECK("accept, and the client's bytes arrive", k == 12 && memcmp(buf, "hello server", 12) == 0);
+    struct ucred cr;
+    socklen_t crl = sizeof(cr);
+    CHECK("SO_PEERCRED names the client", getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cr, &crl) == 0 && cr.pid == pid);
+    struct sockaddr_un got;
+    socklen_t gl = sizeof(got);
+    CHECK("getsockname on the accepted side is the server's path",
+          getsockname(conn, (struct sockaddr*)&got, &gl) == 0 && strcmp(got.sun_path, "/tmp/pmtest.sock") == 0);
+    write(conn, "hi yo", 5);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    CHECK("...and the reply reaches the client", WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(conn);
+    close(srv);
+    unlink("/tmp/pmtest.sock");
+
+    // The abstract namespace, and passing a file across.
+    struct sockaddr_un ab;
+    socklen_t abl = un_addr(&ab, "pmtest-abstract", 1);
+    srv = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    CHECK("an abstract name (no file anywhere)", srv >= 0 && bind(srv, (struct sockaddr*)&ab, abl) == 0 &&
+          listen(srv, 1) == 0 && access("/tmp/pmtest-abstract", F_OK) < 0);
+    int p[2];
+    pipe(p);
+    pid = fork();
+    if (pid == 0) {
+        int c = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        if (connect(c, (struct sockaddr*)&ab, abl) < 0) _exit(1);
+        char data = 'F';
+        struct iovec v = { &data, 1 };
+        union { struct cmsghdr h; char space[CMSG_SPACE(sizeof(int))]; } ctl;
+        struct msghdr m = { .msg_iov = &v, .msg_iovlen = 1, .msg_control = &ctl, .msg_controllen = sizeof(ctl) };
+        struct cmsghdr* ch = CMSG_FIRSTHDR(&m);
+        ch->cmsg_level = SOL_SOCKET;
+        ch->cmsg_type = SCM_RIGHTS;
+        ch->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(ch), &p[1], sizeof(int));
+        _exit(sendmsg(c, &m, 0) == 1 ? 0 : 2);
+    }
+    close(p[1]);
+    conn = accept(srv, NULL, NULL);
+    char data;
+    struct iovec v = { &data, 1 };
+    union { struct cmsghdr h; char space[CMSG_SPACE(sizeof(int))]; } ctl;
+    struct msghdr m = { .msg_iov = &v, .msg_iovlen = 1, .msg_control = &ctl, .msg_controllen = sizeof(ctl) };
+    int passed_fd = -1;
+    if (conn >= 0 && recvmsg(conn, &m, 0) == 1) {
+        struct cmsghdr* ch = CMSG_FIRSTHDR(&m);
+        if (ch && ch->cmsg_type == SCM_RIGHTS) memcpy(&passed_fd, CMSG_DATA(ch), sizeof(int));
+    }
+    waitpid(pid, &status, 0);
+    CHECK("SCM_RIGHTS: an open pipe passed between processes",
+          passed_fd >= 0 && write(passed_fd, "via fd", 6) == 6 && read(p[0], buf, 6) == 6 && memcmp(buf, "via fd", 6) == 0);
+    close(passed_fd);
+    close(p[0]);
+    close(conn);
+    close(srv);
+
+    errno = 0;
+    CHECK("no networking yet: AF_INET is EAFNOSUPPORT", socket(AF_INET, SOCK_STREAM, 0) < 0 && errno == EAFNOSUPPORT);
 }
 
 static void test_time(void) {
@@ -472,6 +615,7 @@ int main(int argc, char** argv) {
     test_files();
     test_terminal();
     test_pty();
+    test_sockets();
     test_time();
     test_processes();
     test_signals();

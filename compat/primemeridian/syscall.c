@@ -375,7 +375,8 @@ static i64 l_getdents64(u64 fd, u64 buf, u64 count) {
         d->d_off = (i64)f->pos + 1;
         d->d_reclen = (u16)reclen;
         d->d_type = n.type == VN_DIR ? L_DT_DIR : n.type == VN_CHR ? L_DT_CHR :
-                    n.type == VN_FIFO ? L_DT_FIFO : n.type == VN_LNK ? L_DT_LNK : L_DT_REG;
+                    n.type == VN_FIFO ? L_DT_FIFO : n.type == VN_LNK ? L_DT_LNK :
+                    n.type == VN_SOCK ? L_DT_SOCK : L_DT_REG;
         memcpy(d->d_name, name, len + 1);
         f->pos++;
         off += reclen;
@@ -1235,6 +1236,7 @@ static i64 l_sigaltstack(u64 uss, u64 uold) {
 }
 
 void pm_sigreturn(registers_t* regs);
+bool pm_socket_call(u64 nr, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f, i64* r);
 
 // ---------------------------------------------------------------------------
 // The table
@@ -1454,7 +1456,6 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_getpriority: r = 20; break;           // nice 0, in the syscall's 40-n form
         case LNX_setpriority: r = 0; break;
         case LNX_personality: r = 0; break;            // PER_LINUX, always
-        case LNX_socket:      r = -L_EAFNOSUPPORT; break; // no networking yet
 
         // signals
         case LNX_rt_sigaction:   r = l_rt_sigaction(a, b, c, d); break;
@@ -1471,6 +1472,7 @@ static void pm_dispatch(registers_t* regs) {
             return;
 
         default:
+            if (pm_socket_call(nr, a, b, c, d, e, f, &r)) break;
             log_unknown(nr);
             r = -ENOSYS;
             break;

@@ -164,7 +164,7 @@ static i32 tmpfs_create(const vnode_t* dir, const char* name, u32 type, u32 mode
     if (!t) return -ENOSPC;
     memset(t, 0, sizeof(*t));
     strcpy(t->name, name);
-    t->type = type == VN_DIR ? VN_DIR : VN_REG;
+    t->type = (type == VN_DIR || type == VN_SOCK) ? type : VN_REG;
     t->mode = mode & 07777;
     t->mtime = rtc_now();
     attach(T(dir), t);
