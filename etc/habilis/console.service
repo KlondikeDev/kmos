@@ -1,5 +1,5 @@
-# The login shell on the console, started again whenever it exits.
+# Logging in on the console, again whenever the session ends.
 description=console
-exec=exec /bin/zsh -l
+exec=exec /bin/login
 type=console
-after=var hostname home
+after=var hostname home accounts

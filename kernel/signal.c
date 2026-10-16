@@ -77,6 +77,26 @@ i32 signal_send_group(i32 pgid, i32 sig) {
     return n;
 }
 
+bool signal_may(const process_t* from, const process_t* to, i32 sig) {
+    if (from->euid == 0) return true;
+    if (sig == SIGCONT && from->sid == to->sid) return true;
+    return from->uid == to->uid || from->uid == to->suid ||
+           from->euid == to->uid || from->euid == to->suid;
+}
+
+i32 signal_send_group_as(const process_t* from, i32 pgid, i32 sig) {
+    i32 there = 0, sent = 0;
+    for (u32 i = 1; i < MAX_PROCS; i++) {
+        process_t* p = proc_slot(i);
+        if (p->state == PROC_UNUSED || p->state == PROC_ZOMBIE || p->pgid != pgid) continue;
+        there++;
+        if (!signal_may(from, p, sig)) continue;
+        if (sig) signal_send(p, sig);
+        sent++;
+    }
+    return sent ? sent : there ? -EPERM : -ESRCH;
+}
+
 static u32 deliverable(const process_t* p) {
     // SIGKILL and SIGSTOP cannot be blocked.
     u32 unmaskable = (1u << SIGKILL) | (1u << SIGSTOP);

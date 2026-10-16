@@ -218,12 +218,22 @@ i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
 
     vnode_t node;
     i32 r = vfs_lookup(path, &node);
+    bool created = false;
     if (r == -ENOENT && (flags & O_CREAT)) {
         r = vfs_create_mode(path, VN_REG, mode, &node);
+        created = r == 0;
     } else if (r == 0 && (flags & O_CREAT) && (flags & O_EXCL)) {
         return -EEXIST;
     }
     if (r < 0) return r;
+    // The file's permissions (not for one just made: its creator may open
+    // it however it asked, whatever mode it was given).
+    if (!created) {
+        u32 want = (acc == O_RDONLY ? VFS_R : acc == O_WRONLY ? VFS_W : VFS_R | VFS_W) |
+                   ((flags & O_TRUNC) ? VFS_W : 0);
+        if (node.type == VN_DIR) want = VFS_R;
+        if (!vfs_may(&node, want)) return -EACCES;
+    }
 
     if (node.type == VN_SOCK) return -ENXIO;          // connect(), not open()
     if (node.type == VN_DIR) {

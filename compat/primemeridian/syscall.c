@@ -114,21 +114,17 @@ static void to_lstat(const vnode_t* n, l_stat_t* st) {
     // With attributes known (mode set), 0 links is a fact: an unlinked open file.
     st->st_nlink = (n->nlink || n->mode) ? n->nlink : (n->type == VN_DIR ? 2 : 1);
     st->st_mode = k.st_mode;
-    // A filesystem without permissions (FAT32): every regular file counts
-    // as executable, so shells will run what PATH finds.
-    if (!n->mode && (st->st_mode & S_IFMT) == S_IFREG) st->st_mode = S_IFREG | 0755;
-    st->st_uid = n->uid;
-    st->st_gid = n->gid;
+    u32 mode, uid, gid;
+    vfs_attrs(n, &mode, &uid, &gid);
+    st->st_uid = uid;
+    st->st_gid = gid;
     tty_t* tt = devfs_tty(n);
     i32 pts = devfs_pts_number(n);
     if (pts >= 0) {
-        st->st_mode = S_IFCHR | 0620;
         st->st_rdev = (136 << 8) | (u32)pts;          // Unix 98 pty slaves: major 136
     } else if (tt) {
-        st->st_mode = S_IFCHR | 0620;
         st->st_rdev = (4 << 8) | 1;                    // like /dev/tty1
     } else if (devfs_is_ptmx(n)) {
-        st->st_mode = S_IFCHR | 0666;
         st->st_rdev = (5 << 8) | 2;
     } else if (n->type == VN_CHR) {
         st->st_rdev = (1 << 8) | (u32)n->id;
@@ -224,7 +220,12 @@ static i64 l_access(i64 dirfd, u64 path, u64 mode, u64 flags) {
     vnode_t n;
     i64 r = node_at(dirfd, path, !(flags & L_AT_SYMLINK_NOFOLLOW), &n);
     if (r < 0) return r;
-    if ((mode & L_X_OK) && n.mode && n.type != VN_DIR && !(n.mode & 0111)) return -EACCES;
+    // By the real ids -- unless AT_EACCESS says the effective ones.
+    process_t* p = me();
+    bool eff = flags & 0x200;
+    u32 uid = eff ? p->euid : p->uid, gid = eff ? p->egid : p->gid;
+    u32 want = mode & 7;                     // R_OK 4, W_OK 2, X_OK 1 -- our VFS_* bits
+    if (want && !vfs_may_as(&n, want, uid, gid, !eff)) return -EACCES;
     return 0;
 }
 
@@ -300,14 +301,16 @@ static i64 l_utimensat(i64 dirfd, u64 path, u64 utimes, u64 flags) {
     vattr_t a;
     u32 mask = VATTR_ATIME | VATTR_MTIME;
     a.atime = a.mtime = rtc_now();
+    bool now = true;
     if (utimes) {
         if (!uok(utimes, 2 * sizeof(l_timespec_t), false)) return -EFAULT;
         const l_timespec_t* t = (const l_timespec_t*)utimes;
         if (t[0].tv_nsec == L_UTIME_OMIT) mask &= ~VATTR_ATIME;
-        else if (t[0].tv_nsec != L_UTIME_NOW) a.atime = (u64)t[0].tv_sec;
+        else if (t[0].tv_nsec != L_UTIME_NOW) { a.atime = (u64)t[0].tv_sec; now = false; }
         if (t[1].tv_nsec == L_UTIME_OMIT) mask &= ~VATTR_MTIME;
-        else if (t[1].tv_nsec != L_UTIME_NOW) a.mtime = (u64)t[1].tv_sec;
+        else if (t[1].tv_nsec != L_UTIME_NOW) { a.mtime = (u64)t[1].tv_sec; now = false; }
     }
+    if (now) mask |= VATTR_NOW;
     return setattr_at(dirfd, path, !(flags & L_AT_SYMLINK_NOFOLLOW), mask, &a);
 }
 
@@ -325,7 +328,7 @@ static i64 l_utimes(u64 path, u64 utv, bool timeval) {
             a.mtime = ((const u64*)utv)[1];
         }
     }
-    return setattr_at(L_AT_FDCWD, path, true, VATTR_ATIME | VATTR_MTIME, &a);
+    return setattr_at(L_AT_FDCWD, path, true, VATTR_ATIME | VATTR_MTIME | (utv ? 0 : VATTR_NOW), &a);
 }
 
 static i64 l_mkdirat(i64 dirfd, u64 path, u64 mode) {
@@ -930,6 +933,7 @@ static i64 l_kill(i64 pid, u64 sig) {
         for (u32 i = 1; i < MAX_PROCS; i++) {
             process_t* p = proc_slot(i);
             if (p->state == PROC_UNUSED || p->state == PROC_ZOMBIE || p->pid <= 1 || p == me()) continue;
+            if (!signal_may(me(), p, (i32)sig)) continue;
             if (sig) signal_send(p, (i32)sig);
             n++;
         }
@@ -963,6 +967,49 @@ static i64 l_clone(registers_t* regs, u64 flags, u64 stack, u64 ptid, u64 ctid, 
     if (flags & L_CLONE_SETTLS) child->fs_base = tls;
     if ((flags & L_CLONE_PARENT_SETTID) && uok(ptid, 4, true)) *(i32*)ptid = child->pid;
     return child->pid;
+}
+
+// The id-changing calls, by Linux's rules for a process without
+// capabilities: root (euid 0) may set anything; anyone else may only move
+// among the ids it already has (real, effective, saved). -1 leaves one be.
+#define KEEP 0xFFFFFFFFu
+static bool among(u32 v, u32 r, u32 e, u32 s) {
+    return v == r || v == e || v == s;
+}
+
+static i64 set_ids(u32* r, u32* e, u32* s, u64 v64, bool all) {
+    u32 v = (u32)v64;
+    (void)all;
+    if (me()->euid == 0) { *r = *e = *s = v; return 0; }
+    if (v != *r && v != *s) return -EPERM;
+    *e = v;
+    return 0;
+}
+
+static i64 set_re(u32* r, u32* e, u32* s, u64 nr64, u64 ne64) {
+    u32 nr = (u32)nr64, ne = (u32)ne64;
+    bool root = me()->euid == 0;
+    if (nr != KEEP && !root && nr != *r && nr != *e) return -EPERM;
+    if (ne != KEEP && !root && !among(ne, *r, *e, *s)) return -EPERM;
+    u32 old_r = *r;
+    if (nr != KEEP) *r = nr;
+    if (ne != KEEP) *e = ne;
+    // The saved id follows the effective one when the real one is set, or
+    // the effective one moves off the old real one.
+    if (nr != KEEP || (ne != KEEP && ne != old_r)) *s = *e;
+    return 0;
+}
+
+static i64 set_res(u32* r, u32* e, u32* s, u64 nr64, u64 ne64, u64 ns64) {
+    u32 nr = (u32)nr64, ne = (u32)ne64, ns = (u32)ns64;
+    if (me()->euid != 0) {
+        if ((nr != KEEP && !among(nr, *r, *e, *s)) || (ne != KEEP && !among(ne, *r, *e, *s)) ||
+            (ns != KEEP && !among(ns, *r, *e, *s))) return -EPERM;
+    }
+    if (nr != KEEP) *r = nr;
+    if (ne != KEEP) *e = ne;
+    if (ns != KEEP) *s = ns;
+    return 0;
 }
 
 static i64 l_setsid(void) {
@@ -1002,6 +1049,7 @@ static i64 l_uname(u64 out) {
 
 // reboot(2): the two magic numbers, then what to do.
 static i64 l_reboot(u64 magic1, u64 magic2, u64 cmd) {
+    if (me()->euid != 0) return -EPERM;
     if ((u32)magic1 != 0xfee1dead) return -EINVAL;
     switch ((u32)magic2) {
         case 672274793: case 85072278: case 369367448: case 537993216: break;
@@ -1017,6 +1065,7 @@ static i64 l_reboot(u64 magic1, u64 magic2, u64 cmd) {
 }
 
 static i64 l_sethostname(u64 name, u64 len) {
+    if (me()->euid != 0) return -EPERM;
     if (len > 64) return -EINVAL;
     if (!uok(name, len, false)) return -EFAULT;
     memcpy(kernel_hostname, (const void*)name, len);
@@ -1395,18 +1444,43 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_set_tid_address:
                               r = p->pid; break;
         case LNX_getppid:     r = p->ppid; break;
-        case LNX_getuid: case LNX_geteuid: case LNX_getgid: case LNX_getegid:
-                              r = 0; break;             // everyone is root
-        case LNX_setuid: case LNX_setgid: case LNX_setreuid: case LNX_setregid:
-        case LNX_setresuid: case LNX_setresgid: case LNX_setgroups:
-        case LNX_setfsuid: case LNX_setfsgid:
-                              r = 0; break;
-        case LNX_getresuid: case LNX_getresgid:
+        case LNX_getuid:      r = p->uid; break;
+        case LNX_geteuid:     r = p->euid; break;
+        case LNX_getgid:      r = p->gid; break;
+        case LNX_getegid:     r = p->egid; break;
+        case LNX_setuid:      r = set_ids(&p->uid, &p->euid, &p->suid, a, true); break;
+        case LNX_setgid:      r = set_ids(&p->gid, &p->egid, &p->sgid, a, true); break;
+        case LNX_setreuid:    r = set_re(&p->uid, &p->euid, &p->suid, a, b); break;
+        case LNX_setregid:    r = set_re(&p->gid, &p->egid, &p->sgid, a, b); break;
+        case LNX_setresuid:   r = set_res(&p->uid, &p->euid, &p->suid, a, b, c); break;
+        case LNX_setresgid:   r = set_res(&p->gid, &p->egid, &p->sgid, a, b, c); break;
+        case LNX_setfsuid:    r = p->euid; break;       // the fs ids follow the effective ones
+        case LNX_setfsgid:    r = p->egid; break;
+        case LNX_getresuid:
+        case LNX_getresgid: {
             if (!uok(a, 4, true) || !uok(b, 4, true) || !uok(c, 4, true)) { r = -EFAULT; break; }
-            *(u32*)a = *(u32*)b = *(u32*)c = 0;
+            bool u = nr == LNX_getresuid;
+            *(u32*)a = u ? p->uid : p->gid;
+            *(u32*)b = u ? p->euid : p->egid;
+            *(u32*)c = u ? p->suid : p->sgid;
             r = 0;
             break;
-        case LNX_getgroups:   r = 0; break;
+        }
+        case LNX_getgroups:
+            if (a == 0) { r = p->ngroups; break; }
+            if (a < p->ngroups) { r = -EINVAL; break; }
+            if (!uok(b, 4 * (u64)p->ngroups, true)) { r = -EFAULT; break; }
+            for (u32 i = 0; i < p->ngroups; i++) ((u32*)b)[i] = p->groups[i];
+            r = p->ngroups;
+            break;
+        case LNX_setgroups:
+            if (p->euid != 0) { r = -EPERM; break; }
+            if (a > 16) { r = -EINVAL; break; }
+            if (a && !uok(b, 4 * a, false)) { r = -EFAULT; break; }
+            for (u32 i = 0; i < a; i++) p->groups[i] = ((const u32*)b)[i];
+            p->ngroups = (u32)a;
+            r = 0;
+            break;
         case LNX_setpgid:     r = sys_setpgid((i64)a, (i64)b); break;
         case LNX_getpgid:     r = sys_getpgid((i64)a); break;
         case LNX_getpgrp:     r = p->pgid; break;

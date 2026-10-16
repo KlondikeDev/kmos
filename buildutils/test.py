@@ -34,10 +34,11 @@ import time
 
 # ktest: the native syscall suite. pmtest: Linux programs through Prime
 # Meridian (musl). pmsmoke: zsh and busybox, as a user drives them.
+# permtest: users and permissions (root dropping to an ordinary user).
 # ufs: the UFS2 driver -- one boot writes a tree, a second boot checks and
 # removes it, then the host checks the image (ufsdiag.py, and FreeBSD's
 # fsck_ffs if buildutils/fsck-ffs.sh has built it).
-SUITES = ["ktest", "pmtest", "pmsmoke", "ufs"]
+SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "ufs"]
 UFS_PHASES = ["ufstest write", "ufstest verify"]
 FSCK = os.path.expanduser("~/opt/kunix-host/bin/fsck_ffs")
 
@@ -74,7 +75,7 @@ def main():
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
     ap.add_argument("--log", help="also save the whole serial log here")
     ap.add_argument("--all", action="store_true",
-                    help="run every suite (ktest, pmtest, pmsmoke, ufs), each in a fresh boot")
+                    help="run every suite (ktest, pmtest, pmsmoke, permtest, ufs), each in a fresh boot")
     ap.add_argument("--suite", help="run one suite by name (as --all would)")
     args = ap.parse_args()
 
@@ -142,19 +143,28 @@ def main():
     try:
         deadline = time.time() + args.timeout
         started = wait_for(r"Started (\S+) as pid 1", deadline)
-        # Under Habilis the shell comes once boot is done; it says so.
-        if started and started.group(1).endswith("init"):
+        # Under Habilis the console comes once boot is done (it says so),
+        # and it is a login prompt: root, who has no password by default.
+        habilis = started and started.group(1).endswith("init")
+        if habilis:
             started = wait_for(r"habilis: started console", deadline)
         if not started:
             print(log()[-2000:])
             sys.exit("kernel did not reach the shell")
-        time.sleep(1.0)                          # let the prompt settle
+        time.sleep(2.0)                          # let the prompt settle (login flushes typeahead)
 
         mon = socket.socket(socket.AF_UNIX)
         mon.connect(monitor)
-        for ch in args.command + "\n":
-            mon.sendall(f"sendkey {KEYS.get(ch, ch)}\n".encode())
-            time.sleep(0.03)
+
+        def type_line(text):
+            for ch in text + "\n":
+                mon.sendall(f"sendkey {KEYS.get(ch, ch)}\n".encode())
+                time.sleep(0.03)
+
+        if habilis:
+            type_line("root")
+            time.sleep(2.5)                      # login, then zsh starting up
+        type_line(args.command)
 
         summary = wait_for(r"\w+: (\d+) passed, (\d+) failed", deadline)
         out = log()

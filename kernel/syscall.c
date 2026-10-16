@@ -135,8 +135,10 @@ void fill_stat(const vnode_t* n, kstat_t* st) {
         case VN_SOCK: st->st_mode = S_IFSOCK | 0777; break;
         default:      st->st_mode = S_IFREG | 0644; break;
     }
-    // Filesystems that keep permissions (UFS2, tmpfs) say what they are.
-    if (n->mode) st->st_mode = (st->st_mode & S_IFMT) | (n->mode & 07777);
+    // The permissions the checks use: the filesystem's own, or stand-ins.
+    u32 mode, uid, gid;
+    vfs_attrs(n, &mode, &uid, &gid);
+    st->st_mode = (st->st_mode & S_IFMT) | mode;
     if (n->nlink || n->mode) st->st_nlink = n->nlink;
 }
 
@@ -358,12 +360,13 @@ static i64 sys_procinfo(u64 index, u64 out) {
 i64 sys_kill(i64 pid, u64 sig) {
     if (sig >= NSIG) return -EINVAL;
     if (pid < -1) {
-        i32 n = sig ? signal_send_group((i32)-pid, (i32)sig) : 1;
-        return n ? 0 : -ESRCH;
+        i32 n = signal_send_group_as(me(), (i32)-pid, (i32)sig);
+        return n < 0 ? n : 0;
     }
     if (pid <= 0) return -EINVAL;                    // -1 / 0: not supported yet
     process_t* p = proc_by_pid((i32)pid);
     if (!p || p->pid == 0 || p->state == PROC_ZOMBIE) return -ESRCH;
+    if (!signal_may(me(), p, (i32)sig)) return -EPERM;
     if (sig) signal_send(p, (i32)sig);
     return 0;
 }

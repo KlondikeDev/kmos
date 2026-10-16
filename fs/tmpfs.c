@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <rtc.h>
 #include <file.h>
+#include <proc.h>
 #include <klibc/string.h>
 
 #define TMPFS_MAX_BYTES (32 * MB)       // all file contents together
@@ -166,6 +167,8 @@ static i32 tmpfs_create(const vnode_t* dir, const char* name, u32 type, u32 mode
     strcpy(t->name, name);
     t->type = (type == VN_DIR || type == VN_SOCK) ? type : VN_REG;
     t->mode = mode & 07777;
+    t->uid = proc_current()->euid;
+    t->gid = proc_current()->egid;
     t->mtime = rtc_now();
     attach(T(dir), t);
     fill(t, out);

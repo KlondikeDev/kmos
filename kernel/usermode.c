@@ -245,11 +245,13 @@ static bool setup_stack(process_t* p, u32 argc, const char* const* argv, u32 env
         AT_PHDR, info ? info->phdr : 0,   AT_PHENT, sizeof(elf64_phdr_t),
         AT_PHNUM, info ? info->phnum : 0, AT_PAGESZ, USER_PAGE_SIZE,
         AT_BASE, 0,                       AT_FLAGS, 0,
-        AT_ENTRY, info ? info->entry : 0, AT_UID, 0,
-        AT_EUID, 0,                       AT_GID, 0,
-        AT_EGID, 0,                       AT_PLATFORM, uplatform,
+        AT_ENTRY, info ? info->entry : 0, AT_UID, p->uid,
+        AT_EUID, p->exec_euid,            AT_GID, p->gid,
+        AT_EGID, p->exec_egid,            AT_PLATFORM, uplatform,
         AT_HWCAP, cpu_hwcap(),            AT_CLKTCK, 100,
-        AT_SECURE, 0,                     AT_RANDOM, urandom,
+        // A set-id program: libc must not trust the environment.
+        AT_SECURE, p->exec_euid != p->uid || p->exec_egid != p->gid,
+                                          AT_RANDOM, urandom,
         AT_EXECFN, uexecfn,
         AT_NULL, 0,
     };
@@ -328,7 +330,7 @@ static i32 load_depth(process_t* p, const char* path, u32 argc, const char* cons
     if (r < 0) return r;
     if (node.type != VN_REG) return -EACCES;
     // Even root needs an execute bit -- where the filesystem keeps them.
-    if (node.mode && !(node.mode & 0111)) return -EACCES;
+    if (!vfs_may(&node, VFS_X)) return -EACCES;
     if (node.size > USER_MAX_IMAGE) return -E2BIG;
 
     char head[SHEBANG_MAX];
@@ -343,6 +345,13 @@ static i32 load_depth(process_t* p, const char* path, u32 argc, const char* cons
     if (r < 0) return r;
 
     memset(frame, 0, sizeof(*frame));
+    // Set-user-ID and set-group-ID programs run with their owner's ids
+    // (set-group-ID only with a group execute bit; without, it is a locking
+    // marker). Applied by the caller once nothing more can fail.
+    u32 mode, fuid, fgid;
+    vfs_attrs(&node, &mode, &fuid, &fgid);
+    p->exec_euid = (mode & 04000) ? fuid : p->euid;
+    p->exec_egid = ((mode & 02000) && (mode & 0010)) ? fgid : p->egid;
     if (!setup_stack(p, argc, argv, envc, envp, path, &info, frame)) return -ENOMEM;
     p->brk_base = p->brk = info.image_end;
     frame->rip = info.entry;
@@ -351,6 +360,11 @@ static i32 load_depth(process_t* p, const char* path, u32 argc, const char* cons
     frame->cs = GDT_USER_CS_RPL3;
     frame->ss = GDT_USER_DS_RPL3;
     return 0;
+}
+
+static void apply_exec_creds(process_t* p) {
+    p->euid = p->suid = p->exec_euid;
+    p->egid = p->sgid = p->exec_egid;
 }
 
 static void set_exe(process_t* p, const char* path) {
@@ -379,6 +393,7 @@ i32 usermode_spawn(const char* path, const user_args_t* args, process_t* parent)
         proc_free(p);
         return r;
     }
+    apply_exec_creds(p);
     kserialoutf("usermode: pid %u '%s' entry 0x%lx, %u pages\n",
          (u32)p->pid, p->name, frame.rip, p->user_pages);
     proc_start_frame(p, &frame);
@@ -415,6 +430,7 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     // Point of no return: the old image goes away.
     vmm_switch(new_space);
     vmm_destroy_space(old_space);
+    apply_exec_creds(p);
     p->nvmas = 0;
     set_name(p, path);
     set_exe(p, path);

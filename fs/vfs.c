@@ -17,6 +17,59 @@
 static mount_t mounts[VFS_MAX_MOUNTS];
 static u32 mount_count = 0;
 
+// ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
+
+void vfs_attrs(const vnode_t* n, u32* mode, u32* uid, u32* gid) {
+    if (n->mode) {
+        *mode = n->mode & 07777;
+        *uid = n->uid;
+        *gid = n->gid;
+        return;
+    }
+    *uid = *gid = 0;
+    const char* t = n->mnt && n->mnt->ops ? n->mnt->ops->type : "";
+    if (!strcmp(t, "devfs")) *mode = n->type == VN_DIR ? 0755 : 0666;
+    else if (!strcmp(t, "proc")) *mode = n->type == VN_DIR ? 0555 : n->type == VN_LNK ? 0777 : 0444;
+    else *mode = 0755;                               // FAT32: root's, readable by all
+}
+
+static bool in_groups(const process_t* p, u32 gid, bool real) {
+    if ((real ? p->gid : p->egid) == gid) return true;
+    for (u32 i = 0; i < p->ngroups; i++) if (p->groups[i] == gid) return true;
+    return false;
+}
+
+bool vfs_may_as(const vnode_t* n, u32 want, u32 uid, u32 gid, bool real) {
+    (void)gid;
+    u32 mode, owner, group;
+    vfs_attrs(n, &mode, &owner, &group);
+    if (uid == 0) {
+        // Root: everything -- but only executes what someone could.
+        return !(want & VFS_X) || n->type == VN_DIR || (mode & 0111);
+    }
+    process_t* p = proc_current();
+    u32 bits = uid == owner ? mode >> 6 : in_groups(p, group, real) ? mode >> 3 : mode;
+    return (bits & want & 7) == (want & 7);
+}
+
+bool vfs_may(const vnode_t* n, u32 want) {
+    process_t* p = proc_current();
+    return vfs_may_as(n, want, p->euid, p->egid, false);
+}
+
+// The sticky bit (as on /tmp): only a file's owner, the directory's owner,
+// or root may unlink or rename it.
+static bool sticky_allows(const vnode_t* dir, const vnode_t* node) {
+    u32 dmode, duid, dgid, mode, uid, gid;
+    vfs_attrs(dir, &dmode, &duid, &dgid);
+    if (!(dmode & 01000)) return true;
+    vfs_attrs(node, &mode, &uid, &gid);
+    u32 me = proc_current()->euid;
+    return me == 0 || me == uid || me == duid;
+}
+
 const mount_t* vfs_mount_at(u32 i) {
     return i < mount_count ? &mounts[i] : NULL;
 }
@@ -138,6 +191,7 @@ restart:;
         name[n] = '\0';
 
         if (out->type != VN_DIR) return -ENOTDIR;
+        if (!vfs_may(out, VFS_X)) return -EACCES;        // search permission
         vnode_t next = {0};
         memset(&next, 0, sizeof(next));
         r = m->ops->lookup(out, name, &next);
@@ -297,9 +351,11 @@ i32 vfs_create_mode(const char* path, u32 type, u32 mode, vnode_t* out) {
     vnode_t dir = {0};
     char name[VFS_NAME_MAX];
     i32 r = vfs_lookup_parent(path, &dir, name);
+    if (r == -EBUSY) return -EEXIST;                     // a mount point: it exists, certainly
     if (r < 0) return r;
     vnode_t existing = {0};
     if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
+    if (!vfs_may(&dir, VFS_W | VFS_X)) return -EACCES;
     if (!dir.mnt->ops->create) return -EROFS;
     memset(out, 0, sizeof(*out));
     r = dir.mnt->ops->create(&dir, name, type, mode, out);
@@ -317,6 +373,8 @@ i32 vfs_unlink(const char* path, bool want_dir) {
     if (want_dir && node.type != VN_DIR) return -ENOTDIR;
     if (!want_dir && node.type == VN_DIR) return -EISDIR;
     node.mnt = dir.mnt;
+    if (!vfs_may(&dir, VFS_W | VFS_X)) return -EACCES;
+    if (!sticky_allows(&dir, &node)) return -EPERM;
     // Unix would keep an open file's data alive until the last close; the
     // drivers cannot do that yet, and freeing it under an open descriptor
     // would let later writes land in someone else's blocks. So: refuse.
@@ -336,6 +394,10 @@ i32 vfs_rename(const char* oldpath, const char* newpath) {
     if (r < 0) return r;
     node.mnt = olddir.mnt;
     if (olddir.mnt != newdir.mnt) return -EXDEV;      // across filesystems: copy instead
+    if (!vfs_may(&olddir, VFS_W | VFS_X) || !vfs_may(&newdir, VFS_W | VFS_X)) return -EACCES;
+    if (!sticky_allows(&olddir, &node)) return -EPERM;
+    // A directory moving to another parent rewrites its "..": it must be ours to write.
+    if (node.type == VN_DIR && olddir.id != newdir.id && !vfs_may(&node, VFS_W)) return -EACCES;
     // Drivers whose ids are stable (inode numbers) can move open files; for
     // the others the locator is about to change under the open file.
     if (!node.mnt->ops->keeps_unlinked && vnode_is_open(&node)) return -EBUSY;
@@ -346,6 +408,7 @@ i32 vfs_rename(const char* oldpath, const char* newpath) {
         if (existing.type == VN_DIR) return node.type == VN_DIR ? -ENOTEMPTY : -EISDIR;
         if (node.type == VN_DIR) return -ENOTDIR;
         if (existing.mnt->ops == node.mnt->ops && existing.id == node.id && existing.aux == node.aux) return 0;
+        if (!sticky_allows(&newdir, &existing)) return -EPERM;
         if (!existing.mnt->ops->keeps_unlinked && vnode_is_open(&existing)) return -EBUSY;
     }
     if (!olddir.mnt->ops->rename) return -EROFS;
@@ -367,6 +430,7 @@ i32 vfs_chdir(const char* path) {
     r = walk(abs, &n, true);
     if (r < 0) return r;
     if (n.type != VN_DIR) return -ENOTDIR;
+    if (!vfs_may(&n, VFS_X)) return -EACCES;
     char* cwd = proc_current()->cwd;
     for (u32 i = 0; i < VFS_PATH_MAX; i++) {
         cwd[i] = abs[i];
@@ -398,6 +462,7 @@ i32 vfs_symlink(const char* target, const char* linkpath) {
     i32 r = vfs_lookup_parent(linkpath, &dir, name);
     if (r < 0) return r;
     if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
+    if (!vfs_may(&dir, VFS_W | VFS_X)) return -EACCES;
     if (!dir.mnt->ops->symlink) return -EPERM;           // FAT32 has none
     return dir.mnt->ops->symlink(&dir, name, target, &out);
 }
@@ -412,6 +477,7 @@ i32 vfs_link(const char* oldpath, const char* newpath) {
     if (r < 0) return r;
     if (dir.mnt != node.mnt) return -EXDEV;
     if (dir.mnt->ops->lookup(&dir, name, &existing) == 0) return -EEXIST;
+    if (!vfs_may(&dir, VFS_W | VFS_X)) return -EACCES;
     if (!dir.mnt->ops->link) return -EPERM;
     return dir.mnt->ops->link(&dir, name, &node);
 }
@@ -424,11 +490,40 @@ i64 vfs_readlink(const char* path, char* buf, u64 len) {
     return node.mnt->ops->readlink(&node, buf, len);
 }
 
-i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a) {
-    // Filesystems without attributes (FAT32, devices) quietly keep none:
-    // with no users there is nobody to refuse.
-    if (!node->mnt || !node->mnt->ops->setattr) return 0;
-    return node->mnt->ops->setattr(node, mask, a);
+i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a_in) {
+    vattr_t a = *a_in;
+    process_t* p = proc_current();
+    u32 mode, uid, gid;
+    vfs_attrs(node, &mode, &uid, &gid);
+    bool root = p->euid == 0, owner = p->euid == uid;
+    if (mask & VATTR_MODE) {
+        if (!root && !owner) return -EPERM;
+        // Only a member of the file's group may make it set-group-id.
+        if (!root && (a.mode & 02000) && !in_groups(p, (mask & VATTR_GID) ? a.gid : gid, false)) a.mode &= ~02000u;
+    }
+    if (mask & VATTR_UID) {
+        if (a.uid == uid) mask &= ~(u32)VATTR_UID;
+        else if (!root) return -EPERM;                   // giving files away: root only
+    }
+    if (mask & VATTR_GID) {
+        if (a.gid == gid) mask &= ~(u32)VATTR_GID;
+        else if (!root && !(owner && in_groups(p, a.gid, false))) return -EPERM;
+    }
+    if ((mask & (VATTR_UID | VATTR_GID)) && node->type == VN_REG && !(mask & VATTR_MODE) && (mode & 06000)) {
+        // A new owner does not inherit set-id powers.
+        mask |= VATTR_MODE;
+        a.mode = mode & ~06000u;
+    }
+    if (mask & (VATTR_ATIME | VATTR_MTIME)) {
+        if (mask & VATTR_NOW) {
+            if (!root && !owner && !vfs_may(node, VFS_W)) return -EACCES;
+        } else if (!root && !owner) {
+            return -EPERM;
+        }
+    }
+    // Filesystems without attributes (FAT32, devices) quietly keep none.
+    if (!mask || !node->mnt || !node->mnt->ops->setattr) return 0;
+    return node->mnt->ops->setattr(node, mask & ~(u32)VATTR_NOW, &a);
 }
 
 i32 vfs_statfs(const vnode_t* node, vfs_statfs_t* out) {

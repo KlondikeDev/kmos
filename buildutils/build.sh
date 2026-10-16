@@ -192,6 +192,14 @@ ufs(){
     # can check nothing was skipped or repeated.
     seq -f "line %06g of the big file" 1 110000 > $T/big.txt
     chmod -R go-w build/ufsroot                         # whatever the host's umask was
+    # Pristine account files, for the accounts service to seed from.
+    mkdir -p build/ufsroot/etc/defaults
+    cp etc/passwd etc/group etc/shadow build/ufsroot/etc/defaults/
+    chmod 600 build/ufsroot/etc/shadow build/ufsroot/etc/defaults/shadow   # root's eyes only
+    chmod 644 build/ufsroot/etc/defaults/passwd build/ufsroot/etc/defaults/group
+    # busybox is set-user-ID root, for su, passwd and login; it drops the
+    # privilege at once for every applet that does not need it.
+    [ -f build/ufsroot/bin/busybox ] && chmod 4755 build/ufsroot/bin/busybox
     rm -f ufs.img
     # Room to write in: 64 MiB, and at least 8192 inodes free (makefs would
     # otherwise size the inode table to exactly what is on the image).

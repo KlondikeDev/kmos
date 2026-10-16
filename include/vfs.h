@@ -55,6 +55,7 @@ typedef struct {
 #define VATTR_GID   0x4
 #define VATTR_ATIME 0x8
 #define VATTR_MTIME 0x10
+#define VATTR_NOW   0x20       // the times are "now" (anyone who may write may do that)
 typedef struct {
     u32 mode, uid, gid;
     u64 atime, mtime;
@@ -151,7 +152,19 @@ i32 vfs_link(const char* oldpath, const char* newpath);
 i64 vfs_readlink(const char* path, char* buf, u64 len);
 i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a);
 void vfs_getattr(vnode_t* node);
-void vfs_shutdown_all(void);             // before powering off         // bring an open file's node up to date
+void vfs_shutdown_all(void);             // before powering off
+
+// Permissions. A node's owner and mode -- with stand-ins for filesystems
+// that keep none: FAT32 is root's and 0755, devices 0666, /proc 0555/0444.
+void vfs_attrs(const vnode_t* n, u32* mode, u32* uid, u32* gid);
+#define VFS_R 4
+#define VFS_W 2
+#define VFS_X 1
+// May the current process (its effective ids) do `want` to n? Root may do
+// anything, except execute what has no execute bit at all.
+bool vfs_may(const vnode_t* n, u32 want);
+// The same check for given ids (access() uses the real ones).
+bool vfs_may_as(const vnode_t* n, u32 want, u32 uid, u32 gid, bool real);         // bring an open file's node up to date
 i32 vfs_statfs(const vnode_t* node, vfs_statfs_t* out);
 i32 vfs_unlink(const char* path, bool want_dir);
 i32 vfs_truncate(vnode_t* node, u64 size);

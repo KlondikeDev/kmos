@@ -43,6 +43,7 @@
 #include <usermode.h>
 #include <klibc/string.h>
 #include <file.h>
+#include <proc.h>
 
 typedef struct {
     u8 drive;
@@ -1141,6 +1142,8 @@ static i32 ufs2_create(const vnode_t* dirnode, const char* name, u32 type, u32 m
     ip.di_mode = (u16)(fmt | (mode & 07777));
     ip.di_nlink = dir ? 2 : 1;
     ip.di_gen = (u32)weak_random() | 1;
+    ip.di_uid = proc_current()->euid;           // new files are their creator's
+    ip.di_gid = proc_current()->egid;
     i64 now = (i64)rtc_now();
     ip.di_atime = ip.di_mtime = ip.di_ctime = ip.di_birthtime = now;
     if (!write_inode(u, ino, &ip)) { r = -EIO; goto undo; }
@@ -1288,6 +1291,8 @@ static i32 ufs2_symlink(const vnode_t* dirnode, const char* name, const char* ta
     ip.di_mode = UFS2_IFLNK | 0777;
     ip.di_nlink = 1;
     ip.di_gen = (u32)weak_random() | 1;
+    ip.di_uid = proc_current()->euid;           // new files are their creator's
+    ip.di_gid = proc_current()->egid;
     i64 now = (i64)rtc_now();
     ip.di_atime = ip.di_mtime = ip.di_ctime = ip.di_birthtime = now;
     if (tlen < (u32)u->fs.fs_maxsymlinklen) {

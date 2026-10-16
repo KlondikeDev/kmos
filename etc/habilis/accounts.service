@@ -1,0 +1,7 @@
+# The account files (passwd, group, shadow) live on the home disk, so that
+# users and passwords outlive the root image (rebuilt with every build).
+# First boot copies the shipped ones there; /etc then points at them.
+description=accounts
+exec=/etc/habilis/accounts.sh
+type=oneshot
+after=home

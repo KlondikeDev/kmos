@@ -188,14 +188,15 @@ static void test_fork_exec(void) {
     CHECK("failed execve returns to the caller",
           execve("/bin/does-not-exist", argv, environ) < 0 && errno == ENOENT);
 
+    char before[256], cwd[256];
+    getcwd(before, sizeof(before));
     pid = fork();
     if (pid == 0) {
         chdir("/dev");
         _exit(0);
     }
     waitpid(pid, NULL, 0);
-    char cwd[64];
-    CHECK("working directory is per-process", getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0);
+    CHECK("working directory is per-process", getcwd(cwd, sizeof(cwd)) && strcmp(cwd, before) == 0);
 }
 
 static volatile int got_usr1;

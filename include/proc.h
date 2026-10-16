@@ -53,6 +53,7 @@ typedef struct {
     u32 uid, euid, suid, gid, egid, sgid;
     u32 groups[16];
     u32 ngroups;
+    u32 exec_euid, exec_egid; // what an execve in progress will make them (set-id programs)
     struct tty* ctty; // controlling terminal (of the session), or NULL
     u32 umask;
     proc_state_t state;

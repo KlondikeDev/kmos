@@ -42,6 +42,13 @@
 void signal_send(process_t* p, i32 sig);
 // Send to every process in a process group. Returns how many got it.
 i32 signal_send_group(i32 pgid, i32 sig);
+// May `from` signal `to`? Root may; others only their own processes (real
+// or effective uid matching the target's real or saved one), and SIGCONT
+// within their session.
+bool signal_may(const process_t* from, const process_t* to, i32 sig);
+// signal_send_group for a process asking: the number signalled, or
+// -ESRCH (none there) / -EPERM (none it may signal).
+i32 signal_send_group_as(const process_t* from, i32 pgid, i32 sig);
 
 // Any unblocked signal waiting?
 bool signal_pending(const process_t* p);
