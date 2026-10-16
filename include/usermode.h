@@ -26,6 +26,9 @@
 //          ...           program image (ELF PT_LOAD segments)
 //          ...           heap, grown upwards by sbrk
 //   USER_LOAD_LIMIT      nothing (image or heap) may reach past here
+//   USER_MMAP_BASE       (the same address) bottom of the mmap area
+//          ...           mmap regions, handed out top-down
+//   USER_MMAP_TOP        top of the mmap area
 //          ...           unmapped guard page
 //   USER_STACK_LIMIT     the stack may grow down to here (8 MiB reserved)
 //          ...           mapped on demand, as the stack touches it
@@ -36,10 +39,13 @@
 #define USER_STACK_PAGES  4
 #define USER_STACK_BOTTOM (USER_STACK_TOP - USER_STACK_PAGES * USER_PAGE_SIZE)
 #define USER_STACK_LIMIT  (USER_STACK_TOP - 8 * MB)
-#define USER_LOAD_LIMIT   (USER_STACK_LIMIT - USER_PAGE_SIZE)
+#define USER_MMAP_TOP     (USER_STACK_LIMIT - USER_PAGE_SIZE)
+#define USER_MMAP_BASE    0x0000004000000000ULL     // 256 GiB
+#define USER_LOAD_LIMIT   USER_MMAP_BASE
+#define USER_MMAP_MIN     0x10000ULL                // lowest MAP_FIXED address
 
 // Hard caps, so a hostile or broken program cannot eat all of memory.
-#define USER_MAX_PAGES    1024             // per process: 4 MiB
+#define USER_MAX_PAGES    32768            // per process: 128 MiB
 #define USER_MAX_IMAGE    (1 * MB)         // largest executable we will read
 #define USER_MAX_ARGS     32               // each of argv and envp
 #define USER_MAX_ARGBYTES 4096             // all their strings together

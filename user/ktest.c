@@ -518,6 +518,176 @@ static void test_leaks(void) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Memory mappings and copy-on-write
+// ---------------------------------------------------------------------------
+
+#define PG 4096UL
+static volatile char* probe;             // what the child below pokes at
+static int child_read_probe(void)  { return probe[0]; }
+static int child_write_probe(void) { probe[0] = 1; return 0; }
+
+static char cow_buf[PG] = { 'A' };
+static int child_read_into_cow(void) {
+    int fd = open("/dev/zero", O_RDONLY);    // the kernel writes a COW page
+    long n = read(fd, cow_buf, PG);
+    close(fd);
+    return n == (long)PG && cow_buf[0] == 0 ? 0 : 1;
+}
+
+static unsigned long free_pages(void) {
+    struct meminfo m;
+    meminfo(&m);
+    return m.free_pages;
+}
+
+static unsigned char* hog;               // touched before fork, for sharing
+static unsigned long hog_free_at_fork;
+static int child_measure_sharing(void) {
+    unsigned long now = free_pages();
+    // An eager copy would cost all 1024 pages; sharing only page tables.
+    return hog_free_at_fork - now < 256 ? 0 : 1;
+}
+
+static void test_mmap(void) {
+    errno = 0;
+    char* p = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK("mmap anonymous memory", p != MAP_FAILED && ((unsigned long)p & (PG - 1)) == 0);
+    int zero = 1;
+    for (unsigned long i = 0; i < 3 * PG; i++) if (p[i]) zero = 0;
+    CHECK("...which starts zeroed", zero);
+    for (unsigned long i = 0; i < 3 * PG; i++) p[i] = (char)(i * 7);
+    int same = 1;
+    for (unsigned long i = 0; i < 3 * PG; i++) if (p[i] != (char)(i * 7)) same = 0;
+    CHECK("...and holds what is written", same);
+
+    CHECK("munmap a middle page", munmap(p + PG, PG) == 0);
+    probe = p + PG;
+    int st = in_child(child_read_probe);
+    CHECK("touching an unmapped page is SIGSEGV", WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+    CHECK("the pages either side survive", p[0] == 0 && p[2 * PG + 1] == (char)((2 * PG + 1) * 7));
+    munmap(p, 3 * PG);
+
+    // Lazy: mapping 16 MiB costs (almost) nothing until it is touched.
+    unsigned long before = free_pages();
+    char* big = mmap(NULL, 16 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned long mapped = free_pages();
+    for (unsigned long i = 0; i < (1 << 20); i += PG) big[i] = 1;
+    unsigned long touched = free_pages();
+    CHECK("mmap is lazy (16 MiB mapped, 1 MiB touched)",
+          big != MAP_FAILED && before - mapped < 8 && mapped - touched >= 256 && mapped - touched < 270);
+    munmap(big, 16 << 20);
+    CHECK("munmap gives the frames back", free_pages() >= touched + 256);
+
+    // Protections.
+    p = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    p[0] = 'r';
+    CHECK("mprotect to read-only", mprotect(p, PG, PROT_READ) == 0 && p[0] == 'r');
+    probe = p;
+    st = in_child(child_write_probe);
+    CHECK("writing a read-only page is SIGSEGV", WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+    CHECK("the kernel will not write a read-only page either",
+          read(open("/dev/zero", O_RDONLY), p, 1) < 0 && errno == EFAULT);
+    mprotect(p, PG, PROT_NONE);
+    st = in_child(child_read_probe);
+    CHECK("reading a PROT_NONE page is SIGSEGV", WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
+    CHECK("...and the kernel refuses it", write(STDOUT_FILENO, p, 1) < 0 && errno == EFAULT);
+    CHECK("mprotect back to read-write",
+          mprotect(p, PG, PROT_READ | PROT_WRITE) == 0 && p[0] == 'r' && (p[0] = 's') == 's');
+    munmap(p, PG);
+
+    // A syscall can fill a never-touched mapping.
+    p = mmap(NULL, 8 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    memset(p, 'x', 8 * PG);
+    munmap(p, 8 * PG);
+    p = mmap(p, 8 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int fd = open("/dev/zero", O_RDONLY);
+    CHECK("read() into an untouched mapping", read(fd, p, 8 * PG) == (long)(8 * PG) && p[5 * PG] == 0);
+    close(fd);
+
+    // MAP_FIXED replaces; MAP_FIXED_NOREPLACE refuses.
+    p[0] = 'z';
+    char* q = mmap(p, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    p[PG] = 'k';
+    CHECK("MAP_FIXED lands where asked", q == p && p[0] == 0 && p[PG] == 'k');
+    errno = 0;
+    CHECK("MAP_FIXED_NOREPLACE over a mapping is EEXIST",
+          mmap(p, PG, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) == MAP_FAILED &&
+          errno == EEXIST);
+    munmap(p, 8 * PG);
+
+    // Shared and private mappings across fork.
+    volatile int* shared = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    volatile int* priv = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    *shared = 1;
+    *priv = 1;
+    pid_t pid = fork();
+    if (pid == 0) { *shared = 42; *priv = 42; _exit(0); }
+    waitpid(pid, &st, 0);
+    CHECK("MAP_SHARED memory is shared with a child", *shared == 42);
+    CHECK("MAP_PRIVATE memory is copied on write", *priv == 1);
+    munmap((void*)shared, PG);
+    munmap((void*)priv, PG);
+
+    // Copy-on-write fork.
+    hog = malloc(1024 * PG);
+    for (unsigned long i = 0; i < 1024 * PG; i += PG) hog[i] = 1;
+    hog_free_at_fork = free_pages();
+    st = in_child(child_measure_sharing);
+    CHECK("fork shares pages instead of copying 4 MiB", WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    free(hog);
+    st = in_child(child_read_into_cow);
+    CHECK("a syscall writing a COW page copies it", WIFEXITED(st) && WEXITSTATUS(st) == 0 && cow_buf[0] == 'A');
+
+    // Files.
+    fd = open("/README.TXT", O_RDONLY);
+    char whole[512];
+    long n = read(fd, whole, sizeof(whole));
+    char* f = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    CHECK("mmap a file", f != MAP_FAILED && n > 0 && memcmp(f, whole, (size_t)n) == 0);
+    f[0] = '#';
+    char again[8];
+    lseek(fd, 0, SEEK_SET);
+    CHECK("writes to a private file mapping stay private", read(fd, again, 1) == 1 && again[0] == whole[0]);
+    errno = 0;
+    CHECK("a shared writable file mapping is refused (no write-back yet)",
+          mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) == MAP_FAILED && errno == ENODEV);
+    munmap(f, PG);
+    close(fd);
+
+    errno = 0;
+    CHECK("mmap of length 0 is EINVAL",
+          mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED && errno == EINVAL);
+    errno = 0;
+    CHECK("mmap of a closed fd is EBADF",
+          mmap(NULL, PG, PROT_READ, MAP_PRIVATE, 77, 0) == MAP_FAILED && errno == EBADF);
+    errno = 0;
+    CHECK("munmap of an unaligned address is EINVAL", munmap((void*)0x400001, PG) < 0 && errno == EINVAL);
+
+    // Nothing leaks: mappings, COW breaks, shared pages and exits.
+    for (int round = 0; round < 2; round++) {
+        if (round == 1) before = free_pages();
+        for (int i = 0; i < 10; i++) {
+            char* m = mmap(NULL, 64 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            char* s = mmap(NULL, 4 * PG, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+            for (int k = 0; k < 64; k += 3) m[k * PG] = 1;
+            pid = fork();
+            if (pid == 0) {
+                for (int k = 0; k < 64; k += 2) m[k * PG] = 2;
+                s[0] = 3;
+                _exit(0);
+            }
+            m[PG] = 5;
+            waitpid(pid, NULL, 0);
+            munmap(m, 64 * PG);
+            munmap(s, 4 * PG);
+        }
+    }
+    unsigned long after = free_pages();
+    CHECK("no pages leaked by mmap, COW and shared memory", after == before);
+    if (after != before) say("   pages %lu -> %lu\n", before, after);
+}
+
 int main(int argc, char** argv) {
     serial = open("/dev/serial", O_WRONLY);
     int only_files = argc > 1 && strcmp(argv[1], "files") == 0;
@@ -530,6 +700,7 @@ int main(int argc, char** argv) {
         test_fork_exec();
         test_signals();
         test_fpu();
+        test_mmap();
         test_leaks();
     }
     test_files();

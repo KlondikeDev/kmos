@@ -7,7 +7,13 @@
 uint64_t get_usable_ram(void);
 void pmm_init(void);
 void *pmm_alloc(void);
-void pmm_free(uint64_t addr);
+void pmm_free(uint64_t addr);           // drops one reference
+void pmm_ref(uint64_t addr);            // one more owner of this frame
+uint32_t pmm_refs(uint64_t addr);       // 0: not a frame pmm_alloc gave out
+
+// Software bits in the PTE "available" field.
+#define PTE_COW    (1ULL << 9)   // read-only for now; copy on the first write
+#define PTE_SHARED (1ULL << 10)  // MAP_SHARED: fork shares it writable
 bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags);   // false: out of memory
 void vmm_unmap(uint64_t virt);
 
@@ -22,7 +28,9 @@ void vmm_switch(uint64_t space);
 bool vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap_in(uint64_t space, uint64_t virt);
 uint64_t vmm_get_pte(uint64_t space, uint64_t virt);  // 0 if not mapped
-bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out);  // fork
+uint64_t vmm_next_mapped(uint64_t space, uint64_t va, uint64_t end);
+bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out);  // fork, COW
+bool vmm_break_cow(uint64_t space, uint64_t virt);
 void heap_init(void);
 void *kmalloc(uint64_t size);
 void kfree(void *addr);

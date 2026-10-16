@@ -9,8 +9,15 @@
 
 #define PAGE_SIZE 4096
 #define PTE_USER_BIT 0x4
+#define PTE_WRITE_BIT 0x2
 
 static uint8_t *bitmap;
+// How many page-table entries (or other owners) hold each frame. pmm_alloc
+// hands a frame out with one reference; pmm_free drops one and only really
+// frees the frame when the last goes. Copy-on-write fork is what shares
+// frames. A count of 0 on an in-use frame means "not ours" (firmware or
+// device memory mapped into a process), which pmm_free leaves alone.
+static uint16_t *refcount;
 static uint64_t total_pages;
 static uint64_t hhdm_offset;
 
@@ -54,10 +61,13 @@ void pmm_init(void) {
     }
     total_pages = max_end / PAGE_SIZE;
     uint64_t bitmap_size = (total_pages + 7) / 8;
+    // The refcounts live right after the bitmap, in the same carve-out.
+    uint64_t refs_offset = (bitmap_size + 15) & ~15ULL;
+    uint64_t meta_size = refs_offset + total_pages * sizeof(uint16_t);
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
         uint64_t aligned = (entry->base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= bitmap_size + (aligned - entry->base)) {
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= meta_size + (aligned - entry->base)) {
             bitmap = (uint8_t*)(aligned + hhdm_offset);
             break;
         }
@@ -66,6 +76,8 @@ void pmm_init(void) {
         __asm__ volatile("int $0x82");
     }
     memset(bitmap, 0xFF, bitmap_size);
+    refcount = (uint16_t*)((uint8_t*)bitmap + refs_offset);
+    memset(refcount, 0, total_pages * sizeof(uint16_t));
     for (uint64_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
         if (entry->type != LIMINE_MEMMAP_USABLE) continue;
@@ -79,7 +91,7 @@ void pmm_init(void) {
     }
     uint64_t phys = (uint64_t)bitmap - hhdm_offset;
     uint64_t bstart = phys / PAGE_SIZE;
-    uint64_t bcount = (bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t bcount = (meta_size + PAGE_SIZE - 1) / PAGE_SIZE;
     for(uint64_t k = bstart; k < bstart + bcount; k++) {
         bitmap[k / 8] |= (1 << (k % 8));
     }
@@ -95,6 +107,7 @@ void* pmm_alloc(void) {
         if (!(bitmap[i / 8] & (1 << (i % 8)))) {
             bitmap[i / 8] |= (1 << (i % 8));
             last_free_hint = i + 1;
+            refcount[i] = 1;
             return (void *)(i * PAGE_SIZE);
         }
     }
@@ -118,8 +131,20 @@ void pmm_free(uint64_t addr) {
         __asm__ volatile("int $0x82");
     }
     uint64_t i = addr / PAGE_SIZE;
+    if (i >= total_pages || refcount[i] == 0) return;   // not a pmm frame
+    if (--refcount[i] > 0) return;                      // still shared
     bitmap[i / 8] &= ~(1 << (i % 8));
     if (i < last_free_hint) last_free_hint = i;
+}
+
+void pmm_ref(uint64_t addr) {
+    uint64_t i = addr / PAGE_SIZE;
+    if (i < total_pages && refcount[i] != 0) refcount[i]++;
+}
+
+uint32_t pmm_refs(uint64_t addr) {
+    uint64_t i = addr / PAGE_SIZE;
+    return i < total_pages ? refcount[i] : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,42 +250,74 @@ void vmm_destroy_space(uint64_t space) {
     pmm_free(space);
 }
 
-// Copy every user page of src into dst (fork). Eager: each frame is
-// duplicated now rather than shared copy-on-write. Returns false if memory
+// Share every user page of src with dst (fork). Writable private pages
+// become read-only + PTE_COW in *both* spaces and are copied by whichever
+// side writes first (vmm_break_cow). Pages marked PTE_SHARED stay writable
+// in both. Only page tables are allocated here. Returns false if memory
 // runs out; dst then holds a partial copy for the caller to destroy.
 bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out) {
     uint64_t* pml4 = table_virt(src);
     uint32_t pages = 0;
-    for (int i = 0; i < 256; i++) {
+    bool ok = true;
+    for (int i = 0; i < 256 && ok; i++) {
         if (!(pml4[i] & 1)) continue;
         uint64_t* pdpt = table_virt(pml4[i] & 0x000FFFFFFFFFF000ULL);
-        for (int j = 0; j < 512; j++) {
+        for (int j = 0; j < 512 && ok; j++) {
             if (!(pdpt[j] & 1)) continue;
             uint64_t* pd = table_virt(pdpt[j] & 0x000FFFFFFFFFF000ULL);
-            for (int k = 0; k < 512; k++) {
+            for (int k = 0; k < 512 && ok; k++) {
                 if (!(pd[k] & 1)) continue;
                 uint64_t* pt = table_virt(pd[k] & 0x000FFFFFFFFFF000ULL);
                 for (int l = 0; l < 512; l++) {
                     uint64_t pte = pt[l];
                     if (!(pte & 1)) continue;
-                    void* frame = pmm_alloc();
-                    if (!frame) return false;
-                    uint64_t from = pte & 0x000FFFFFFFFFF000ULL;
-                    uint64_t* a = table_virt(from);
-                    uint64_t* b = table_virt((uint64_t)frame);
-                    for (int w = 0; w < PAGE_SIZE / 8; w++) b[w] = a[w];
+                    if (!(pte & PTE_SHARED) && (pte & PTE_WRITE_BIT)) {
+                        pte = (pte & ~PTE_WRITE_BIT) | PTE_COW;
+                        pt[l] = pte;
+                    }
                     uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
                                     ((uint64_t)k << 21) | ((uint64_t)l << 12);
-                    if (!vmm_map_in(dst, virt, (uint64_t)frame, pte & ~0x000FFFFFFFFFF000ULL)) {
-                        pmm_free((uint64_t)frame);
-                        return false;
+                    uint64_t frame = pte & 0x000FFFFFFFFFF000ULL;
+                    if (!vmm_map_in(dst, virt, frame, pte & ~0x000FFFFFFFFFF000ULL)) {
+                        ok = false;
+                        break;
                     }
+                    pmm_ref(frame);
                     pages++;
                 }
             }
         }
     }
+    // The parent's own entries lost their write bit: drop stale TLB entries.
+    if (src == read_cr3()) {
+        __asm__ volatile("mov %0, %%cr3" :: "r"(src) : "memory");
+    }
     *pages_out = pages;
+    return ok;
+}
+
+// A write hit a PTE_COW page: give this space its own writable copy, or
+// just make the page writable again if nobody else shares the frame now.
+// False if out of memory.
+bool vmm_break_cow(uint64_t space, uint64_t virt) {
+    virt &= ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t pte = vmm_get_pte(space, virt);
+    if (!(pte & 1) || !(pte & PTE_COW)) return false;
+    uint64_t frame = pte & 0x000FFFFFFFFFF000ULL;
+    uint64_t flags = (pte & ~0x000FFFFFFFFFF000ULL & ~PTE_COW) | PTE_WRITE_BIT;
+    if (pmm_refs(frame) == 1) {
+        return vmm_map_in(space, virt, frame, flags);
+    }
+    void* copy = pmm_alloc();
+    if (!copy) return false;
+    uint64_t* a = table_virt(frame);
+    uint64_t* b = table_virt((uint64_t)copy);
+    for (int w = 0; w < PAGE_SIZE / 8; w++) b[w] = a[w];
+    if (!vmm_map_in(space, virt, (uint64_t)copy, flags)) {
+        pmm_free((uint64_t)copy);
+        return false;
+    }
+    pmm_free(frame);                 // drop this space's share of the original
     return true;
 }
 
@@ -303,6 +360,27 @@ uint64_t vmm_get_pte(uint64_t space, uint64_t virt) {
     uint64_t* pt = next_table(pd, (virt >> 21) & 0x1FF, 0, false);
     if (!pt) return 0;
     return pt[(virt >> 12) & 0x1FF];
+}
+
+// The first page in [va, end) that is mapped, or end. Skips whole empty
+// tables, so sweeping a mostly-empty gigabyte is cheap.
+uint64_t vmm_next_mapped(uint64_t space, uint64_t va, uint64_t end) {
+    uint64_t* pml4 = table_virt(space);
+    va &= ~(uint64_t)(PAGE_SIZE - 1);
+    while (va < end) {
+        uint64_t e = pml4[(va >> 39) & 0x1FF];
+        if (!(e & 1)) { va = ((va >> 39) + 1) << 39; continue; }
+        uint64_t* pdpt = table_virt(e & 0x000FFFFFFFFFF000ULL);
+        e = pdpt[(va >> 30) & 0x1FF];
+        if (!(e & 1)) { va = ((va >> 30) + 1) << 30; continue; }
+        uint64_t* pd = table_virt(e & 0x000FFFFFFFFFF000ULL);
+        e = pd[(va >> 21) & 0x1FF];
+        if (!(e & 1)) { va = ((va >> 21) + 1) << 21; continue; }
+        uint64_t* pt = table_virt(e & 0x000FFFFFFFFFF000ULL);
+        if (pt[(va >> 12) & 0x1FF] & 1) return va;
+        va += PAGE_SIZE;
+    }
+    return end;
 }
 
 bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags) {

@@ -22,6 +22,18 @@ long syscall3(long n, long a, long b, long c) {
     return ret;
 }
 
+long syscall6(long n, long a, long b, long c, long d, long e, long f) {
+    long ret;
+    register long r10 __asm__("r10") = d;
+    register long r8 __asm__("r8") = e;
+    register long r9 __asm__("r9") = f;
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10), "r"(r8), "r"(r9)
+                     : "memory");
+    return ret;
+}
+
 // Raw result -> POSIX result: -1 with errno set on failure.
 static long check(long r) {
     if (r < 0 && r > -4096) {
@@ -105,6 +117,15 @@ long getcpl(void)                      { return syscall3(SYS_GETCPL, 0, 0, 0); }
 int procinfo(unsigned long i, procinfo_t* p) { return (int)check(syscall3(SYS_PROCINFO, (long)i, (long)p, 0)); }
 int uname(struct utsname* u)           { return (int)check(syscall3(SYS_UNAME, (long)u, 0, 0)); }
 int meminfo(struct meminfo* m)         { return (int)check(syscall3(SYS_MEMINFO, (long)m, 0, 0)); }
+
+void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
+    long r = syscall6(SYS_MMAP, (long)addr, (long)len, prot, flags, fd, off);
+    return check(r) == -1 ? MAP_FAILED : (void*)r;
+}
+int munmap(void* addr, size_t len) { return (int)check(syscall3(SYS_MUNMAP, (long)addr, (long)len, 0)); }
+int mprotect(void* addr, size_t len, int prot) {
+    return (int)check(syscall3(SYS_MPROTECT, (long)addr, (long)len, prot));
+}
 
 time_t time(time_t* out) {
     time_t t = syscall3(SYS_TIME, 0, 0, 0);

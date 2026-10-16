@@ -74,8 +74,12 @@ typedef int           pid_t;
 #define SYS_MEMINFO     40
 #define SYS_TIME        41
 #define SYS_RENAME      42
+#define SYS_MMAP        43
+#define SYS_MUNMAP      44
+#define SYS_MPROTECT    45
 
 long syscall3(long n, long a, long b, long c);
+long syscall6(long n, long a, long b, long c, long d, long e, long f);
 
 // ---- errno ----
 extern int errno;
@@ -245,6 +249,23 @@ struct meminfo {
     unsigned long heap_free;
 };
 int meminfo(struct meminfo* m);
+
+// ---- memory mappings ----
+#define PROT_NONE  0x0
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
+#define MAP_SHARED          0x01
+#define MAP_PRIVATE         0x02
+#define MAP_FIXED           0x10
+#define MAP_ANONYMOUS       0x20
+#define MAP_ANON            MAP_ANONYMOUS
+#define MAP_POPULATE        0x8000
+#define MAP_FIXED_NOREPLACE 0x100000
+#define MAP_FAILED ((void*)-1)
+void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off);
+int munmap(void* addr, size_t len);
+int mprotect(void* addr, size_t len, int prot);
 
 typedef long time_t;
 time_t time(time_t* out);             // seconds since 1970, UTC

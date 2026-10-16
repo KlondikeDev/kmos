@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <klibc/string.h>
+#include <mman.h>
 
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PAGE_MASK     (~(USER_PAGE_SIZE - 1))
@@ -116,7 +117,11 @@ bool user_range_ok(u64 addr, u64 len, bool write) {
     u64 last = (addr + len - 1) & PAGE_MASK;
     for (u64 page = addr & PAGE_MASK; ; page += USER_PAGE_SIZE) {
         u64 pte = vmm_get_pte(space, page);
-        if (!(pte & PTE_PRESENT) && user_grow_stack(page)) pte = vmm_get_pte(space, page);
+        // Not there yet (lazy mmap, stack growth) or copy-on-write: fault
+        // it in now, exactly as the program touching it would have.
+        if ((!(pte & PTE_PRESENT) || (write && !(pte & PTE_WRITE))) && mm_fault(page, write)) {
+            pte = vmm_get_pte(space, page);
+        }
         if (!(pte & PTE_PRESENT) || !(pte & PTE_USER)) return false;
         if (write && !(pte & PTE_WRITE)) return false;
         if (page == last) break;
@@ -271,6 +276,7 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     // Point of no return: the old image goes away.
     vmm_switch(new_space);
     vmm_destroy_space(old_space);
+    p->nvmas = 0;
     set_name(p, path);
     fd_close_on_exec(p);
     for (int s = 0; s < NSIG; s++) {
@@ -341,10 +347,10 @@ void usermode_fault(const char* reason, registers_t* regs) {
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
     process_t* p = proc_current();
 
-    // A not-present page fault in the stack region is the stack growing:
-    // back the page and retry the instruction. (Error code bit 0 clear =
-    // the page was not present, as opposed to a protection violation.)
-    if (regs->int_no == 14 && !(regs->err_code & 1) && user_grow_stack(cr2)) return;
+    // A page fault that is really demand paging -- the stack growing, an
+    // mmap region's first touch, a write to a copy-on-write page -- is
+    // resolved and the instruction retried. (Error code bit 1: a write.)
+    if (regs->int_no == 14 && mm_fault(cr2, (regs->err_code & 2) != 0)) return;
     i32 sig = signal_for_fault(regs->int_no);
 
     // A fault cannot be ignored or blocked: retrying the instruction would

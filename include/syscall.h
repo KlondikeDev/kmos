@@ -64,7 +64,10 @@
 #define SYS_MEMINFO     40   // (kmeminfo_t*)
 #define SYS_TIME        41   // () -> seconds since 1970 (UTC)
 #define SYS_RENAME      42   // (oldpath, newpath)
-#define SYS_COUNT       43
+#define SYS_MMAP        43   // (addr, len, prot, flags, fd, offset) -> addr
+#define SYS_MUNMAP      44   // (addr, len)
+#define SYS_MPROTECT    45   // (addr, len, prot)
+#define SYS_COUNT       46
 
 // ioctl requests on the terminal.
 #define TIOCGMODE 1          // -> TTY_MODE_* bits

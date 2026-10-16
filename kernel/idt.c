@@ -12,6 +12,7 @@
 #include <keyboard.h>
 #include <gdt.h>
 #include <usermode.h>
+#include <mman.h>
 #include <proc.h>
 #include <signal.h>
 #include <syscall.h>
@@ -371,6 +372,15 @@ void isr_handler(registers_t* regs) {
     if ((regs->cs & 3) == 3) {
         usermode_fault(exception_name(regs->int_no), regs);  // kills or diverts to a handler
         return;
+    }
+
+    // The kernel touching user memory it already validated can still fault
+    // legitimately: a page copy-on-write since the check, say. Resolve it
+    // like a ring 3 fault would be; anything else is a real kernel bug.
+    if (regs->int_no == 14) {
+        uint64_t cr2;
+        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+        if (cr2 < USER_STACK_TOP && mm_fault(cr2, (regs->err_code & 2) != 0)) return;
     }
 
     switch(regs->int_no) {

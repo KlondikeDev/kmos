@@ -179,6 +179,8 @@ process_t* proc_fork(const registers_t* frame) {
     child->pgid = parent->pgid;
     child->brk_base = parent->brk_base;
     child->brk = parent->brk;
+    for (u32 i = 0; i < parent->nvmas; i++) child->vmas[i] = parent->vmas[i];
+    child->nvmas = parent->nvmas;
     // A forked child runs the same code, so it keeps the handlers too.
     for (int s = 0; s < NSIG; s++) child->sig_handler[s] = parent->sig_handler[s];
     child->sig_restorer = parent->sig_restorer;

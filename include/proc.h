@@ -8,6 +8,7 @@
 
 #include <types.h>
 #include <idt.h>
+#include <mman.h>
 
 #define MAX_PROCS     32
 #define MAX_FDS       32
@@ -64,6 +65,9 @@ typedef struct {
 
     u64 brk_base;     // first byte past the loaded image
     u64 brk;          // current program break (sbrk)
+
+    vma_t vmas[MAX_VMAS];    // mmap regions, sorted by address
+    u32 nvmas;
 
     char cwd[PROC_CWD_MAX];
     struct file* fds[MAX_FDS];

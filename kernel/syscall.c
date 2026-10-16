@@ -30,6 +30,7 @@
 #include <memset.h>
 #include <klog.h>
 #include <klibc/string.h>
+#include <mman.h>
 
 #define PAGE_MASK (~(USER_PAGE_SIZE - 1))
 
@@ -319,6 +320,7 @@ static i64 sys_sbrk(i64 increment) {
     }
     u64 new_brk = old + (u64)increment;
     if (new_brk < old || new_brk > USER_LOAD_LIMIT) return -ENOMEM;
+    if (mm_overlaps(old & PAGE_MASK, new_brk)) return -ENOMEM;
 
     u64 first = (old + USER_PAGE_SIZE - 1) & PAGE_MASK;
     for (u64 page = first; page < new_brk; page += USER_PAGE_SIZE) {
@@ -498,6 +500,9 @@ void syscall_dispatch(registers_t* regs) {
         case SYS_MEMINFO:     r = sys_meminfo(a); break;
         case SYS_TIME:        r = (i64)rtc_now(); break;
         case SYS_RENAME:      r = sys_rename(a, b); break;
+        case SYS_MMAP:        r = mm_mmap(a, b, c, regs->r10, (i64)regs->r8, regs->r9); break;
+        case SYS_MUNMAP:      r = mm_munmap(a, b); break;
+        case SYS_MPROTECT:    r = mm_mprotect(a, b, c); break;
         default:
             r = -ENOSYS;
             break;
