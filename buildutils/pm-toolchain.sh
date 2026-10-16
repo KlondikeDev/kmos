@@ -28,7 +28,7 @@ JOBS=$(nproc)
 
 MUSL_VER=1.2.5
 NCURSES_VER=6.5
-ZSH_VER=5.9
+ZSH_VER=5.9.2
 BUSYBOX_VER=1.36.1
 
 mkdir -p "$SRC" "$OUT"
@@ -36,7 +36,7 @@ mkdir -p "$SRC" "$OUT"
 fetch() {   # url
     local file=$SRC/${1##*/}
     if [ ! -f "$file" ]; then
-        curl -fL --retry 3 -o "$file.part" "$1"
+        curl -fL --retry 3 -o "$file.part" "$1" || { rm -f "$file.part"; return 1; }
         mv "$file.part" "$file"
     fi
     case $file in
@@ -62,14 +62,15 @@ build_musl() {
     done
 }
 
-CC_MUSL() { echo "$MUSL/bin/musl-gcc"; }
+# Always static: there is no dynamic linker on Kunix (or a shared libc).
+CC_MUSL() { echo "$MUSL/bin/musl-gcc -static"; }
 
 build_ncurses() {
     fetch https://ftp.gnu.org/gnu/ncurses/ncurses-$NCURSES_VER.tar.gz
     cd "$SRC/ncurses-$NCURSES_VER"
     # The terminal descriptions are compiled into the library, so nothing
     # needs a terminfo database on the Kunix disk.
-    CC=$(CC_MUSL) ./configure --prefix="$MUSL" --without-shared --without-cxx \
+    CC="$(CC_MUSL)" ./configure --prefix="$MUSL" --without-shared --without-cxx \
         --without-cxx-binding --without-ada --without-tests --without-manpages \
         --without-progs --disable-database --with-fallbacks=linux,vt100,dumb \
         --enable-termcap --with-termlib
@@ -78,12 +79,17 @@ build_ncurses() {
 }
 
 build_zsh() {
-    fetch https://www.zsh.org/pub/zsh-$ZSH_VER.tar.xz
+    # zsh.org keeps only the newest release in /pub; older ones move to old/.
+    fetch https://www.zsh.org/pub/zsh-$ZSH_VER.tar.xz ||
+        fetch https://www.zsh.org/pub/old/zsh-$ZSH_VER.tar.xz
     cd "$SRC/zsh-$ZSH_VER"
-    CC=$(CC_MUSL) LDFLAGS=-static ./configure --prefix=/ --host=x86_64-linux-musl \
-        --enable-static --disable-dynamic --disable-gdbm --disable-pcre \
-        --disable-cap --without-tcsetpgrp-check --with-tcsetpgrp \
-        --with-term-lib="tinfo"
+    # Modules are linked in (no dynamic loading). ncurses was built wide:
+    # its libraries carry a "w".
+    CC="$(CC_MUSL)" CPPFLAGS="-I$MUSL/include/ncursesw" LDFLAGS="-L$MUSL/lib" \
+        ./configure --prefix=/ --host=x86_64-linux-musl \
+        --disable-dynamic --disable-gdbm --disable-pcre --disable-cap \
+        --with-tcsetpgrp --with-term-lib="tinfow ncursesw" \
+        --enable-etcdir=/etc --enable-zshenv=/etc/zshenv
     make -j"$JOBS"
     strip -o "$OUT/zsh" Src/zsh
 }

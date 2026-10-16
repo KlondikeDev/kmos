@@ -49,6 +49,7 @@
 #define LNX_alarm             37
 #define LNX_setitimer         38
 #define LNX_getpid            39
+#define LNX_sendfile          40
 #define LNX_socket            41
 #define LNX_clone             56
 #define LNX_fork              57

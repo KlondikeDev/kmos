@@ -26,6 +26,7 @@
 #include <cpuinit.h>
 #include <vt.h>
 #include <primemeridian.h>
+#include <procfs.h>
 #include <ata.h>
 #include <fat32.h>
 #include <vfs.h>
@@ -33,6 +34,7 @@
 #include <gdt.h>
 #include <proc.h>
 #include <usermode.h>
+#include <errno.h>
 #include <file.h>
 #include <tty.h>
 #include <rtc.h>
@@ -87,6 +89,7 @@ void kernel_main(void) {
         vfs_mount("/ufs", &ufs2_vfs_ops);
     }
     vfs_mount("/dev", &devfs_vfs_ops);
+    vfs_mount("/proc", &procfs_vfs_ops);
     tty_init();
 
     // Give the kernel task stdin/stdout/stderr on the terminal. Every
@@ -116,16 +119,31 @@ void kernel_main(void) {
     // processes are left (e.g. after `exit` in the ring 3 shell).
     // Interrupts stay off until the log line is out, so the shell's banner
     // cannot overtake it.
+    //
+    // The first shell found wins: zsh (through Prime Meridian) as a login
+    // shell, then Kunix's own ksh. (Until Habilis takes over as init.)
+    static const char* const shells[][2] = {
+        { "/ufs/bin/zsh", "-zsh" },
+        { "/BIN/SH.ELF", "/BIN/SH.ELF" },
+    };
     u64 flags = irq_save();
-    i32 init_pid = usermode_spawn("/BIN/SH.ELF", NULL, NULL);
-    if (init_pid < 0) {
-        klog(LOG_WARN, "No /BIN/SH.ELF on disk, starting the kernel shell\n");
-    } else {
-        // It leads its own process group; make that the terminal's
-        // foreground, so Ctrl+C reaches it and whatever it runs.
-        tty_set_foreground(init_pid);
-        klog(LOG_OKAY, "Started /BIN/SH.ELF as pid %u\n", (u32)init_pid);
+    i32 init_pid = -ENOENT;
+    user_args_t* args = kmalloc(sizeof(user_args_t));
+    for (u32 i = 0; args && i < sizeof(shells) / sizeof(shells[0]); i++) {
+        args->argc = 1;
+        args->argv[0] = shells[i][1];
+        args->envc = 0;
+        init_pid = usermode_spawn(shells[i][0], args, NULL);
+        if (init_pid >= 0) {
+            // It leads its own process group; make that the terminal's
+            // foreground, so Ctrl+C reaches it and whatever it runs.
+            tty_set_foreground(init_pid);
+            klog(LOG_OKAY, "Started %s as pid %u\n", shells[i][0], (u32)init_pid);
+            break;
+        }
     }
+    if (args) kfree(args);
+    if (init_pid < 0) klog(LOG_WARN, "No shell on disk, starting the kernel shell\n");
     irq_restore(flags);
 
     // From here on this is PID 0, the kernel task. It only runs when no
@@ -139,7 +157,7 @@ void kernel_main(void) {
 
 		if (!kernel_shell) {
 			kernel_shell = true;
-			tty_set_mode(TTY_MODE_CANON | TTY_MODE_ECHO | TTY_MODE_ISIG);
+			tty_init();                       // sane settings, whatever the last program left
 			while (tty_kernel_getline(line, sizeof(line))) { }   // drop stale input
 			shell_init();
 		}

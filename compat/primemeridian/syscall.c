@@ -121,6 +121,7 @@ static void to_lstat(const vnode_t* n, l_stat_t* st) {
         st->st_rdev = (1 << 8) | (u32)n->id;
     }
     st->st_size = (i64)k.st_size;
+    st->st_atime = st->st_mtime = st->st_ctime = (i64)n->mtime;
     st->st_blksize = 4096;
     st->st_blocks = (i64)((k.st_size + 511) / 512);
 }
@@ -260,6 +261,33 @@ static i64 l_pread(u64 fd, u64 buf, u64 len, i64 off, bool write) {
     if (write ? acc == O_RDONLY : acc == O_WRONLY) return -EBADF;
     return write ? vfs_write(f->node, (u64)off, (const void*)buf, len)
                  : vfs_read(f->node, (u64)off, (void*)buf, len);
+}
+
+// Copy between descriptors in the kernel (cat and cp use it).
+static i64 l_sendfile(u64 out_fd, u64 in_fd, u64 uoff, u64 count) {
+    file_t* in = fd_get(me(), (i32)in_fd);
+    file_t* out = fd_get(me(), (i32)out_fd);
+    if (!in || !out) return -EBADF;
+    if (uoff && !uok(uoff, 8, true)) return -EFAULT;
+    i64 off = uoff ? *(i64*)uoff : -1;
+    if (uoff && (off < 0 || in->node->type != VN_REG)) return off < 0 ? -EINVAL : -ESPIPE;
+    if (count > 0x7FFFF000) count = 0x7FFFF000;
+    u8* buf = kmalloc(4096);
+    if (!buf) return -ENOMEM;
+    i64 total = 0;
+    while ((u64)total < count) {
+        u64 chunk = count - (u64)total < 4096 ? count - (u64)total : 4096;
+        i64 n = off >= 0 ? vfs_read(in->node, (u64)off, buf, chunk) : file_read(in, buf, chunk);
+        if (n <= 0) { if (n < 0 && !total) total = n; break; }
+        i64 w = file_write(out, buf, (u64)n);
+        if (w < 0) { if (!total) total = w; break; }
+        total += w;
+        if (off >= 0) off += w;
+        if (w < n) break;
+    }
+    kfree(buf);
+    if (uoff && off >= 0) *(i64*)uoff = off;
+    return total;
 }
 
 static i64 l_fcntl(u64 fd, u64 cmd, u64 arg) {
@@ -582,9 +610,11 @@ static i64 l_clock_gettime(u64 clk, u64 uts) {
         case L_CLOCK_MONOTONIC_RAW:
         case L_CLOCK_MONOTONIC_COARSE:
         case L_CLOCK_BOOTTIME:
-        case L_CLOCK_PROCESS_CPUTIME_ID:     // no CPU accounting yet: wall time
-        case L_CLOCK_THREAD_CPUTIME_ID:
             ms = uptime_ms();
+            break;
+        case L_CLOCK_PROCESS_CPUTIME_ID:
+        case L_CLOCK_THREAD_CPUTIME_ID:
+            ms = (u64)me()->cpu_ticks * 4;
             break;
         default:
             return -EINVAL;
@@ -1054,6 +1084,7 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_dup2:        r = sys_dup2(a, b); break;
         case LNX_dup3:        r = l_dup3(a, b, c); break;
         case LNX_fcntl:       r = l_fcntl(a, b, c); break;
+        case LNX_sendfile:    r = l_sendfile(a, b, c, d); break;
         case LNX_ioctl:       r = l_ioctl(a, b, c); break;
         case LNX_getdents64:  r = l_getdents64(a, b, c); break;
         case LNX_getcwd:      r = sys_getcwd(a, b); if (r >= 0) r++; break;   // Linux counts the NUL

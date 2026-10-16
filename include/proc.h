@@ -73,6 +73,10 @@ typedef struct {
     u64 brk;          // current program break (sbrk)
 
     u64 fs_base;      // FS segment base (thread pointer), set by arch_prctl
+    u64 arg_start;    // argv strings in user memory, for /proc/<pid>/cmdline
+    u64 arg_end;
+    u32 start_tick;   // when it was created
+    u32 cpu_ticks;    // timer ticks spent running it
 
     vma_t vmas[MAX_VMAS];    // mmap regions, sorted by address
     u32 nvmas;

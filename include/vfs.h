@@ -36,6 +36,7 @@ typedef struct {
     u64 id;                    // driver's identity for the object (inode, cluster, ...)
     u64 aux;                   // driver's extra locator (e.g. where its dir entry lives)
     u64 size;
+    u64 mtime;                 // last modified, seconds since 1970 (0: unknown)
     u32 type;                  // VN_*
 } vnode_t;
 
@@ -68,6 +69,7 @@ typedef struct mount {
 } mount_t;
 
 bool vfs_mount(const char* point, const vfs_ops_t* ops);
+const mount_t* vfs_mount_at(u32 i);      // the i-th mount, NULL past the end
 
 // Normalise `path` against the current process's working directory.
 i32 vfs_normalize(const char* path, char* out);

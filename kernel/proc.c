@@ -113,6 +113,7 @@ process_t* proc_alloc(const char* name, process_t* parent) {
     p->sid = parent->pid == 0 ? p->pid : parent->sid;
     p->umask = parent->pid == 0 ? 022 : parent->umask;
     p->state = PROC_EMBRYO;
+    p->start_tick = ticks;
     p->space = space;
     p->kstack = kstack;
     p->kstack_top = ((u64)kstack + KSTACK_SIZE) & ~0xFULL;
@@ -189,6 +190,8 @@ process_t* proc_fork(const registers_t* frame) {
     for (int s = 0; s < NSIG; s++) child->sig_handler[s] = parent->sig_handler[s];
     child->sig_restorer = parent->sig_restorer;
     child->fs_base = parent->fs_base;
+    child->arg_start = parent->arg_start;
+    child->arg_end = parent->arg_end;
     child->sig_linux = parent->sig_linux;
     for (int s = 0; s < NSIG; s++) {
         child->sig_flags[s] = parent->sig_flags[s];
@@ -321,6 +324,7 @@ void sched_sleep(u32 n) {
 }
 
 void sched_tick(void) {
+    current->cpu_ticks++;
     for (int i = 1; i < MAX_PROCS; i++) {
         process_t* p = &procs[i];
         if (p->state == PROC_BLOCKED && (p->wait == WAIT_SLEEP || p->wake_timed) &&

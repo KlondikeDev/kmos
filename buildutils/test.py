@@ -77,7 +77,7 @@ def main():
 
     try:
         deadline = time.time() + args.timeout
-        if not wait_for(r"Started /BIN/SH\.ELF", deadline):
+        if not wait_for(r"Started \S+ as pid 1", deadline):
             print(log()[-2000:])
             sys.exit("kernel did not reach the shell")
         time.sleep(1.0)                          # let the prompt settle

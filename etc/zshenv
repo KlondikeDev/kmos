@@ -1,0 +1,11 @@
+# /etc/zshenv -- read by every zsh, interactive or not, before anything else.
+#
+# Kunix's own programs live on the FAT32 disk as /bin/NAME.ELF (and, where
+# busybox has no tool of that name, as /ufs/bin/name). Linux programs that
+# run through Prime Meridian -- zsh itself, busybox -- live in /ufs/bin.
+export PATH=/ufs/bin:/bin
+export TERM=${TERM:-linux}
+export HOME=${HOME:-/}
+export USER=${USER:-root}
+export LOGNAME=${LOGNAME:-root}
+export SHELL=/ufs/bin/zsh

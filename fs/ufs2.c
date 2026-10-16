@@ -206,6 +206,7 @@ static i32 node_from_inode(u32 ino, vnode_t* out) {
     out->id = ino;
     out->aux = 0;
     out->size = ip.di_size;
+    out->mtime = ip.di_mtime > 0 ? (u64)ip.di_mtime : 0;
     out->type = fmt == UFS2_IFDIR ? VN_DIR : fmt == UFS2_IFREG ? VN_REG : VN_CHR;
     return 0;
 }

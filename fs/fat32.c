@@ -326,10 +326,22 @@ static bool cluster_valid(uint32_t c) {
     return c >= 2 && c < FAT_CLUSTER_EOC;
 }
 
+// FAT's packed date and time (local time, 2-second steps; we write UTC).
+static u64 fat_mtime(uint16_t date, uint16_t time) {
+    if (date == 0) return 0;
+    rtc_date_t d = {
+        .year = 1980 + (date >> 9), .month = (date >> 5) & 0xF, .day = date & 0x1F,
+        .hour = time >> 11, .min = (time >> 5) & 0x3F, .sec = (time & 0x1F) * 2,
+    };
+    if (d.month < 1 || d.month > 12 || d.day < 1) return 0;
+    return rtc_from_date(&d);
+}
+
 static void node_from_entry(const dirent_t* e, uint32_t dir_cluster, uint32_t slot, vnode_t* out) {
     out->id   = ((uint32_t)e->cluster_hi << 16) | e->cluster_lo;
     out->aux  = ((u64)dir_cluster << 32) | slot;
     out->size = e->size;
+    out->mtime = fat_mtime(e->write_date, e->write_time);
     out->type = (e->attr & FAT_ATTR_DIRECTORY) ? VN_DIR : VN_REG;
     if (out->type == VN_DIR && out->id == 0) out->id = root_cluster;   // ".." quirk
 }
@@ -397,6 +409,7 @@ static i32 fat_root(vnode_t* out) {
     out->id = root_cluster;
     out->aux = FAT_AUX_ROOT;
     out->size = 0;
+    out->mtime = 0;
     out->type = VN_DIR;
     return 0;
 }

@@ -16,6 +16,10 @@
 static mount_t mounts[VFS_MAX_MOUNTS];
 static u32 mount_count = 0;
 
+const mount_t* vfs_mount_at(u32 i) {
+    return i < mount_count ? &mounts[i] : NULL;
+}
+
 // Resolve `path` against the working directory into a normalised absolute
 // path: no ".", no "..", no doubled or trailing slashes. ".." at the root
 // stays at the root.

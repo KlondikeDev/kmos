@@ -98,6 +98,11 @@ u64 rtc_now_ms(void) {
     return boot_epoch * 1000 + (u64)(ticks - boot_ticks) * 4;
 }
 
+u64 rtc_from_date(const rtc_date_t* d) {
+    return (u64)(days_from_civil(d->year, d->month, d->day) * 86400 +
+                 d->hour * 3600 + d->min * 60 + d->sec);
+}
+
 void rtc_to_date(u64 epoch, rtc_date_t* out) {
     i64 days = (i64)(epoch / 86400);
     u32 secs = (u32)(epoch % 86400);

@@ -221,11 +221,18 @@ static bool setup_stack(process_t* p, u32 argc, const char* const* argv, u32 env
     bool ok = false;
     u64 sp = USER_STACK_TOP;
     u32 n = 0;
+    // Strings are pushed last-first, so they end up in order in memory:
+    // argv[0]'s NUL-separated run is what /proc/<pid>/cmdline shows.
     w[n++] = argc;
-    for (u32 i = 0; i < argc; i++) if (!(w[n++] = push_string(p, &sp, argv[i]))) goto out;
+    u64 uenvp_index = 1 + argc + 1;
+    for (u32 i = envc; i-- > 0; ) if (!(w[uenvp_index + i] = push_string(p, &sp, envp[i]))) goto out;
+    u64 args_end = sp;
+    for (u32 i = argc; i-- > 0; ) if (!(w[1 + i] = push_string(p, &sp, argv[i]))) goto out;
+    p->arg_start = sp;
+    p->arg_end = args_end;
+    n = 1 + argc;
     w[n++] = 0;
-    u64 uenvp_index = n;
-    for (u32 i = 0; i < envc; i++) if (!(w[n++] = push_string(p, &sp, envp[i]))) goto out;
+    n += envc;
     w[n++] = 0;
     u64 uexecfn = push_string(p, &sp, execfn);
     u64 uplatform = push_string(p, &sp, "x86_64");
@@ -324,6 +331,7 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     u64 old_space = p->space;
     u32 old_pages = p->user_pages;
     u64 old_brk_base = p->brk_base, old_brk = p->brk;
+    u64 old_arg_start = p->arg_start, old_arg_end = p->arg_end;
     u64 new_space = vmm_create_space();
     if (!new_space) return -ENOMEM;
     p->space = new_space;
@@ -336,6 +344,8 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
         p->space = old_space;
         p->user_pages = old_pages;
         p->brk_base = old_brk_base;
+        p->arg_start = old_arg_start;
+        p->arg_end = old_arg_end;
         p->brk = old_brk;
         return r;
     }

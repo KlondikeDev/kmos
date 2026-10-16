@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <memset.h>
 #include <serial.h>
+#include <rtc.h>
 
 enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_COUNT };
 
@@ -27,6 +28,7 @@ static void make_node(u64 id, vnode_t* out) {
     out->id = id;
     out->aux = 0;
     out->size = 0;
+    out->mtime = rtc_now();                // devices are always "now"
     out->type = id == DEV_ROOT ? VN_DIR : VN_CHR;
 }
 

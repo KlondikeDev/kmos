@@ -620,7 +620,7 @@ int main(int argc, char** argv, char** envp) {
     if (!getenv("PATH"))  setenv("PATH", "/bin:/ufs/bin", 1);
     if (!getenv("HOME"))  setenv("HOME", "/", 1);
     if (!getenv("SHELL")) setenv("SHELL", "/bin/sh", 1);
-    if (!getenv("TERM"))  setenv("TERM", "kunix", 1);
+    if (!getenv("TERM"))  setenv("TERM", "linux", 1);   // what drivers/vt.c emulates
     if (!getenv("USER"))  setenv("USER", "root", 1);
 
     // `sh -c "command"` runs one line and exits.

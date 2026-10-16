@@ -1,0 +1,19 @@
+# /etc/zshrc -- interactive zsh on Kunix.
+
+PROMPT='%n@%m %~ %# '
+
+# FAT32 only takes 8.3 names for now, so no ~/.zsh_history.
+HISTFILE=$HOME/ZHISTORY
+HISTSIZE=1000
+SAVEHIST=1000
+setopt hist_ignore_dups inc_append_history interactive_comments
+
+# Emacs keys, plus what the Linux console (drivers/vt.c) sends for the
+# editing keys.
+bindkey -e
+bindkey '^[[1~' beginning-of-line
+bindkey '^[[4~' end-of-line
+bindkey '^[[3~' delete-char
+bindkey '^[[2~' overwrite-mode
+bindkey '^[[5~' up-line-or-history
+bindkey '^[[6~' down-line-or-history
