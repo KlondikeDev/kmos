@@ -1,0 +1,11 @@
+The Habilis look:
+
+Habilis is an init system, obviously. Lightweight.
+
+Anyway, as it loads or does things, it keeps the screen clear, except for one thing:
+
+Starting [service or whatever]... (then here, it has one of those spinning cursor things, like how it goes / -> | -> - -> \, you get the idea)
+
+That is the only line, at the top, unless something fails, where at a line below, it prints [FAILED] then the name of the thing, and the stack grows beneath it. This probably didn't need a text document, but whatever.
+
+Thanks, Claude!

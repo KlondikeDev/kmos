@@ -1,0 +1,4 @@
+# The home disk is a separate drive; without it ~ falls back to /.
+description=home disk
+exec=test -d /home/root
+type=oneshot

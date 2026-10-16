@@ -1,0 +1,5 @@
+# The login shell on the console, started again whenever it exits.
+description=console
+exec=exec /bin/zsh -l
+type=console
+after=var hostname home

@@ -141,7 +141,11 @@ def main():
 
     try:
         deadline = time.time() + args.timeout
-        if not wait_for(r"Started \S+ as pid 1", deadline):
+        started = wait_for(r"Started (\S+) as pid 1", deadline)
+        # Under Habilis the shell comes once boot is done; it says so.
+        if started and started.group(1).endswith("init"):
+            started = wait_for(r"habilis: started console", deadline)
+        if not started:
             print(log()[-2000:])
             sys.exit("kernel did not reach the shell")
         time.sleep(1.0)                          # let the prompt settle

@@ -45,6 +45,7 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/procfs.c -o procfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/tmpfs.c -o tmpfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/time.c -o time.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/power.c -o power.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/ksnprintf.c -o ksnprintf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/syscall.c -o pm_syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/signal.c -o pm_signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
@@ -58,7 +59,7 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o procfs.o tmpfs.o time.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o procfs.o tmpfs.o time.o power.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
@@ -101,6 +102,9 @@ primemeridian(){
     for src in compat/primemeridian/tests/*.c; do
         "$MUSL_GCC" -static -O2 -Wall -Wextra -o "build/pm/$(basename "$src" .c)" "$src"
     done
+    # Habilis, the init system: an ordinary static program too.
+    mkdir -p build/habilis
+    "$MUSL_GCC" -static -O2 -Wall -Wextra -o build/habilis/habilis habilis/habilis.c
     # ...and the test scripts (#! zsh), installed without their extension.
     for src in compat/primemeridian/tests/*.zsh; do
         install -m 755 "$src" "build/pm/$(basename "$src" .zsh)"
@@ -154,7 +158,7 @@ ufs(){
     fi
     info "Building the UFS2 root image..."
     rm -rf build/ufsroot
-    mkdir -p build/ufsroot/bin build/ufsroot/etc build/ufsroot/test/docs/deeper
+    mkdir -p build/ufsroot/bin build/ufsroot/sbin build/ufsroot/etc build/ufsroot/test/docs/deeper
     cp build/user/*.elf build/ufsroot/bin/
     cp build/pm/* build/ufsroot/bin/ 2>/dev/null || true
     # busybox decides what to be from argv[0]: give it every applet name,
@@ -171,7 +175,12 @@ ufs(){
         name=$(basename "$elf" .elf)
         [ -e "build/ufsroot/bin/$name" ] || cp "$elf" "build/ufsroot/bin/$name"
     done
-    cp etc/* build/ufsroot/etc/
+    cp -r etc/. build/ufsroot/etc/
+    # Habilis is /sbin/init (the kernel's first choice) and /sbin/habilis.
+    if [ -x build/habilis/habilis ]; then
+        cp build/habilis/habilis build/ufsroot/sbin/init
+        ln build/ufsroot/sbin/init build/ufsroot/sbin/habilis
+    fi
     T=build/ufsroot/test
     printf 'Hello from UFS2!\nThis file lives on the second disk.\n' > $T/hello.txt
     printf 'Nested three levels down.\n' > $T/docs/deeper/nested.txt

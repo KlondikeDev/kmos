@@ -102,6 +102,9 @@ typedef struct {
     // driver lets open files be unlinked (and renamed over): it keeps the
     // object until this is called -- the Unix rule.
     void (*release)(vnode_t* node);
+    // The system is going down: write everything out and mark the
+    // filesystem clean.
+    void (*shutdown)(const struct mount* m);
     bool keeps_unlinked;
 } vfs_ops_t;
 
@@ -141,7 +144,8 @@ i32 vfs_symlink(const char* target, const char* linkpath);
 i32 vfs_link(const char* oldpath, const char* newpath);
 i64 vfs_readlink(const char* path, char* buf, u64 len);
 i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a);
-void vfs_getattr(vnode_t* node);         // bring an open file's node up to date
+void vfs_getattr(vnode_t* node);
+void vfs_shutdown_all(void);             // before powering off         // bring an open file's node up to date
 i32 vfs_statfs(const vnode_t* node, vfs_statfs_t* out);
 i32 vfs_unlink(const char* path, bool want_dir);
 i32 vfs_truncate(vnode_t* node, u64 size);

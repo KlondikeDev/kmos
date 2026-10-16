@@ -441,3 +441,9 @@ i32 vfs_statfs(const vnode_t* node, vfs_statfs_t* out) {
 void vfs_getattr(vnode_t* node) {
     if (node->mnt && node->mnt->ops->getattr) node->mnt->ops->getattr(node);
 }
+
+void vfs_shutdown_all(void) {
+    for (u32 i = 0; i < mount_count; i++) {
+        if (mounts[i].ops->shutdown) mounts[i].ops->shutdown(&mounts[i]);
+    }
+}

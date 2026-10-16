@@ -133,6 +133,7 @@ void kernel_main(void) {
     // The first shell found wins: zsh (through Prime Meridian) as a login
     // shell, then Kunix's own ksh. (Until Habilis takes over as init.)
     static const char* const shells[][2] = {
+        { "/sbin/init", "/sbin/init" },                 // Habilis
         { "/bin/zsh", "-zsh" },
         { "/bin/sh.elf", "/bin/sh.elf" },
         { "/fat/BIN/SH.ELF", "/fat/BIN/SH.ELF" },

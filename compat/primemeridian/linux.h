@@ -129,6 +129,8 @@
 #define LNX_arch_prctl        158
 #define LNX_setrlimit         160
 #define LNX_sync              162
+#define LNX_reboot            169
+#define LNX_sethostname       170
 #define LNX_gettid            186
 #define LNX_tkill             200
 #define LNX_time              201

@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <rtc.h>
 #include <ktime.h>
+#include <power.h>
 #include <pit.h>
 #include <msr.h>
 #include <gdt.h>
@@ -942,11 +943,35 @@ static i64 l_uname(u64 out) {
     // Linux programs are told they run on Linux -- that is the point of a
     // personality -- with the release naming who is actually serving them.
     put_field(u->sysname, "Linux");
-    put_field(u->nodename, "kunix");
+    put_field(u->nodename, kernel_hostname);
     put_field(u->release, "6.1.0-primemeridian");
     put_field(u->version, "Kunix Millennium Operating System (Prime Meridian)");
     put_field(u->machine, "x86_64");
     put_field(u->domainname, "(none)");
+    return 0;
+}
+
+// reboot(2): the two magic numbers, then what to do.
+static i64 l_reboot(u64 magic1, u64 magic2, u64 cmd) {
+    if ((u32)magic1 != 0xfee1dead) return -EINVAL;
+    switch ((u32)magic2) {
+        case 672274793: case 85072278: case 369367448: case 537993216: break;
+        default: return -EINVAL;
+    }
+    switch ((u32)cmd) {
+        case 0x01234567: power_down(POWER_RESTART);     // LINUX_REBOOT_CMD_RESTART
+        case 0xCDEF0123: power_down(POWER_HALT);        // ..._HALT
+        case 0x4321FEDC: power_down(POWER_OFF);         // ..._POWER_OFF
+        case 0x89ABCDEF: case 0x00000000: return 0;     // Ctrl-Alt-Del on/off: nothing to do
+        default: return -EINVAL;
+    }
+}
+
+static i64 l_sethostname(u64 name, u64 len) {
+    if (len > 64) return -EINVAL;
+    if (!uok(name, len, false)) return -EFAULT;
+    memcpy(kernel_hostname, (const void*)name, len);
+    kernel_hostname[len] = '\0';
     return 0;
 }
 
@@ -1274,7 +1299,9 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_fsync: case LNX_fdatasync:
         case LNX_flock: case LNX_fadvise64:
                               r = fd_get(p, (i32)a) ? 0 : -EBADF; break;
-        case LNX_sync:        r = 0; break;
+        case LNX_sync:        r = 0; break;               // writes are synchronous already
+        case LNX_reboot:      r = l_reboot(a, b, c); break;
+        case LNX_sethostname: r = l_sethostname(a, b); break;
         case LNX_umask:       r = p->umask; p->umask = (u32)a & 0777; break;
 
         // memory

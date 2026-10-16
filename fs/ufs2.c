@@ -1376,6 +1376,16 @@ static void ufs2_release(vnode_t* node) {
     commit(u);
 }
 
+// Going down: nothing is in flight between operations, so the filesystem
+// is consistent -- say so.
+static void ufs2_shutdown(const struct mount* m) {
+    ufs_t* u = (ufs_t*)m->priv;
+    if (!u->writable || u->fs.fs_clean) return;
+    u->fs.fs_clean = 1;
+    u->sb_dirty = true;
+    if (commit(u) == 0) klog(LOG_OKAY, "ufs2: drive %u marked clean\n", u->drive);
+}
+
 const vfs_ops_t ufs2_vfs_ops = {
     .type = "ufs2",
     .root = ufs2_root,
@@ -1394,6 +1404,7 @@ const vfs_ops_t ufs2_vfs_ops = {
     .statfs = ufs2_statfs,
     .getattr = ufs2_getattr,
     .release = ufs2_release,
+    .shutdown = ufs2_shutdown,
     .keeps_unlinked = true,
 };
 
