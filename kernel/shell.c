@@ -91,7 +91,7 @@ void shell_process_command(const char* cmd) {
         path[n] = '\0';
         u64 flags = irq_save();
         i32 pid = usermode_spawn(path, NULL, NULL);
-        if (pid > 0) tty_set_foreground(pid);
+        if (pid > 0) tty_console.fg_pgid = pid;
         irq_restore(flags);
         if (pid < 0) {
             terminal_printf(GREY, BLACK, "run: %s: cannot execute\n", path);

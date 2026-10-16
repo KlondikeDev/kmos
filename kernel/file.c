@@ -79,17 +79,16 @@ static void vnode_release(vnode_t* n) {
 // ---------------------------------------------------------------------------
 
 static i64 vnode_file_read(file_t* f, void* buf, u64 len) {
-    if ((f->flags & O_NONBLOCK) && devfs_is_tty(f->node)) {
-        // The terminal is the one device here that can block.
-        i64 n = tty_read(buf, len, true);
-        return n;
-    }
+    tty_t* t = devfs_tty(f->node);
+    if (t) return tty_read(t, buf, len, (f->flags & O_NONBLOCK) != 0);
     i64 n = vfs_read(f->node, f->pos, buf, len);
     if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
     return n;
 }
 
 static i64 vnode_file_write(file_t* f, const void* buf, u64 len) {
+    tty_t* t = devfs_tty(f->node);
+    if (t) return tty_write(t, buf, len, (f->flags & O_NONBLOCK) != 0);
     if (f->node->type == VN_REG && (f->flags & O_APPEND)) f->pos = f->node->size;
     i64 n = vfs_write(f->node, f->pos, buf, len);
     if (n > 0 && f->node->type == VN_REG) f->pos += (u64)n;
@@ -102,7 +101,8 @@ static void vnode_file_release(file_t* f) {
 }
 
 static u32 vnode_file_poll(file_t* f) {
-    if (devfs_is_tty(f->node)) return (tty_readable() ? POLLIN : 0) | POLLOUT;
+    tty_t* t = devfs_tty(f->node);
+    if (t) return (tty_readable(t) ? POLLIN : 0) | POLLOUT | (t->hung_up ? POLLHUP : 0);
     return POLLIN | POLLOUT;           // disks and the other devices never block
 }
 
@@ -173,11 +173,48 @@ i32 file_open(const char* path, u32 flags, file_t** out) {
     return file_open_mode(path, flags, 0666, out);
 }
 
+// A session leader without a terminal that opens one (and does not say
+// O_NOCTTY) gets it as its controlling terminal -- if nobody else has it.
+static void maybe_acquire_ctty(tty_t* t, u32 flags) {
+    process_t* p = proc_current();
+    if (!t || (flags & O_NOCTTY) || p->ctty || p->sid != p->pid || t->sid) return;
+    p->ctty = t;
+    t->sid = p->sid;
+    t->fg_pgid = p->pgid;
+}
+
 i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
     u32 acc = flags & O_ACCMODE;
     if (acc == 3) return -EINVAL;
     i32 alias = open_fd_alias(path, out);
     if (alias <= 0) return alias;
+
+    // /dev/tty is whichever terminal controls you; /dev/ptmx makes a new
+    // pseudo-terminal pair.
+    char abs[VFS_PATH_MAX];
+    if (vfs_normalize(path, abs) == 0) {
+        if (!strcmp(abs, "/dev/tty")) {
+            tty_t* c = proc_current()->ctty;
+            if (!c) return -ENXIO;
+            u32 n = pty_index(c);
+            if (n != ~0u) {
+                char pts[32] = "/dev/pts/";
+                u32 k = 9;
+                char digits[12];
+                u32 d = 0;
+                do { digits[d++] = (char)('0' + n % 10); n /= 10; } while (n);
+                while (d) pts[k++] = digits[--d];
+                pts[k] = '\0';
+                return file_open_mode(pts, flags | O_NOCTTY, mode, out);
+            }
+            return file_open_mode("/dev/console", flags | O_NOCTTY, mode, out);
+        }
+        if (!strcmp(abs, "/dev/ptmx")) {
+            i32 r = pty_open_master(out);
+            if (r == 0) (*out)->flags = (flags & ~O_ACCMODE) | O_RDWR;
+            return r;
+        }
+    }
 
     vnode_t node;
     i32 r = vfs_lookup(path, &node);
@@ -194,22 +231,26 @@ i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
         return -ENOTDIR;
     }
 
+    if (node.mnt && node.mnt->ops->open) {
+        r = node.mnt->ops->open(&node, flags);
+        if (r < 0) return r;
+    }
     file_t* f = file_alloc(&vnode_file_ops, flags);
     if (!f) return -ENOMEM;
     f->node = vnode_intern(&node);
     if (!f->node) { kfree(f); return -ENOMEM; }
+    maybe_acquire_ctty(devfs_tty(f->node), flags);
 
     // Truncate the shared node, so every open of this file sees it.
     if ((flags & O_TRUNC) && acc != O_RDONLY && node.type == VN_REG) {
         r = vfs_truncate(f->node, 0);
         if (r < 0) { file_unref(f); return r; }
     }
-    if (node.type == VN_DIR) {
-        // Directory listings include mount points, which needs the path.
-        f->path = kmalloc(VFS_PATH_MAX);
-        if (!f->path) { file_unref(f); return -ENOMEM; }
-        vfs_normalize(path, f->path);
-    }
+    // Every open file remembers its name: /proc/<pid>/fd shows it, and
+    // directory listings (which include mount points) need it.
+    f->path = kmalloc(VFS_PATH_MAX);
+    if (!f->path) { file_unref(f); return -ENOMEM; }
+    vfs_normalize(path, f->path);
     *out = f;
     return 0;
 }

@@ -48,6 +48,7 @@ typedef struct {
     i32 ppid;
     i32 pgid;         // process group, for job control and terminal signals
     i32 sid;          // session
+    struct tty* ctty; // controlling terminal (of the session), or NULL
     u32 umask;
     proc_state_t state;
     wait_reason_t wait;
@@ -100,6 +101,7 @@ typedef struct {
     u64 sig_restorers[NSIG]; // its sa_restorer
 
     char name[PROC_NAME_LEN];
+    char exe[PROC_CWD_MAX];  // the program it runs, for /proc/<pid>/exe
 } process_t;
 
 // What `ps` gets for each process.

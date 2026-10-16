@@ -147,6 +147,7 @@ restart:;
         const char* rest = p;
         while (*rest == '/') rest++;
         if (next.type == VN_LNK && (*rest || follow_last)) {
+            if (!*rest && m->ops->follow && m->ops->follow(&next, out) == 0) return 0;
             if (++links > VFS_MAX_LINKS || !m->ops->readlink) return -ELOOP;
             char target[VFS_PATH_MAX];
             i64 len = m->ops->readlink(&next, target, sizeof(target) - 1);

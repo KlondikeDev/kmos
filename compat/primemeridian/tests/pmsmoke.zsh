@@ -78,6 +78,8 @@ t_glob_qual()     { local -a f=(/test/docs/*(.)); (( $#f == 1 )) }
 t_arith()         { (( 2 ** 10 == 1024 && 17 % 5 == 2 )) }
 t_cmd_subst()     { eq "$(print $(print nested))" nested }
 t_kill0()         { kill -0 $$ }
+t_script_pty()    { script -q -c 'tty' /tmp/ts >/dev/null && grep -q '^/dev/pts/' /tmp/ts && rm /tmp/ts }
+t_proc_links()    { [[ $(readlink /proc/self/exe) == /bin/* && $(readlink /proc/$$/cwd) == $PWD ]] }
 
 say "pmsmoke: starting (pid $$)"
 for t in ${(ok)functions[(I)t_*]}; do

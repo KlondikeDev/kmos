@@ -140,11 +140,11 @@ void read_key() {
             case 0x53: seq = "\x1B[3~"; break;        // Delete
             case 0x49: seq = "\x1B[5~"; break;        // Page Up
             case 0x51: seq = "\x1B[6~"; break;        // Page Down
-            case 0x1C: tty_input('\r'); return;       // keypad Enter
-            case 0x35: tty_input('/'); return;        // keypad /
+            case 0x1C: tty_input(&tty_console, '\r'); return;       // keypad Enter
+            case 0x35: tty_input(&tty_console, '/'); return;        // keypad /
             default: return;
         }
-        while (*seq) tty_input(*seq++);
+        while (*seq) tty_input(&tty_console, *seq++);
         return;
     }
 
@@ -185,9 +185,9 @@ void read_key() {
         }
 
         // Alt+key is "meta": ESC, then the key -- as terminals send it.
-        if (altDown) tty_input(0x1B);
+        if (altDown) tty_input(&tty_console, 0x1B);
 
         // Editing, echo and line handling all belong to the terminal now.
-        tty_input(key);
+        tty_input(&tty_console, key);
     }
 }

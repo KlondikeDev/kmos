@@ -314,6 +314,8 @@ typedef struct {
 #define L_TIOCGSID   0x5429
 #define L_FIONCLEX   0x5450
 #define L_FIOCLEX    0x5451
+#define L_TIOCGPTN   0x80045430
+#define L_TIOCSPTLCK 0x40045431
 
 typedef struct { u16 ws_row, ws_col, ws_xpixel, ws_ypixel; } l_winsize_t;
 

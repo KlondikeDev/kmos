@@ -106,7 +106,8 @@ void kernel_main(void) {
     // process inherits descriptors from its parent, so this is where the
     // whole system's 0, 1 and 2 come from.
     file_t* console;
-    if (file_open("/dev/tty", O_RDWR, &console) == 0) {
+    proc_current()->ctty = &tty_console;
+    if (file_open("/dev/console", O_RDWR, &console) == 0) {
         process_t* k = proc_current();
         fd_install(k, console, 0);
         file_ref(console); fd_install(k, console, 1);
@@ -150,7 +151,7 @@ void kernel_main(void) {
         if (init_pid >= 0) {
             // It leads its own process group; make that the terminal's
             // foreground, so Ctrl+C reaches it and whatever it runs.
-            tty_set_foreground(init_pid);
+            tty_console.fg_pgid = init_pid;
             klog(LOG_OKAY, "Started %s as pid %u\n", shells[i][0], (u32)init_pid);
             break;
         }

@@ -91,9 +91,14 @@ typedef struct {
 
     // Optional, for filesystems that have them.
     i64 (*readlink)(vnode_t* node, char* buf, u64 len);     // bytes, no NUL
+    // A "magic" link (procfs's fd/N): resolve straight to the object it
+    // stands for, which may have no path (a pipe). Optional.
+    i32 (*follow)(vnode_t* link, vnode_t* out);
     i32 (*symlink)(const vnode_t* dir, const char* name, const char* target, vnode_t* out);
     i32 (*link)(const vnode_t* dir, const char* name, const vnode_t* target);
     i32 (*setattr)(vnode_t* node, u32 mask, const vattr_t* a);
+    // An open of node is starting (devices check they can be opened).
+    i32 (*open)(vnode_t* node, u32 flags);
     // Refresh node's size, times, mode and links from the filesystem (for
     // fstat on a file opened long ago).
     i32 (*getattr)(vnode_t* node);

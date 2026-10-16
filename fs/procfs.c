@@ -27,6 +27,7 @@
 #include <rtc.h>
 #include <kprintf.h>
 #include <klibc/string.h>
+#include <file.h>
 
 void cpuid_vendor(char* vendor);
 void cpuid_brand(char* brand);
@@ -40,7 +41,7 @@ enum {
     P_ROOT = 1, P_SELF, P_MEMINFO, P_UPTIME, P_LOADAVG, P_STAT, P_VERSION,
     P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_GLOBAL_END,
 };
-enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_END };
+enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_EXE, F_CWD, F_END };
 // .../fd/N nodes (opening them is file_open's job: it shares descriptor N).
 #define F_FD_ENTRY 0x80
 
@@ -51,7 +52,7 @@ static const char* const global_names[P_GLOBAL_END] = {
 };
 static const char* const proc_file_names[F_END] = {
     [F_STAT] = "stat", [F_STATUS] = "status", [F_CMDLINE] = "cmdline", [F_COMM] = "comm",
-    [F_FD] = "fd",
+    [F_FD] = "fd", [F_EXE] = "exe", [F_CWD] = "cwd",
 };
 
 static void make_node(u64 id, vnode_t* out) {
@@ -61,7 +62,8 @@ static void make_node(u64 id, vnode_t* out) {
     out->mtime = rtc_now();
     u64 kind = id & 0xFF;
     bool dir = id == P_ROOT || id == P_SELF || (id >= 256 && (kind == F_DIR || kind == F_FD));
-    out->type = dir ? VN_DIR : (id >= 256 && kind >= F_FD_ENTRY) ? VN_CHR : VN_REG;
+    bool link = id >= 256 && (kind >= F_FD_ENTRY || kind == F_EXE || kind == F_CWD);
+    out->type = dir ? VN_DIR : link ? VN_LNK : VN_REG;
 }
 
 static process_t* live(i32 pid) {
@@ -204,6 +206,14 @@ static u64 read_user_of(const process_t* p, u64 va, char* out, u64 len) {
     return done;
 }
 
+// Linux's device numbers: tty1 is 4:1, pts/N is 136:N (packed for stat's
+// tty_nr as minor | major << 8).
+static i32 tty_nr(tty_t* t) {
+    if (!t) return 0;
+    u32 n = pty_index(t);
+    return n == ~0u ? (4 << 8) | 1 : (136 << 8) | (i32)n;
+}
+
 static u64 gen_process(const process_t* p, u64 kind, char* b) {
     char st = state_char(p);
     u64 vsize = (u64)p->user_pages * 4096;
@@ -212,8 +222,8 @@ static u64 gen_process(const process_t* p, u64 kind, char* b) {
             return (u64)ksnprintf(b, GEN_MAX,
                 "%d (%s) %c %d %d %d %d %d 0 0 0 0 0 %lu 0 0 0 20 0 1 0 %lu %lu %lu "
                 "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-                p->pid, p->name, st, p->ppid, p->pgid, p->sid, (4 << 8) | 1,
-                tty_get_foreground(), TO_HZ(p->cpu_ticks), TO_HZ(p->start_tick),
+                p->pid, p->name, st, p->ppid, p->pgid, p->sid, tty_nr(p->ctty),
+                p->ctty ? p->ctty->fg_pgid : -1, TO_HZ(p->cpu_ticks), TO_HZ(p->start_tick),
                 vsize, (u64)p->user_pages);
         case F_STATUS:
             return (u64)ksnprintf(b, GEN_MAX,
@@ -329,7 +339,43 @@ static i64 procfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
     return r;
 }
 
+// fd/N, exe and cwd are symbolic links, as on Linux: to the file's path
+// (or pipe:[...] for a pipe), the program, the working directory.
+static i64 procfs_readlink(vnode_t* node, char* buf, u64 len) {
+    process_t* p = live((i32)(node->id >> 8));
+    if (!p || node->id < 256) return -ENOENT;
+    u64 kind = node->id & 0xFF;
+    char tmp[VFS_PATH_MAX];
+    const char* s = tmp;
+    if (kind == F_EXE) s = p->exe;
+    else if (kind == F_CWD) s = p->cwd;
+    else if (kind >= F_FD_ENTRY && kind - F_FD_ENTRY < MAX_FDS) {
+        struct file* f = p->fds[kind - F_FD_ENTRY];
+        if (!f) return -ENOENT;
+        if (f->path) s = f->path;
+        else ksnprintf(tmp, sizeof(tmp), "pipe:[%lu]", (u64)f->node >> 4);
+    } else {
+        return -EINVAL;
+    }
+    u64 n = strlen(s);
+    if (n > len) n = len;
+    memcpy(buf, s, n);
+    return (i64)n;
+}
+
+static i32 procfs_follow(vnode_t* link, vnode_t* out) {
+    process_t* p = live((i32)(link->id >> 8));
+    u64 kind = link->id & 0xFF;
+    if (!p || link->id < 256 || kind < F_FD_ENTRY || kind - F_FD_ENTRY >= MAX_FDS) return -EINVAL;
+    struct file* f = p->fds[kind - F_FD_ENTRY];
+    if (!f || !f->node) return -ENOENT;
+    *out = *f->node;
+    return 0;
+}
+
 const vfs_ops_t procfs_vfs_ops = {
+    .readlink = procfs_readlink,
+    .follow = procfs_follow,
     .type = "proc",
     .root = procfs_root,
     .lookup = procfs_lookup,

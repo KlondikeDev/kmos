@@ -14,3 +14,7 @@ extern const vfs_ops_t devfs_vfs_ops;
 
 // Is this node the terminal? (ioctl and isatty need to know.)
 bool devfs_is_tty(const vnode_t* node);
+struct tty;
+struct tty* devfs_tty(const vnode_t* node);     // the terminal behind a node, or NULL
+bool devfs_is_ptmx(const vnode_t* node);
+i32 devfs_pts_number(const vnode_t* node);      // /dev/pts/N: N; otherwise -1

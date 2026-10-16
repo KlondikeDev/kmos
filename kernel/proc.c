@@ -111,6 +111,7 @@ process_t* proc_alloc(const char* name, process_t* parent) {
     // else joins their parent's until they ask otherwise.
     p->pgid = parent->pid == 0 ? p->pid : parent->pgid;
     p->sid = parent->pid == 0 ? p->pid : parent->sid;
+    p->ctty = parent->ctty;
     p->umask = parent->pid == 0 ? 022 : parent->umask;
     p->state = PROC_EMBRYO;
     p->start_tick = ticks;
@@ -190,6 +191,7 @@ process_t* proc_fork(const registers_t* frame) {
     for (int s = 0; s < NSIG; s++) child->sig_handler[s] = parent->sig_handler[s];
     child->sig_restorer = parent->sig_restorer;
     child->fs_base = parent->fs_base;
+    for (u32 i = 0; i < sizeof(child->exe); i++) child->exe[i] = parent->exe[i];
     child->arg_start = parent->arg_start;
     child->arg_end = parent->arg_end;
     child->sig_linux = parent->sig_linux;

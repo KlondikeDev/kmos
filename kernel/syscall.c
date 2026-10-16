@@ -255,10 +255,11 @@ i64 sys_getcwd(u64 buf, u64 len) {
 static i64 sys_ioctl(u64 fd, u64 req, u64 arg) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (!devfs_is_tty(f->node)) return -ENOTTY;
+    tty_t* t = file_tty(f);
+    if (!t) return -ENOTTY;
     switch (req) {
-        case TIOCGMODE: return tty_get_mode();
-        case TIOCSMODE: tty_set_mode((u32)arg); return 0;
+        case TIOCGMODE: return tty_get_mode(t);
+        case TIOCSMODE: tty_set_mode(t, (u32)arg); return 0;
         default:        return -EINVAL;
     }
 }
@@ -266,16 +267,18 @@ static i64 sys_ioctl(u64 fd, u64 req, u64 arg) {
 static i64 sys_tcsetpgrp(u64 fd, u64 pgid) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (!devfs_is_tty(f->node)) return -ENOTTY;
-    tty_set_foreground((i32)pgid);
+    tty_t* t = file_tty(f);
+    if (!t) return -ENOTTY;
+    t->fg_pgid = (i32)pgid;
     return 0;
 }
 
 static i64 sys_tcgetpgrp(u64 fd) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (!devfs_is_tty(f->node)) return -ENOTTY;
-    return tty_get_foreground();
+    tty_t* t = file_tty(f);
+    if (!t) return -ENOTTY;
+    return t->fg_pgid;
 }
 
 // ---- processes ----

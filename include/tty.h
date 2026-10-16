@@ -8,13 +8,15 @@
 
 #include <types.h>
 
-// The console terminal: keyboard in, framebuffer (through the VT emulator)
-// out, with a POSIX line discipline in between.
+// Terminals: a POSIX line discipline over some output.
 //
-// Its settings are a termios, in Linux's own layout and flag values, so
-// Prime Meridian hands it to TCGETS/TCSETS unchanged. The defaults are the
-// usual "sane" ones: canonical line editing with echo, ^C/^Z/^\ signals,
-// CR->NL on input and NL->CR NL on output.
+// Each tty_t is one terminal -- the console (keyboard in, framebuffer out
+// through the VT emulator) or the slave side of a pseudo-terminal (input
+// written by the master, output read by it). Its settings are a termios,
+// in Linux's own layout and flag values, so Prime Meridian hands it to
+// TCGETS/TCSETS unchanged. The defaults are the usual "sane" ones:
+// canonical line editing with echo, ^C/^Z/^\ signals, CR->NL on input and
+// NL->CR NL on output.
 //
 // Kunix's native TIOCGMODE/TIOCSMODE ioctls are a simpler view of the same
 // state (just ICANON, ECHO and ISIG).
@@ -83,35 +85,85 @@ typedef struct {
 #define ECHOKE  0x0800
 #define IEXTEN  0x8000
 
-void tty_init(void);
+typedef struct tty {
+    tty_termios_t tio;
+    i32 fg_pgid;                  // the foreground process group
+    i32 sid;                      // the session it is the controlling terminal of (0: none)
+    u16 rows, cols;
+    bool hung_up;                 // the other end is gone: reads give EOF, writes EIO
 
-// A byte arrived from the keyboard (IRQ context), or a reply the terminal
-// emulator owes the program (cursor position reports and the like).
-void tty_input(char c);
-void tty_input_str(const char* s);
+    // Where output (writes and echo) goes. A false return means "full":
+    // writers wait for room, echo is dropped.
+    bool (*output)(struct tty* t, char c);
+    void (*flush)(struct tty* t);
+    void* priv;
+
+    // The line being edited (canonical mode only).
+    char line[TTY_LINE_MAX];
+    u32 line_len;
+    bool literal_next;            // ^V: take the next byte as-is
+
+    // Bytes ready for readers. In canonical mode only whole lines get here.
+    char queue[TTY_QUEUE_MAX];
+    u32 q_head, q_count;
+    bool eof_pending;             // ^D on an empty line
+} tty_t;
+
+extern tty_t tty_console;
+
+// Set a terminal to sane settings, empty, with this output.
+void tty_setup(tty_t* t, bool (*output)(tty_t*, char), void (*flush)(tty_t*), void* priv);
+void tty_init(void);              // the console
+
+// A byte arrived (keyboard IRQ, or a write to a pty master), or a reply the
+// terminal emulator owes the program (cursor position reports).
+void tty_input(tty_t* t, char c);
+void tty_input_str(tty_t* t, const char* s);
 
 // Blocking read for processes: bytes, 0 at end of file, -EINTR, or -EAGAIN
 // when nonblock is set and nothing is ready.
-i64 tty_read(void* buf, u64 len, bool nonblock);
-i64 tty_write(const void* buf, u64 len);
+i64 tty_read(tty_t* t, void* buf, u64 len, bool nonblock);
+i64 tty_write(tty_t* t, const void* buf, u64 len, bool nonblock);
 
 // Could a read return right now (data, or end of file)?
-bool tty_readable(void);
-u32  tty_bytes_ready(void);      // FIONREAD
-void tty_flush_input(void);      // TCFLSH
+bool tty_readable(tty_t* t);
+u32  tty_bytes_ready(tty_t* t);  // FIONREAD
+void tty_flush_input(tty_t* t);  // TCFLSH
+
+// The other end went away (pty master closed): wake everyone, send the
+// session SIGHUP.
+void tty_hangup(tty_t* t);
 
 // For the kernel shell, which cannot block: copy out one complete line
 // (without its newline) if there is one.
 bool tty_kernel_getline(char* buf, u32 max);
 
-void tty_get_termios(tty_termios_t* t);
-void tty_set_termios(const tty_termios_t* t);
+void tty_get_termios(tty_t* t, tty_termios_t* out);
+void tty_set_termios(tty_t* t, const tty_termios_t* in);
 
-u32 tty_get_mode(void);
-void tty_set_mode(u32 mode);
+u32 tty_get_mode(tty_t* t);
+void tty_set_mode(tty_t* t, u32 mode);
 
-i32 tty_get_foreground(void);
-void tty_set_foreground(i32 pgid);
+// Size in character cells; setting it sends SIGWINCH to the foreground.
+void tty_get_winsize(tty_t* t, u16* rows, u16* cols);
+void tty_set_winsize(tty_t* t, u16 rows, u16 cols);
 
-// Size in character cells.
-void tty_get_winsize(u16* rows, u16* cols);
+// ---- pseudo-terminals (drivers/pty.c) ----
+
+#define PTY_MAX 16
+
+struct file;
+// Open /dev/ptmx: a new pair, returned as the master's open file.
+i32 pty_open_master(struct file** out);
+// The slave side of pty n, if it exists and has been unlocked.
+tty_t* pty_slave(u32 n);
+u32 pty_index(const tty_t* t);              // ~0 for the console
+bool pty_exists(u32 n);
+void pty_slave_opened(u32 n);               // devfs: someone opened /dev/pts/n
+void pty_slave_closed(u32 n);               // ...and the last one closed it
+// The terminal behind an open file (console, pts, or a ptmx master), or NULL.
+tty_t* file_tty(struct file* f);
+bool file_is_pty_master(struct file* f);
+// TIOCGPTN / TIOCSPTLCK on a master.
+i32 pty_master_number(struct file* f);
+void pty_master_lock(struct file* f, bool locked);

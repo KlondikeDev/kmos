@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pty.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <spawn.h>
@@ -30,6 +31,7 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -63,6 +65,11 @@ static const char* self = "/bin/pmtest";
 // ---------------------------------------------------------------------------
 
 static __thread int tls_value = 5;
+
+static void sleep_quietly(long ms) {
+    struct timespec t = { ms / 1000, (ms % 1000) * 1000000 };
+    nanosleep(&t, NULL);
+}
 
 static void test_basics(void) {
     struct utsname u;
@@ -177,6 +184,111 @@ static void test_terminal(void) {
     tcsetattr(0, TCSANOW, &t);
     struct termios back;
     CHECK("...and canonical mode is back", tcgetattr(0, &back) == 0 && (back.c_lflag & ICANON));
+}
+
+// Read from fd until `want` appears or 2 s pass; the bytes in out.
+static int read_until(int fd, char* out, size_t cap, const char* want) {
+    size_t n = 0;
+    out[0] = '\0';
+    for (int tries = 0; tries < 40 && !strstr(out, want); tries++) {
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        if (poll(&p, 1, 50) <= 0) continue;
+        ssize_t r = read(fd, out + n, cap - 1 - n);
+        if (r <= 0) break;
+        n += (size_t)r;
+        out[n] = '\0';
+    }
+    return strstr(out, want) != NULL;
+}
+
+static volatile sig_atomic_t got_winch;
+static void on_winch(int sig) { (void)sig; got_winch = 1; }
+
+static void test_pty(void) {
+    int m, s;
+    char name[64] = "", buf[512];
+    CHECK("openpty", openpty(&m, &s, name, NULL, NULL) == 0 && strncmp(name, "/dev/pts/", 9) == 0);
+    CHECK("the slave is a terminal", isatty(s));
+    CHECK("ttyname of the slave", ttyname(s) && strcmp(ttyname(s), name) == 0);
+    struct stat st;
+    CHECK("/dev/pts/N exists", stat(name, &st) == 0 && S_ISCHR(st.st_mode));
+
+    write(m, "typed\n", 6);
+    ssize_t n = read(s, buf, sizeof(buf));
+    CHECK("master -> slave, as one line", n == 6 && memcmp(buf, "typed\n", 6) == 0);
+    CHECK("...echoed back to the master", read_until(m, buf, sizeof(buf), "typed\r\n"));
+    write(s, "shown\n", 6);
+    CHECK("slave -> master, NL becoming CR NL", read_until(m, buf, sizeof(buf), "shown\r\n"));
+
+    struct termios raw;
+    tcgetattr(s, &raw);
+    cfmakeraw(&raw);
+    tcsetattr(s, TCSANOW, &raw);
+    write(m, "k", 1);
+    n = read(s, buf, 1);
+    struct pollfd pm = { .fd = m, .events = POLLIN };
+    CHECK("raw mode: a byte at a time, no echo", n == 1 && buf[0] == 'k' && poll(&pm, 1, 50) == 0);
+
+    struct winsize ws = { .ws_row = 33, .ws_col = 99 }, back;
+    CHECK("window size set on the master, seen on the slave",
+          ioctl(m, TIOCSWINSZ, &ws) == 0 && ioctl(s, TIOCGWINSZ, &back) == 0 && back.ws_row == 33 && back.ws_col == 99);
+    close(s);
+    close(m);
+
+    // A session on the pty: ^C reaches it, and so do resizes.
+    CHECK("openpty again", openpty(&m, &s, name, NULL, NULL) == 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(m);
+        setsid();
+        ioctl(s, TIOCSCTTY, 0);
+        dup2(s, 0); dup2(s, 1); dup2(s, 2);
+        signal(SIGWINCH, on_winch);
+        int tty = open("/dev/tty", O_RDWR);
+        write(tty, "ctty ok\n", 8);
+        while (!got_winch) pause();
+        write(1, "winched\n", 8);
+        for (;;) pause();
+    }
+    close(s);
+    CHECK("/dev/tty is the pty in its session", read_until(m, buf, sizeof(buf), "ctty ok"));
+    ws.ws_row = 40;
+    ioctl(m, TIOCSWINSZ, &ws);
+    CHECK("a resize sends SIGWINCH to the foreground", read_until(m, buf, sizeof(buf), "winched"));
+    write(m, "\x03", 1);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    CHECK("^C written to the master is SIGINT for the session", WIFSIGNALED(status) && WTERMSIG(status) == SIGINT);
+    close(m);
+
+    // Closing the master hangs the session up.
+    openpty(&m, &s, name, NULL, NULL);
+    pid = fork();
+    if (pid == 0) {
+        close(m);
+        setsid();
+        ioctl(s, TIOCSCTTY, 0);
+        char c;
+        while (read(s, &c, 1) > 0) { }
+        _exit(5);                                 // EOF instead of a signal
+    }
+    close(s);
+    sleep_quietly(100);
+    close(m);
+    waitpid(pid, &status, 0);
+    CHECK("closing the master hangs up the slave (SIGHUP)", WIFSIGNALED(status) && WTERMSIG(status) == SIGHUP);
+
+    // A real program on a pty.
+    pid = forkpty(&m, name, NULL, NULL);
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", "echo inside; tty", (char*)0);
+        _exit(127);
+    }
+    CHECK("forkpty: a shell runs on it, and tty(1) names it",
+          pid > 0 && read_until(m, buf, sizeof(buf), "inside\r\n") && read_until(m, buf + strlen(buf), sizeof(buf) - strlen(buf), name));
+    waitpid(pid, &status, 0);
+    CHECK("...and the master reads EIO once it is gone", read(m, buf, sizeof(buf)) < 0 && errno == EIO);
+    close(m);
 }
 
 static void test_time(void) {
@@ -359,6 +471,7 @@ int main(int argc, char** argv) {
     test_memory();
     test_files();
     test_terminal();
+    test_pty();
     test_time();
     test_processes();
     test_signals();

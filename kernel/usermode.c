@@ -353,6 +353,10 @@ static i32 load_depth(process_t* p, const char* path, u32 argc, const char* cons
     return 0;
 }
 
+static void set_exe(process_t* p, const char* path) {
+    if (vfs_normalize(path, p->exe) < 0) p->exe[0] = '\0';
+}
+
 static void set_name(process_t* p, const char* path) {
     const char* name = path;
     for (const char* c = path; *c; c++) if (*c == '/') name = c + 1;
@@ -365,6 +369,7 @@ i32 usermode_spawn(const char* path, const user_args_t* args, process_t* parent)
     process_t* p = proc_alloc(path, parent);
     if (!p) return -ENOMEM;
     set_name(p, path);
+    set_exe(p, path);
 
     registers_t frame;
     i32 r = args && args->argc
@@ -412,6 +417,7 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     vmm_destroy_space(old_space);
     p->nvmas = 0;
     set_name(p, path);
+    set_exe(p, path);
     fd_close_on_exec(p);
     for (int s = 0; s < NSIG; s++) {
         if (p->sig_handler[s] != SIG_IGN) p->sig_handler[s] = SIG_DFL;

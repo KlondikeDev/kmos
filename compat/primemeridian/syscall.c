@@ -119,9 +119,17 @@ static void to_lstat(const vnode_t* n, l_stat_t* st) {
     if (!n->mode && (st->st_mode & S_IFMT) == S_IFREG) st->st_mode = S_IFREG | 0755;
     st->st_uid = n->uid;
     st->st_gid = n->gid;
-    if (devfs_is_tty(n)) {
+    tty_t* tt = devfs_tty(n);
+    i32 pts = devfs_pts_number(n);
+    if (pts >= 0) {
+        st->st_mode = S_IFCHR | 0620;
+        st->st_rdev = (136 << 8) | (u32)pts;          // Unix 98 pty slaves: major 136
+    } else if (tt) {
         st->st_mode = S_IFCHR | 0620;
         st->st_rdev = (4 << 8) | 1;                    // like /dev/tty1
+    } else if (devfs_is_ptmx(n)) {
+        st->st_mode = S_IFCHR | 0666;
+        st->st_rdev = (5 << 8) | 2;
     } else if (n->type == VN_CHR) {
         st->st_rdev = (1 << 8) | (u32)n->id;
     }
@@ -511,6 +519,7 @@ static i64 l_fchdir(u64 fd) {
 // ---------------------------------------------------------------------------
 
 static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
+    req = (u32)req;                  // an unsigned int to Linux; libc may sign-extend it
     process_t* p = me();
     file_t* f = fd_get(p, (i32)fd);
     if (!f) return -EBADF;
@@ -525,57 +534,95 @@ static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
             return 0;
     }
 
-    if (!devfs_is_tty(f->node)) return -ENOTTY;
+    // A pty master: its own requests, then everything a terminal takes
+    // (applying to the slave, as on Linux).
+    if (file_is_pty_master(f)) {
+        if (req == L_TIOCGPTN) {
+            if (!uok(arg, 4, true)) return -EFAULT;
+            *(u32*)arg = (u32)pty_master_number(f);
+            return 0;
+        }
+        if (req == L_TIOCSPTLCK) {
+            if (!uok(arg, 4, false)) return -EFAULT;
+            pty_master_lock(f, *(i32*)arg != 0);
+            return 0;
+        }
+    }
+
+    tty_t* t = file_tty(f);
+    if (!t) return -ENOTTY;
     switch (req) {
         case L_TCGETS:
             if (!uok(arg, sizeof(tty_termios_t), true)) return -EFAULT;
-            tty_get_termios((tty_termios_t*)arg);
+            tty_get_termios(t, (tty_termios_t*)arg);
             return 0;
         case L_TCSETSF:
-            tty_flush_input();
+            tty_flush_input(t);
             // fall through
         case L_TCSETS:
         case L_TCSETSW: {
             if (!uok(arg, sizeof(tty_termios_t), false)) return -EFAULT;
-            tty_termios_t t;
-            memcpy(&t, (const void*)arg, sizeof(t));
-            tty_set_termios(&t);
+            tty_termios_t tio;
+            memcpy(&tio, (const void*)arg, sizeof(tio));
+            tty_set_termios(t, &tio);
             return 0;
         }
         case L_TIOCGWINSZ: {
             if (!uok(arg, sizeof(l_winsize_t), true)) return -EFAULT;
             l_winsize_t* w = (l_winsize_t*)arg;
-            tty_get_winsize(&w->ws_row, &w->ws_col);
+            tty_get_winsize(t, &w->ws_row, &w->ws_col);
             w->ws_xpixel = (u16)(w->ws_col * 8);
             w->ws_ypixel = (u16)(w->ws_row * 16);
             return 0;
         }
-        case L_TIOCSWINSZ: return 0;                   // the console's size is fixed
+        case L_TIOCSWINSZ:
+            if (!uok(arg, sizeof(l_winsize_t), false)) return -EFAULT;
+            tty_set_winsize(t, ((l_winsize_t*)arg)->ws_row, ((l_winsize_t*)arg)->ws_col);
+            return 0;
         case L_TIOCGPGRP:
             if (!uok(arg, 4, true)) return -EFAULT;
-            *(i32*)arg = tty_get_foreground();
+            *(i32*)arg = t->fg_pgid;
             return 0;
         case L_TIOCSPGRP:
             if (!uok(arg, 4, false)) return -EFAULT;
-            tty_set_foreground(*(i32*)arg);
+            t->fg_pgid = *(i32*)arg;
             return 0;
         case L_TIOCGSID:
             if (!uok(arg, 4, true)) return -EFAULT;
-            *(i32*)arg = p->sid;
+            if (!t->sid) return -ENOTTY;               // nobody's controlling terminal
+            *(i32*)arg = t->sid;
             return 0;
         case L_FIONREAD:
             if (!uok(arg, 4, true)) return -EFAULT;
-            *(i32*)arg = (i32)tty_bytes_ready();
+            *(i32*)arg = (i32)tty_bytes_ready(t);
             return 0;
         case L_TIOCOUTQ:
             if (!uok(arg, 4, true)) return -EFAULT;
             *(i32*)arg = 0;                            // output is never queued
             return 0;
         case L_TCFLSH:
-            if (arg == 0 || arg == 2) tty_flush_input();
+            if (arg == 0 || arg == 2) tty_flush_input(t);
             return 0;
         case L_TIOCSCTTY:
+            // A session leader takes the terminal as its controlling one;
+            // stealing it from another session needs root and arg 1.
+            if (p->sid != p->pid || (p->ctty && p->ctty != t)) return -EPERM;
+            if (t->sid && t->sid != p->sid && arg != 1) return -EPERM;
+            if (t->sid && t->sid != p->sid) {
+                for (u32 i = 1; i < MAX_PROCS; i++) {
+                    process_t* q = proc_slot(i);
+                    if (q->state != PROC_UNUSED && q->sid == t->sid && q->ctty == t) q->ctty = NULL;
+                }
+            }
+            p->ctty = t;
+            t->sid = p->sid;
+            t->fg_pgid = p->pgid;
+            return 0;
         case L_TIOCNOTTY:
+            if (p->ctty != t) return -ENOTTY;
+            p->ctty = NULL;
+            if (p->sid == p->pid) { t->sid = 0; t->fg_pgid = 0; }
+            return 0;
         case L_TCSBRK:
         case L_TCXONC:
             return 0;
@@ -921,6 +968,7 @@ static i64 l_setsid(void) {
     process_t* p = me();
     if (p->pgid == p->pid) return -EPERM;              // already a group leader
     p->sid = p->pgid = p->pid;
+    p->ctty = NULL;                                    // a new session has no terminal yet
     return p->pid;
 }
 

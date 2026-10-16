@@ -263,7 +263,7 @@ static void reply_cursor_position(void) {
     for (char* c = num; *c; c++) buf[n++] = *c;
     buf[n++] = 'R';
     buf[n] = '\0';
-    tty_input_str(buf);
+    tty_input_str(&tty_console, buf);
 }
 
 static void csi_dispatch(char final) {
@@ -318,9 +318,9 @@ static void csi_dispatch(char final) {
         case 'u': move_to(saved_x, saved_y); break;
         case 'n':
             if (param(0, 0) == 6) reply_cursor_position();
-            else if (param(0, 0) == 5) tty_input_str("\x1B[0n");
+            else if (param(0, 0) == 5) tty_input_str(&tty_console, "\x1B[0n");
             break;
-        case 'c': tty_input_str("\x1B[?6c"); break;      // "I am a VT102"
+        case 'c': tty_input_str(&tty_console, "\x1B[?6c"); break;      // "I am a VT102"
         default: break;                                  // unknown: ignore
     }
 }

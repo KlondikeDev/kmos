@@ -5,22 +5,33 @@
 // See LICENSE for details
 
 // devfs: a tiny filesystem of device nodes, mounted at /dev.
+//
+//   console     the framebuffer console's terminal
+//   tty         your controlling terminal, whichever it is (file_open
+//               resolves it to console or pts/N)
+//   ptmx        a new pseudo-terminal pair per open (file_open again)
+//   pts/N       pseudo-terminal slaves
+//   null, zero, serial (COM1), fd/N and std{in,out,err}
 
 #include <types.h>
 #include <devfs.h>
 #include <vfs.h>
 #include <tty.h>
+#include <proc.h>
 #include <errno.h>
 #include <memset.h>
 #include <serial.h>
 #include <rtc.h>
+#include <kprintf.h>
+#include <klibc/string.h>
 
 enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_FD,
-       DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_COUNT };
+       DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_CONSOLE, DEV_PTMX, DEV_PTS, DEV_COUNT };
 
 // fd/N nodes: DEV_FD_BASE + N. Opening them (or stdin/stdout/stderr) is
 // handled by file_open, which hands back the descriptor's own file.
-#define DEV_FD_BASE 0x1000
+#define DEV_FD_BASE  0x1000
+#define DEV_PTS_BASE 0x2000          // pts/N
 
 static const char* const dev_names[DEV_COUNT] = {
     [DEV_TTY]  = "tty",
@@ -31,6 +42,9 @@ static const char* const dev_names[DEV_COUNT] = {
     [DEV_STDIN] = "stdin",
     [DEV_STDOUT] = "stdout",
     [DEV_STDERR] = "stderr",
+    [DEV_CONSOLE] = "console",
+    [DEV_PTMX] = "ptmx",
+    [DEV_PTS] = "pts",
 };
 
 static void make_node(u64 id, vnode_t* out) {
@@ -38,7 +52,7 @@ static void make_node(u64 id, vnode_t* out) {
     out->aux = 0;
     out->size = 0;
     out->mtime = rtc_now();                // devices are always "now"
-    out->type = (id == DEV_ROOT || id == DEV_FD) ? VN_DIR : VN_CHR;
+    out->type = (id == DEV_ROOT || id == DEV_FD || id == DEV_PTS) ? VN_DIR : VN_CHR;
 }
 
 static i32 devfs_root(vnode_t* out) {
@@ -46,25 +60,32 @@ static i32 devfs_root(vnode_t* out) {
     return 0;
 }
 
-static bool name_eq(const char* a, const char* b) {
-    while (*a && *a == *b) { a++; b++; }
-    return *a == *b;
+static bool number(const char* s, u64* out) {
+    u64 n = 0;
+    if (!*s) return false;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9' || n > 100000) return false;
+        n = n * 10 + (u64)(*s - '0');
+    }
+    *out = n;
+    return true;
 }
 
 static i32 devfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
+    u64 n;
     if (dir->id == DEV_FD) {
-        u64 n = 0;
-        if (!*name) return -ENOENT;
-        for (const char* c = name; *c; c++) {
-            if (*c < '0' || *c > '9' || n > 1000) return -ENOENT;
-            n = n * 10 + (u64)(*c - '0');
-        }
+        if (!number(name, &n)) return -ENOENT;
         make_node(DEV_FD_BASE + n, out);
+        return 0;
+    }
+    if (dir->id == DEV_PTS) {
+        if (!number(name, &n) || !pty_exists((u32)n)) return -ENOENT;
+        make_node(DEV_PTS_BASE + n, out);
         return 0;
     }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     for (u64 id = DEV_TTY; id < DEV_COUNT; id++) {
-        if (name_eq(name, dev_names[id])) {
+        if (!strcmp(name, dev_names[id])) {
             make_node(id, out);
             return 0;
         }
@@ -74,21 +95,55 @@ static i32 devfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
 
 static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* out) {
     if (dir->id == DEV_FD) return 0;                 // its entries are per-process
+    if (dir->id == DEV_PTS) {
+        for (u32 n = 0; n < PTY_MAX; n++) {
+            if (!pty_exists(n) || index--) continue;
+            ksnprintf(name_out, VFS_NAME_MAX, "%u", n);
+            make_node(DEV_PTS_BASE + n, out);
+            return 1;
+        }
+        return 0;
+    }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     u64 id = DEV_TTY + index;
     if (id >= DEV_COUNT) return 0;
-    const char* n = dev_names[id];
-    u32 i = 0;
-    for (; n[i]; i++) name_out[i] = n[i];
-    name_out[i] = '\0';
+    strcpy(name_out, dev_names[id]);
     make_node(id, out);
     return 1;
 }
 
+// The terminal a node stands for. /dev/tty is the caller's controlling
+// terminal (or the console, for the kernel and its first children).
+tty_t* devfs_tty(const vnode_t* node) {
+    if (!node->mnt || node->mnt->ops != &devfs_vfs_ops) return NULL;
+    if (node->id == DEV_CONSOLE) return &tty_console;
+    if (node->id == DEV_TTY) {
+        tty_t* c = proc_current()->ctty;
+        return c ? c : &tty_console;
+    }
+    if (node->id >= DEV_PTS_BASE && node->id < DEV_PTS_BASE + PTY_MAX) return pty_slave((u32)(node->id - DEV_PTS_BASE));
+    return NULL;
+}
+
+bool devfs_is_tty(const vnode_t* node) {
+    return devfs_tty(node) != NULL;
+}
+
+bool devfs_is_ptmx(const vnode_t* node) {
+    return node->mnt && node->mnt->ops == &devfs_vfs_ops && node->id == DEV_PTMX;
+}
+
+i32 devfs_pts_number(const vnode_t* node) {
+    if (!node->mnt || node->mnt->ops != &devfs_vfs_ops) return -1;
+    if (node->id >= DEV_PTS_BASE && node->id < DEV_PTS_BASE + PTY_MAX) return (i32)(node->id - DEV_PTS_BASE);
+    return -1;
+}
+
 static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
     (void)off;
+    tty_t* t = devfs_tty(node);
+    if (t) return tty_read(t, buf, len, false);
     switch (node->id) {
-        case DEV_TTY:  return tty_read(buf, len, false);
         case DEV_NULL:
         case DEV_SERIAL: return 0;
         case DEV_ZERO:
@@ -100,8 +155,9 @@ static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
 
 static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
     (void)off;
+    tty_t* t = devfs_tty(node);
+    if (t) return tty_write(t, buf, len, false);
     switch (node->id) {
-        case DEV_TTY:  return tty_write(buf, len);
         case DEV_NULL:
         case DEV_ZERO: return (i64)len;
         case DEV_SERIAL: {
@@ -113,6 +169,22 @@ static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
     }
 }
 
+// A pts is opened: it must exist and be unlocked. (The last close is
+// release(), below.)
+static i32 devfs_open(vnode_t* node, u32 flags) {
+    (void)flags;
+    i32 n = devfs_pts_number(node);
+    if (n < 0) return 0;
+    if (!pty_slave((u32)n)) return -EIO;
+    pty_slave_opened((u32)n);
+    return 0;
+}
+
+static void devfs_release(vnode_t* node) {
+    i32 n = devfs_pts_number(node);
+    if (n >= 0) pty_slave_closed((u32)n);
+}
+
 const vfs_ops_t devfs_vfs_ops = {
     .type = "devfs",
     .root = devfs_root,
@@ -120,8 +192,6 @@ const vfs_ops_t devfs_vfs_ops = {
     .read = devfs_read,
     .write = devfs_write,
     .readdir = devfs_readdir,
+    .open = devfs_open,
+    .release = devfs_release,
 };
-
-bool devfs_is_tty(const vnode_t* node) {
-    return node->mnt && node->mnt->ops == &devfs_vfs_ops && node->id == DEV_TTY;
-}
