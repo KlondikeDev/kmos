@@ -33,7 +33,7 @@
 #include <types.h>
 #include <ufs2.h>
 #include <vfs.h>
-#include <ata.h>
+#include <disk.h>
 #include <klog.h>
 #include <memory.h>
 #include <memcpy.h>
@@ -81,7 +81,7 @@ static ufs_t* U(const vnode_t* n) {
 
 static bool sector_read(ufs_t* u, u64 lba) {
     if (lba == u->sec_lba) return true;
-    if (lba > 0xFFFFFFFULL || !ata_read_multi(u->drive, (u32)lba, 1, u->sec)) {
+    if (!disk_read(u->drive, lba, 1, u->sec)) {
         u->sec_lba = ~0ULL;
         return false;
     }
@@ -98,7 +98,7 @@ static bool dev_read(ufs_t* u, u64 off, void* dst, u64 len) {
             // Whole sectors: one transfer for as many as there are.
             u64 n = len / 512;
             if (n > 256) n = 256;
-            if (lba + n > 0xFFFFFFFULL || !ata_read_multi(u->drive, (u32)lba, (u32)n, out)) return false;
+            if (!disk_read(u->drive, lba, (u32)n, out)) return false;
             out += n * 512;
             off += n * 512;
             len -= n * 512;
@@ -124,7 +124,7 @@ static bool dev_write(ufs_t* u, u64 off, const void* src, u64 len) {
         if (in == 0 && len >= 512) {
             u64 n = len / 512;
             if (n > 256) n = 256;
-            if (lba + n > 0xFFFFFFFULL || !ata_write_multi(u->drive, (u32)lba, (u32)n, in_buf)) return false;
+            if (!disk_write(u->drive, lba, (u32)n, in_buf)) return false;
             if (u->sec_lba >= lba && u->sec_lba < lba + n) u->sec_lba = ~0ULL;
             in_buf += n * 512;
             off += n * 512;
@@ -136,7 +136,7 @@ static bool dev_write(ufs_t* u, u64 off, const void* src, u64 len) {
         u32 n = 512 - in;
         if (n > len) n = (u32)len;
         memcpy(u->sec + in, in_buf, n);
-        if (!ata_write_multi(u->drive, (u32)lba, 1, u->sec)) {
+        if (!disk_write(u->drive, lba, 1, u->sec)) {
             u->sec_lba = ~0ULL;
             return false;
         }
@@ -297,7 +297,7 @@ static i32 commit(ufs_t* u) {
     }
     if (u->io_dirty) {
         u->io_dirty = false;
-        ok = ata_flush(u->drive) && ok;
+        ok = disk_flush(u->drive) && ok;
     }
     return ok ? 0 : -EIO;
 }

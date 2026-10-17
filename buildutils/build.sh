@@ -47,6 +47,7 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/socket.c -o pm_socket.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/fb.c -o fb.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/mouse.c -o mouse.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/disk.c -o disk.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/display.c -o pm_display.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/procfs.c -o procfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/tmpfs.c -o tmpfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
@@ -65,7 +66,7 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pty.o socket.o pm_socket.o fb.o mouse.o pm_display.o procfs.o tmpfs.o time.o power.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pty.o socket.o pm_socket.o fb.o mouse.o disk.o pm_display.o procfs.o tmpfs.o time.o power.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
@@ -134,6 +135,30 @@ setup(){
         -efi-boot-part --efi-boot-image \
         -o build/binaries/kunix-kodiak.iso iso_root
     ./limine/limine bios-install build/binaries/kunix-kodiak.iso
+    live
+}
+
+# The live image, for real machines: the same kernel, with the UFS2 root
+# (ufs.img) loaded into memory by Limine as root.img, so no disk driver is
+# needed to boot. Writes last until power-off. Write it to a USB stick with
+# dd; it boots from BIOS or UEFI (turn Secure Boot off).
+live(){
+    [ -f ufs.img ] || return 0
+    info "Building the live image..."
+    rm -rf build/live_root
+    mkdir -p build/live_root/boot/limine
+    cp kunix-kodiak.elf build/live_root/boot/
+    cp ufs.img build/live_root/boot/root.img
+    cp limine/limine-bios.sys limine/limine-bios-cd.bin limine/limine-uefi-cd.bin build/live_root/boot/limine/
+    printf 'timeout: 3\n\n/Kunix Millennium Operating System (live)\n    protocol: limine\n    kernel_path: boot():/boot/kunix-kodiak.elf\n    module_path: boot():/boot/root.img\n' \
+        > build/live_root/boot/limine/limine.conf
+    xorriso -as mkisofs \
+        -b boot/limine/limine-bios-cd.bin \
+        -no-emul-boot -boot-load-size 4 -boot-info-table \
+        --efi-boot boot/limine/limine-uefi-cd.bin \
+        -efi-boot-part --efi-boot-image \
+        -o build/binaries/kunix-live.iso build/live_root 2>/dev/null
+    ./limine/limine bios-install build/binaries/kunix-live.iso
 }
 cleaning(){
     info "Cleaning up..."
@@ -221,6 +246,10 @@ ufs(){
     # can check nothing was skipped or repeated.
     seq -f "line %06g of the big file" 1 110000 > $T/big.txt
     chmod -R go-w build/ufsroot                         # whatever the host's umask was
+    # Root's home when there is no home disk to mount over /home (the live
+    # image): where the accounts service then keeps its files, in memory.
+    mkdir -p build/ufsroot/home/root
+    chmod 700 build/ufsroot/home/root
     # Pristine account files, for the accounts service to seed from.
     mkdir -p build/ufsroot/etc/defaults
     cp etc/passwd etc/group etc/shadow build/ufsroot/etc/defaults/

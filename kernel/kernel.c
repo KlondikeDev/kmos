@@ -16,6 +16,7 @@
 #include <pit.h>
 #include <keyboard.h>
 #include <mouse.h>
+#include <disk.h>
 #include <console.h>
 #include <panic.h>
 #include <cpuid.h>
@@ -83,18 +84,24 @@ void kernel_main(void) {
     rtc_init();
     
     pci_list_devices();
-    identify_drive(0xA0);
-    fat32_init();
-    // The root is UFS2 on the primary slave when there is one, with the
-    // FAT32 boot disk beside it at /fat; without it, FAT32 is the root, as
-    // it used to be. Home directories have a UFS2 disk of their own on the
-    // secondary slave (the secondary master is the CD-ROM we booted from).
-    void* root = identify_drive(0xB0) ? ufs2_mount(1) : NULL;
+    bool fat = identify_drive(0xA0) && fat32_init();
+    // The root is UFS2: an image the bootloader loaded into memory if there
+    // is one (the live image, for machines whose disks Kunix cannot drive
+    // yet), else the primary slave, with the FAT32 boot disk beside it at
+    // /fat. Without either, FAT32 is the root, as it used to be. Home
+    // directories have a UFS2 disk of their own on the secondary slave
+    // (the secondary master is the CD-ROM we booted from).
+    void* root = NULL;
+    i32 ram = ramdisk_from_module("root.img");
+    if (ram >= 0) root = ufs2_mount((u8)ram);
+    if (!root && identify_drive(0xB0)) root = ufs2_mount(1);
     if (root) {
         vfs_mount_with("/", &ufs2_vfs_ops, root);
-        vfs_mount("/fat", &fat32_vfs_ops);
-    } else {
+        if (fat) vfs_mount("/fat", &fat32_vfs_ops);
+    } else if (fat) {
         vfs_mount("/", &fat32_vfs_ops);
+    } else {
+        klog(LOG_ERROR, "no root filesystem: no root.img module, and no ATA disk\n");
     }
     void* home = ata_present(3) ? ufs2_mount(3) : NULL;
     if (home) vfs_mount_with("/home", &ufs2_vfs_ops, home);
