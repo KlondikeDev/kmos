@@ -14,6 +14,8 @@ with tempfile.TemporaryDirectory(prefix="kunix-host-tests-") as work:
         ("disk_cache", ["buildutils/tests/disk_cache.c"], ["-Ibuildutils/tests/disk_include"]),
         ("gpt", ["buildutils/tests/gpt.c", "kernel/gpt.c"], []),
         ("nvme_protocol", ["buildutils/tests/nvme_protocol.c"], ["-Ibuildutils/tests/nvme_stubs"]),
+        ("iwx200_protocol", ["buildutils/tests/iwx200_protocol.c"], ["-Ibuildutils/tests/iwx200_stubs"]),
+        ("wifi_protocol", ["buildutils/tests/wifi_protocol.c", "kernel/wifi.c"], []),
         ("pagecache", ["buildutils/tests/pagecache.c", "kernel/pagecache.c"], []),
         ("mman_fill", ["buildutils/tests/mman_fill.c", "kernel/pagecache.c"], []),
         ("battery", ["buildutils/tests/battery.c", "kernel/battery.c"], ["-DBATTERY_NORMALIZE_TEST"]),
