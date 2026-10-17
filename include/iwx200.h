@@ -77,8 +77,53 @@
 #define IWX_MQ_RX_TABLE 512u
 #define IWX_TX_RING_COUNT 256u
 #define IWX_CMD_QUEUE 0u
+// Command transport: TFD entries, RX buffer descriptors, kick registers.
+#define IWX_TFD_TBS 25u
+#define IWX_CMD_MAX_PAYLOAD 316u
+#define IWX_RX_RING_COUNT 512u
+#define IWX_RX_BUFFER_SIZE 4096u
+#define IWX_HBUS_WRPTR 0x460u
+#define IWX_CMD_NS 1000000000ULL
+// Firmware command groups and bring-up commands.
+#define IWX_GRP_LEGACY 0u
+#define IWX_GRP_LONG 1u
+#define IWX_GRP_SYSTEM 2u
+#define IWX_GRP_MAC_CONF 3u
+#define IWX_GRP_PHY 4u
+#define IWX_GRP_DATA_PATH 5u
+#define IWX_GRP_REGULATORY 0xcu
+#define IWX_CMD_ALIVE 0x1u
+#define IWX_CMD_INIT_COMPLETE 0x4u
+#define IWX_SYS_INIT_EXTENDED_CFG 0x03u
+#define IWX_SYS_INIT_NVM (1u << 1)
+#define IWX_REG_NVM_ACCESS_COMPLETE 0x00u
+#define IWX_REG_NVM_GET_INFO 0x02u
+#define IWX_CMD_FAILED (1u << 6)
+// Run the post-alive init sequence: extended config, NVM complete, wait
+// for init-complete, fetch MAC from NVM. Only valid once iwx200_online.
+// Returns 0 on success, negative errno otherwise. Bounded, never blocks.
+i32 iwx200_run_init(void);
+// Last MAC fetched from NVM (valid after a successful run_init).
+void iwx200_nvm_mac(u8 out[6]);
+// WiFi link state for the network layer.
+typedef enum { IWX_LINK_DOWN = 0, IWX_LINK_ASSOCIATING, IWX_LINK_HANDSHAKE, IWX_LINK_UP } iwx_link_t;
+iwx_link_t iwx200_link(void);
+// Connect to an open or WPA2-PSK network. Runs the firmware MLME sequence
+// (scan, auth, assoc, station, keys) plus the software handshake for PSK.
+// The passphrase may be NULL for open networks. Bounded, never blocks.
+// Returns 0 when the link is up (or already up on the same network).
+i32 iwx200_connect(const void* ssid, u32 ssid_length, const char* passphrase);
+// Transmit one Ethernet frame over the wireless link (802.11 data + CCMP
+// when associated with keys). Returns true when the frame was queued.
+bool iwx200_send(const void* frame, u32 length);
+// Receive one Ethernet frame from the wireless link (CCMP verified and
+// stripped). Returns the length, 0 when no frame is waiting.
+u32 iwx200_receive(void* frame, u32 capacity);
+// Explicit BSSID for association (from a scan; the UMAC scan command
+// arrives with hardware verification). Returns false on a bad address.
+bool iwx200_set_bssid(const u8 bssid[6]);
 // The INIT image is small; bound every section table.
-#define IWX_UCODE_SECT_MAX 16u
+#define IWX_UCODE_SECT_MAX 69u
 #define IWX_FW_MAX_SIZE (4u * 1024u * 1024u)
 // Firmware TLV container (little-endian on the wire).
 #define IWX_TLV_MAGIC 0x0a4c5749u
@@ -103,6 +148,7 @@ bool iwx200_init(void);
 bool iwx200_online(void);
 void iwx200_mac(u8 out[6]);
 // Firmware image staged by the loader: parsed TLV sections in memory.
+// The first load uses REGULAR sections; the INIT image runs later.
 typedef struct {
     u64 address;
     u32 device_offset;
@@ -111,6 +157,8 @@ typedef struct {
 typedef struct {
     iwx200_sect_t init[IWX_UCODE_SECT_MAX];
     u32 init_count;
+    iwx200_sect_t regular[IWX_UCODE_SECT_MAX];
+    u32 regular_count;
     u32 api;
     char version[64];
 } iwx200_fw_t;
@@ -121,3 +169,13 @@ bool iwx200_parse_fw(const void* image, u64 size, iwx200_fw_t* out);
 // caller keeps the image alive until init completes. False when the card
 // was already probed or the image is malformed.
 bool iwx200_stage_fw(const void* image, u64 size);
+// After the root filesystem is mounted: load the firmware blob from
+// /lib/firmware, then probe the card. Safe to call when no card exists.
+void iwx200_late_init(void);
+// Synchronous firmware command: send the payload and copy the response.
+// The (group, opcode) address the command; the version selects the layout.
+// Returns the response length, or a negative errno on timeout/failure.
+// Only valid once iwx200_online; never blocks, bounded by the TSC clock.
+i32 iwx200_command(u32 group, u32 opcode, u32 version,
+                   const void* payload, u32 payload_length,
+                   void* response, u32 capacity);

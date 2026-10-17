@@ -18,6 +18,7 @@
 #include <mouse.h>
 #include <disk.h>
 #include <nvme.h>
+void iwx200_late_init(void);
 #include <gpt.h>
 #include <klibc/string.h>
 #include <console.h>
@@ -158,6 +159,9 @@ void kernel_main(void) {
     vfs_mount("/proc", &procfs_vfs_ops);
     vfs_mount("/tmp", &tmpfs_vfs_ops);
     tty_init();
+    // Wireless after the root is mounted: the AX200 firmware blob loads
+    // from /lib/firmware. Absent card or blob: silent, loopback only.
+    iwx200_late_init();
 
     // Give the kernel task stdin/stdout/stderr on the terminal. Every
     // process inherits descriptors from its parent, so this is where the
