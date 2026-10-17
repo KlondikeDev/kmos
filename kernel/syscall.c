@@ -26,6 +26,7 @@
 #include <pit.h>
 #include <rtc.h>
 #include <memory.h>
+#include <disk.h>
 #include <memcpy.h>
 #include <memset.h>
 #include <klog.h>
@@ -515,9 +516,16 @@ void syscall_dispatch(registers_t* regs) {
         case SYS_MMAP:        r = mm_mmap(a, b, c, regs->r10, (i64)regs->r8, regs->r9); break;
         case SYS_MUNMAP:      r = mm_munmap(a, b); break;
         case SYS_MPROTECT:    r = mm_mprotect(a, b, c); break;
+        case SYS_SYNC:        r = vfs_sync_all(); break;
+        case SYS_FSYNC: {
+            file_t* f = fd_get(me(), (i32)a);
+            r = f ? vfs_sync(f->node) : -EBADF;
+            break;
+        }
         default:
             r = -ENOSYS;
             break;
     }
     regs->rax = (u64)r;
+    disk_cache_poll();
 }

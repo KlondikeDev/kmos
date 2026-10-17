@@ -112,6 +112,7 @@ typedef struct {
     // The system is going down: write everything out and mark the
     // filesystem clean.
     void (*shutdown)(const struct mount* m);
+    i32 (*sync)(const struct mount* m);
     // A device whose memory programs may map (the framebuffer): the
     // physical address behind [off, off + len), which must be contiguous.
     i64 (*mmap)(vnode_t* node, u64 off, u64 len);
@@ -156,6 +157,8 @@ i64 vfs_readlink(const char* path, char* buf, u64 len);
 i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a);
 void vfs_getattr(vnode_t* node);
 void vfs_shutdown_all(void);             // before powering off
+i32 vfs_sync_all(void);
+i32 vfs_sync(const vnode_t* node);
 
 // Permissions. A node's owner and mode -- with stand-ins for filesystems
 // that keep none: FAT32 is root's and 0755, devices 0666, /proc 0555/0444.

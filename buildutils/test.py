@@ -41,7 +41,7 @@ import time
 # ufs: the UFS2 driver -- one boot writes a tree, a second boot checks and
 # removes it, then the host checks the image (ufsdiag.py, and FreeBSD's
 # fsck_ffs if buildutils/fsck-ffs.sh has built it).
-SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "fbtest", "xtest", "ufs"]
+SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "fbtest", "xtest", "vmtest", "ufs"]
 UFS_PHASES = ["ufstest write", "ufstest verify"]
 FSCK = os.path.expanduser("~/opt/kunix-host/bin/fsck_ffs")
 
@@ -81,6 +81,7 @@ def main():
     ap.add_argument("--machine", default="pc", help="QEMU machine type (default pc)")
     ap.add_argument("--firmware", help="boot with this firmware ROM, e.g. OVMF_CODE_4M.fd")
     ap.add_argument("--firmware-vars", help="variable-store template for split OVMF firmware (copied per VM)")
+    ap.add_argument("--acpi-table", action="append", default=[], help="add an ACPI table to QEMU (repeatable)")
     ap.add_argument("--expect-power", choices=["off", "restart"],
                     help="expect the command to power off or reset QEMU instead of a test summary")
     ap.add_argument("--all", action="store_true",
@@ -95,6 +96,7 @@ def main():
         if args.iso: extra += ["--iso", args.iso]
         if args.firmware: extra += ["--firmware", args.firmware]
         if args.firmware_vars: extra += ["--firmware-vars", args.firmware_vars]
+        for table in args.acpi_table: extra += ["--acpi-table", table]
         return subprocess.run([sys.executable, os.path.abspath(__file__), "--mem", args.mem,
                                "--timeout", str(args.timeout), "--command", command, *extra]).returncode == 0
 
@@ -144,11 +146,13 @@ def main():
     elif args.firmware:
         extra += ["-bios", args.firmware]
     if args.expect_power: extra += ["-no-reboot"]
+    for table in args.acpi_table: extra += ["-acpitable", f"file={table}"]
     qemu = subprocess.Popen(
         ["qemu-system-x86_64", *extra, "-cdrom", iso, "-boot", "d", *drives,
          "-serial", f"file:{serial}", "-monitor", f"unix:{monitor},server,nowait",
          "-display", "none", "-m", args.mem],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    boot_start = time.monotonic()
 
     def log():
         try:
@@ -178,6 +182,7 @@ def main():
         if not started:
             print(log()[-2000:])
             sys.exit("kernel did not reach the shell")
+        print(f"boot: console ready in {time.monotonic() - boot_start:.3f} seconds", flush=True)
         time.sleep(2.0)                          # let the prompt settle (login flushes typeahead)
 
         mon = socket.socket(socket.AF_UNIX)
@@ -198,8 +203,18 @@ def main():
         # line "monitor: <command>", which goes to QEMU's monitor as is.
         sent = 0
         summary = None
+        x_started = None
+        x_elapsed = None
         while time.time() < deadline and qemu.poll() is None:
             out = log()
+            # Guest PIT ticks can be lost during polled disk I/O with IRQs
+            # disabled. Compare X startup using host wall time instead.
+            if args.command == "xtest":
+                if x_started is None and "xtest: X timing start" in out:
+                    x_started = time.monotonic()
+                if x_elapsed is None and x_started is not None and "xtest: X startup" in out:
+                    x_elapsed = time.monotonic() - x_started
+                    print(f"X: startup wall time {x_elapsed:.3f} seconds", flush=True)
             requests = re.findall(r"^monitor: (.+?)\r?$", out, re.M)
             for c in requests[sent:]:
                 mon.sendall((c + "\n").encode())
@@ -208,7 +223,7 @@ def main():
             summary = re.search(r"\w+: (\d+) passed, (\d+) failed", out)
             if summary:
                 break
-            time.sleep(0.2)
+            time.sleep(0.01 if args.command == "xtest" else 0.2)
         out = log()
         if args.expect_power:
             marker = "power: switching off" if args.expect_power == "off" else "power: restarting"

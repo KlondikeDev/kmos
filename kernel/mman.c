@@ -10,9 +10,9 @@
 // inside a VMA are only backed when first touched: mm_fault, called from
 // the page fault handler and from user_range_ok when a syscall is handed a
 // buffer, maps a zeroed frame then. The exceptions are filled in at mmap
-// time -- file mappings (read in whole; there is no page cache to fault
-// from yet), MAP_SHARED anonymous memory (so that fork finds the frames to
-// share), and MAP_POPULATE.
+// time -- MAP_SHARED anonymous memory (so fork finds frames to share),
+// device mappings, and MAP_POPULATE. File and ELF pages retain their backing
+// across close, unlink and fork and are fetched through the clean page cache.
 //
 // Page protections map onto PTEs as:
 //   PROT_NONE          present but not user-accessible, so any touch faults
@@ -27,12 +27,15 @@
 #include <usermode.h>
 #include <memory.h>
 #include <memset.h>
+#include <memcpy.h>
 #include <file.h>
 #include <vfs.h>
 #include <elf.h>
 #include <errno.h>
 #include <klog.h>
 #include <fb.h>
+#include <pagecache.h>
+#include <signal.h>
 
 #define PAGE      USER_PAGE_SIZE
 #define PAGE_MASK (~(PAGE - 1))
@@ -40,6 +43,30 @@
 
 // Note: bool is a u8 here (types.h), so a mask wider than bit 7 must be
 // compared (!= 0) before it is stored in one, or it truncates to false.
+
+typedef struct vm_backing {
+    u32 refs, count;                 // count > 0: original ELF program headers
+    file_t* file;
+    elf64_phdr_t headers[];
+} vm_backing_t;
+
+static void backing_ref(vm_backing_t* b) { if (b) b->refs++; }
+static void backing_unref(vm_backing_t* b) {
+    if (b && --b->refs == 0) { file_unref(b->file); kfree(b); }
+}
+
+void mm_release_backings(vma_t* areas, u32 count) {
+    for (u32 i = 0; i < count; i++) backing_unref(areas[i].backing);
+}
+
+void mm_release(process_t* p) {
+    mm_release_backings(p->vmas, p->nvmas);
+    p->nvmas = 0;
+}
+
+void mm_clone_backings(process_t* child) {
+    for (u32 i = 0; i < child->nvmas; i++) backing_ref(child->vmas[i].backing);
+}
 
 static u32 prot_to_pf(u32 prot) {
     u32 pf = 0;
@@ -108,7 +135,9 @@ static bool vma_split_at(process_t* p, u64 at) {
             if (p->nvmas == MAX_VMAS) return false;
             vma_open_slot(p, i);
             p->vmas[i].end = at;
+            p->vmas[i + 1].offset += at - p->vmas[i + 1].start;
             p->vmas[i + 1].start = at;
+            backing_ref(p->vmas[i + 1].backing);
             return true;
         }
     }
@@ -119,7 +148,10 @@ static bool vma_split_at(process_t* p, u64 at) {
 static void vma_remove(process_t* p, u64 start, u64 end) {
     u32 out = 0;
     for (u32 i = 0; i < p->nvmas; i++) {
-        if (p->vmas[i].start >= start && p->vmas[i].end <= end) continue;
+        if (p->vmas[i].start >= start && p->vmas[i].end <= end) {
+            backing_unref(p->vmas[i].backing);
+            continue;
+        }
         p->vmas[out++] = p->vmas[i];
     }
     p->nvmas = out;
@@ -132,8 +164,11 @@ static void vma_merge(process_t* p) {
         if (out > 0) {
             vma_t* prev = &p->vmas[out - 1];
             if (prev->end == p->vmas[i].start && prev->prot == p->vmas[i].prot &&
-                prev->flags == p->vmas[i].flags) {
+                prev->flags == p->vmas[i].flags && prev->backing == p->vmas[i].backing &&
+                (!prev->backing || prev->backing->count ||
+                 prev->offset + prev->end - prev->start == p->vmas[i].offset)) {
                 prev->end = p->vmas[i].end;
+                backing_unref(p->vmas[i].backing);
                 continue;
             }
         }
@@ -143,14 +178,62 @@ static void vma_merge(process_t* p) {
 }
 
 // Add a VMA over a range that no VMA covers.
-static bool vma_insert(process_t* p, u64 start, u64 end, u32 prot, u32 flags) {
+static bool vma_insert(process_t* p, u64 start, u64 end, u32 prot, u32 flags,
+                       vm_backing_t* backing, u64 offset) {
     if (p->nvmas == MAX_VMAS) return false;
     u32 i = 0;
     while (i < p->nvmas && p->vmas[i].start < start) i++;
     vma_open_slot(p, i);
-    p->vmas[i] = (vma_t){ .start = start, .end = end, .prot = prot, .flags = flags };
+    p->vmas[i] = (vma_t){ .start = start, .end = end, .prot = prot, .flags = flags,
+                         .backing = backing, .offset = offset };
+    backing_ref(backing);
     vma_merge(p);
     return true;
+}
+
+i32 mm_map_image(process_t* p, vnode_t* node, const elf64_phdr_t* headers, u32 count) {
+    vm_backing_t* b = kmalloc(sizeof(*b) + count * sizeof(*headers));
+    if (!b) return -ENOMEM;
+    b->refs = 1;
+    b->count = count;
+    i32 error = file_hold_node(node, true, &b->file);
+    if (error < 0) { kfree(b); return error; }
+    memcpy(b->headers, headers, count * sizeof(*headers));
+    // Split at every rounded segment boundary. Shared pages get the union
+    // of permissions, while the original headers retain exact byte ranges.
+    u64 boundaries[128];
+    u32 n = 0;
+    for (u32 i = 0; i < count; i++) {
+        const elf64_phdr_t* h = &headers[i];
+        if (h->p_type != PT_LOAD || !h->p_memsz) continue;
+        boundaries[n++] = h->p_vaddr & PAGE_MASK;
+        boundaries[n++] = (h->p_vaddr + h->p_memsz + PAGE - 1) & PAGE_MASK;
+    }
+    for (u32 i = 1; i < n; i++) {
+        u64 x = boundaries[i];
+        u32 j = i;
+        while (j && boundaries[j - 1] > x) { boundaries[j] = boundaries[j - 1]; j--; }
+        boundaries[j] = x;
+    }
+    error = 0;
+    for (u32 i = 1; i < n; i++) {
+        u64 start = boundaries[i - 1], end = boundaries[i];
+        if (start == end) continue;
+        bool covered = false;
+        u32 prot = 0;
+        for (u32 j = 0; j < count; j++) {
+            const elf64_phdr_t* h = &headers[j];
+            if (h->p_type != PT_LOAD || !h->p_memsz ||
+                h->p_vaddr >= end || h->p_vaddr + h->p_memsz <= start) continue;
+            covered = true;
+            if (h->p_flags & PF_R) prot |= PROT_READ;
+            if (h->p_flags & PF_W) prot |= PROT_WRITE;
+            if (h->p_flags & PF_X) prot |= PROT_EXEC;
+        }
+        if (covered && !vma_insert(p, start, end, prot, 0, b, 0)) { error = -ENOMEM; break; }
+    }
+    backing_unref(b);
+    return error;
 }
 
 // Top-down first fit in the mmap area. 0 if nothing is free.
@@ -185,14 +268,73 @@ static void unmap_pages(process_t* p, u64 start, u64 end) {
 }
 
 // Back one page of a VMA with a zeroed frame.
-static bool fill_page(process_t* p, u64 va, const vma_t* v) {
+static bool fill_page(process_t* p, u64 va, const vma_t* v, bool write) {
+    vm_backing_t* b = v->backing;
+    vnode_t* node = b ? b->file->node : NULL;
+    u64 file_offset = v->offset + va - v->start;
+    bool share_page = b && !b->count;
+    if (b && b->count) {
+        u32 covering = 0;
+        for (u32 i = 0; i < b->count; i++) {
+            const elf64_phdr_t* h = &b->headers[i];
+            if (h->p_type != PT_LOAD || !h->p_memsz ||
+                h->p_vaddr >= va + PAGE || h->p_vaddr + h->p_memsz <= va) continue;
+            covering++;
+            if (va >= h->p_vaddr && va + PAGE <= h->p_vaddr + h->p_filesz) {
+                file_offset = h->p_offset + va - h->p_vaddr;
+                share_page = !(file_offset & (PAGE - 1));
+            }
+        }
+        if (covering != 1) share_page = false;
+    }
+    if (share_page) {
+        if (p->user_pages >= USER_MAX_PAGES) return false;
+        i64 frame = pagecache_get(node, file_offset);
+        if (frame < 0) {
+            if (frame != -ENOMEM) p->map_fault_signal = SIGBUS;
+            return false;
+        }
+        if (!vmm_map_in(p->space, va, (u64)frame, pte_flags((u64)frame, v->prot, false))) {
+            pmm_free((u64)frame); return false;
+        }
+        p->user_pages++;
+        // A syscall validating a writable buffer gets only one attempt at
+        // resolving the fault, so finish COW now on a first-touch write.
+        return !write || !(v->prot & PROT_WRITE) ||
+               (vmm_get_pte(p->space, va) & PTE_WRITE) || vmm_break_cow(p->space, va);
+    }
     if (!user_map(p, va, prot_to_pf(v->prot))) return false;
     u64 frame = vmm_get_pte(p->space, va) & PTE_ADDR;
+    if (b) {
+        // Boundary pages and BSS are private zero-filled pages. Copy only
+        // bytes covered by file data, in original program-header order.
+        for (u32 i = 0; i < b->count; i++) {
+            const elf64_phdr_t* h = &b->headers[i];
+            if (h->p_type != PT_LOAD) continue;
+            u64 start = va > h->p_vaddr ? va : h->p_vaddr;
+            u64 end = va + PAGE < h->p_vaddr + h->p_filesz ? va + PAGE : h->p_vaddr + h->p_filesz;
+            if (start < end) {
+                i64 result = pagecache_read(node, h->p_offset + start - h->p_vaddr,
+                                           (void*)(frame + vmm_hhdm() + start - va), end - start);
+                if (result < 0) {
+                    vmm_unmap_in(p->space, va); pmm_free(frame); p->user_pages--;
+                    if (result != -ENOMEM) p->map_fault_signal = SIGBUS;
+                    return false;
+                }
+            }
+            // A later segment's BSS can cover bytes supplied by an earlier
+            // segment, so apply its zeros in the same order as its file data.
+            start = va > h->p_vaddr + h->p_filesz ? va : h->p_vaddr + h->p_filesz;
+            end = va + PAGE < h->p_vaddr + h->p_memsz ? va + PAGE : h->p_vaddr + h->p_memsz;
+            if (start < end) memset((void*)(frame + vmm_hhdm() + start - va), 0, end - start);
+        }
+    }
     return vmm_map_in(p->space, va, frame, pte_flags(frame, v->prot, (v->flags & VMA_SHARED) != 0));
 }
 
 bool mm_fault(u64 addr, bool write) {
     process_t* p = proc_current();
+    p->map_fault_signal = SIGSEGV;
     if (p->pid == 0 || addr >= USER_STACK_TOP) return false;
     u64 va = addr & PAGE_MASK;
     u64 pte = vmm_get_pte(p->space, va);
@@ -209,7 +351,7 @@ bool mm_fault(u64 addr, bool write) {
     if (v) {
         if (v->prot == PROT_NONE) return false;
         if (write && !(v->prot & PROT_WRITE)) return false;
-        return fill_page(p, va, v);
+        return fill_page(p, va, v, write);
     }
     return user_grow_stack(addr);
 }
@@ -230,8 +372,8 @@ i64 mm_mmap(u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     if (len > USER_MMAP_TOP) return -ENOMEM;
     len = (len + PAGE - 1) & PAGE_MASK;
 
-    // File mappings are copied in whole now. Writes cannot reach the file,
-    // so a shared writable one is refused rather than silently diverging.
+    // Shared writable files still need dirty-page writeback. Private files
+    // retain their backing and are faulted in through the clean page cache.
     file_t* f = NULL;
     i64 device = -1;                   // a device's physical memory, mapped as is
     if (!anon) {
@@ -274,14 +416,25 @@ i64 mm_mmap(u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     }
 
     u64 end = addr + len;
-    bool eager = shared || f || device >= 0 || (flags & MAP_POPULATE) != 0;
+    bool eager = shared || device >= 0 || (flags & MAP_POPULATE) != 0;
     if (eager && p->user_pages + len / PAGE > USER_MAX_PAGES) return -ENOMEM;
 
+    vm_backing_t* backing = NULL;
+    if (f) {
+        backing = kmalloc(sizeof(*backing));
+        if (!backing) return -ENOMEM;
+        *backing = (vm_backing_t){ .refs = 1, .file = f };
+        file_ref(f);
+    }
     // MAP_FIXED replaces whatever was there.
-    if (!vma_split_at(p, addr) || !vma_split_at(p, end)) return -ENOMEM;
+    if (!vma_split_at(p, addr) || !vma_split_at(p, end)) {
+        backing_unref(backing); return -ENOMEM;
+    }
     vma_remove(p, addr, end);
     unmap_pages(p, addr, end);
-    if (!vma_insert(p, addr, end, (u32)prot, shared ? VMA_SHARED : 0)) return -ENOMEM;
+    bool inserted = vma_insert(p, addr, end, (u32)prot, shared ? VMA_SHARED : 0, backing, off);
+    backing_unref(backing);
+    if (!inserted) return -ENOMEM;
 
     if (device >= 0) {
         // Device memory belongs to no one: the frame allocator never hands
@@ -296,26 +449,16 @@ i64 mm_mmap(u64 addr, u64 len, u64 prot, u64 flags, i64 fd, u64 off) {
     }
     if (eager) {
         vma_t* v = vma_find(p, addr);
-        u64 filled = 0;
+        u64 filled = len;
         if (f) {
+            vfs_getattr(f->node);
             filled = f->node->size > off ? f->node->size - off : 0;
             if (filled > len) filled = len;
             filled = (filled + PAGE - 1) & PAGE_MASK;
+            if (prot == PROT_NONE) filled = 0;
         }
-        if (shared || (flags & MAP_POPULATE)) filled = len;
         for (u64 va = addr; va < addr + filled; va += PAGE) {
-            if (!fill_page(p, va, v)) goto oom;
-            if (f) {
-                // Straight into the frame through the direct map; the page
-                // may well be read-only to the program.
-                u64 frame = vmm_get_pte(p->space, va) & PTE_ADDR;
-                i64 n = vfs_read(f->node, off + (va - addr), (void*)(frame + vmm_hhdm()), PAGE);
-                if (n < 0) {
-                    mm_munmap(addr, len);
-                    return n;
-                }
-                if (n < (i64)PAGE) break;                    // end of file: rest is zero
-            }
+            if (!fill_page(p, va, v, false)) goto oom;
         }
     }
     return (i64)addr;

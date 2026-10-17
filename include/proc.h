@@ -39,7 +39,7 @@ typedef enum {
 
 struct file;
 
-typedef struct {
+typedef struct process {
     // fxsave/fxrstor image of the x87/SSE registers. Must be 16-byte
     // aligned, which also aligns every process_t in the table.
     u8 fpu[512] __attribute__((aligned(16)));
@@ -87,6 +87,7 @@ typedef struct {
 
     vma_t vmas[MAX_VMAS];    // mmap regions, sorted by address
     u32 nvmas;
+    i32 map_fault_signal;   // SIGBUS for unavailable file data, otherwise SIGSEGV
 
     char cwd[PROC_CWD_MAX];
     struct file* fds[MAX_FDS];
@@ -126,6 +127,8 @@ void proc_trampoline(void);
 // The boot thread becomes PID 0, the kernel task: it runs the kernel shell
 // and idles when nothing else is ready.
 void sched_init(void);
+// PID 0 acknowledges deferred cache/battery maintenance after it finishes.
+void sched_maintenance_done(void);
 
 process_t* proc_current(void);
 process_t* proc_by_pid(i32 pid);

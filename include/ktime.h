@@ -15,4 +15,5 @@
 
 void time_on_tick(void);            // from the timer IRQ, once per tick
 u64 time_boot_ns(void);             // nanoseconds since boot
+u64 time_counter_ns(void);          // TSC deadline clock; progresses with IRQs off
 u64 time_real_ns(void);             // nanoseconds since 1970 (UTC)

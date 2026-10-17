@@ -41,6 +41,13 @@ static process_t procs[MAX_PROCS];
 static process_t* current;
 static i32 next_pid = 1;
 static u32 slice = 0;
+static bool maintenance_active;
+
+void sched_maintenance_done(void) {
+    u64 flags = irq_save();
+    maintenance_active = false;
+    irq_restore(flags);
+}
 
 // FPU state of a freshly initialised CPU, copied into every new process.
 static u8 fpu_template[512] __attribute__((aligned(16)));
@@ -175,6 +182,7 @@ void proc_free(process_t* p) {
     if (p->space && p->space != vmm_kernel_space()) {
         vmm_destroy_space(p->space);
     }
+    mm_release(p);
     if (p->kstack) kfree(p->kstack);
     memset(p, 0, sizeof(*p));       // state = PROC_UNUSED
 }
@@ -193,6 +201,7 @@ process_t* proc_fork(const registers_t* frame) {
     child->brk = parent->brk;
     for (u32 i = 0; i < parent->nvmas; i++) child->vmas[i] = parent->vmas[i];
     child->nvmas = parent->nvmas;
+    mm_clone_backings(child);
     // A forked child runs the same code, so it keeps the handlers too.
     for (int s = 0; s < NSIG; s++) child->sig_handler[s] = parent->sig_handler[s];
     child->sig_restorer = parent->sig_restorer;
@@ -221,8 +230,11 @@ void schedule(void) {
 
     // Round robin over user processes, starting after the current one. The
     // kernel task is only a fallback for when nobody else can run.
-    int start = (int)(prev - procs);
-    for (int i = 1; i <= MAX_PROCS; i++) {
+    static int last_user;
+    int start = prev->pid ? (int)(prev - procs) : last_user;
+    if (prev->pid) last_user = start;
+    if (prev->pid && maintenance_active && procs[0].state == PROC_READY) next = &procs[0];
+    for (int i = 1; !next && i <= MAX_PROCS; i++) {
         process_t* p = &procs[(start + i) % MAX_PROCS];
         if (p->pid != 0 && p->state == PROC_READY) { next = p; break; }
     }
@@ -231,6 +243,7 @@ void schedule(void) {
         next = &procs[0];
     }
     if (next == prev) return;
+    if (next->pid) last_user = (int)(next - procs);
 
     if (prev->state == PROC_RUNNING) prev->state = PROC_READY;
     next->state = PROC_RUNNING;
@@ -332,6 +345,9 @@ void sched_sleep(u32 n) {
 }
 
 void sched_tick(void) {
+    // Give deferred work a turn even when a user program never makes a
+    // syscall. Only schedule the kernel task here: never perform I/O in IRQs.
+    if (ticks % 250 == 0) maintenance_active = true;
     current->cpu_ticks++;
     for (int i = 1; i < MAX_PROCS; i++) {
         process_t* p = &procs[i];
@@ -347,7 +363,7 @@ void sched_tick(void) {
         }
     }
     // The kernel task gives way immediately; everyone else gets a quantum.
-    if (current->pid == 0 || ++slice >= SCHED_QUANTUM) {
+    if ((current->pid == 0 && !maintenance_active) || ++slice >= SCHED_QUANTUM) {
         schedule();
     }
 }
@@ -397,6 +413,7 @@ __attribute__((noreturn)) static void do_exit(i64 wstatus) {
     vmm_switch(vmm_kernel_space());
     vmm_destroy_space(me->space);
     me->space = vmm_kernel_space();
+    mm_release(me);
 
     // Orphans are adopted by the kernel task, which reaps them.
     for (int i = 1; i < MAX_PROCS; i++) {

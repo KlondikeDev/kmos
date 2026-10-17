@@ -14,6 +14,16 @@
 #define DISK_RAM0 4
 #define DISK_MAX  8
 
+// Initialize once after PMM/heap; a low-memory machine can run uncached.
+void disk_cache_init(void);
+// Deferred maintenance only: call from idle/syscall context, never a timer IRQ.
+void disk_cache_poll(void);
+typedef struct {
+    u64 hits, misses, writebacks, errors;
+    u32 blocks, dirty;
+} disk_cache_stats_t;
+void disk_cache_stats(disk_cache_stats_t* out);
+u64 disk_sectors(u8 disk);
 bool disk_present(u8 disk);
 bool disk_read(u8 disk, u64 lba, u32 count, void* buf);       // 512-byte sectors
 bool disk_write(u8 disk, u64 lba, u32 count, const void* buf);

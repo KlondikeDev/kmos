@@ -29,6 +29,9 @@
 #include <klibc/string.h>
 #include <file.h>
 #include <klog.h>
+#include <battery.h>
+#include <disk.h>
+#include <pagecache.h>
 
 void cpuid_vendor(char* vendor);
 void cpuid_brand(char* brand);
@@ -40,7 +43,7 @@ void cpuid_brand(char* brand);
 // pid << 8 and its files pid << 8 | kind.
 enum {
     P_ROOT = 1, P_SELF, P_MEMINFO, P_UPTIME, P_LOADAVG, P_STAT, P_VERSION,
-    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_GLOBAL_END,
+    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_BATTERY, P_CACHE, P_GLOBAL_END,
 };
 enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_EXE, F_CWD, F_END };
 // .../fd/N nodes (opening them is file_open's job: it shares descriptor N).
@@ -51,6 +54,7 @@ static const char* const global_names[P_GLOBAL_END] = {
     [P_LOADAVG] = "loadavg", [P_STAT] = "stat", [P_VERSION] = "version",
     [P_MOUNTS] = "mounts", [P_CPUINFO] = "cpuinfo", [P_FILESYSTEMS] = "filesystems",
     [P_KMSG] = "kmsg",
+    [P_BATTERY] = "battery", [P_CACHE] = "cache",
 };
 static const char* const proc_file_names[F_END] = {
     [F_STAT] = "stat", [F_STATUS] = "status", [F_CMDLINE] = "cmdline", [F_COMM] = "comm",
@@ -249,14 +253,27 @@ static u64 gen_global(u64 id, char* b) {
     u64 uptime_cs = (u64)ticks * 100 / 250;          // centiseconds
     u64 idle_cs = TO_HZ(proc_slot(0)->cpu_ticks);
     switch (id) {
+        case P_BATTERY:
+            return battery_read_text(b, GEN_MAX);
+        case P_CACHE: {
+            disk_cache_stats_t d;
+            disk_cache_stats(&d);
+            return (u64)ksnprintf(b, GEN_MAX,
+                "block_cache_blocks: %u\nblock_cache_dirty: %u\nblock_cache_hits: %lu\n"
+                "block_cache_misses: %lu\nblock_cache_writebacks: %lu\nblock_cache_errors: %lu\n"
+                "file_cache_pages: %lu\n", d.blocks, d.dirty, d.hits, d.misses,
+                d.writebacks, d.errors, pagecache_pages());
+        }
         case P_MEMINFO: {
             u64 total = pmm_total_pages() * 4, free = pmm_count_free() * 4;
+            disk_cache_stats_t cache;
+            disk_cache_stats(&cache);
             return (u64)ksnprintf(b, GEN_MAX,
                 "MemTotal:       %8lu kB\nMemFree:        %8lu kB\nMemAvailable:   %8lu kB\n"
-                "Buffers:               0 kB\nCached:                0 kB\nSwapCached:            0 kB\n"
+                "Buffers:        %8lu kB\nCached:         %8lu kB\nSwapCached:            0 kB\n"
                 "Active:                0 kB\nInactive:              0 kB\nSwapTotal:             0 kB\n"
                 "SwapFree:              0 kB\nShmem:                 0 kB\nSlab:                  0 kB\n",
-                total, free, free);
+                total, free, free, (u64)cache.blocks * 4, pagecache_pages() * 4);
         }
         case P_UPTIME:
             return (u64)ksnprintf(b, GEN_MAX, "%lu.%02lu %lu.%02lu\n",

@@ -32,17 +32,21 @@
 #define MAP_STACK           0x20000     // accepted, ignored
 #define MAP_FIXED_NOREPLACE 0x100000    // MAP_FIXED, but EEXIST over a mapping
 
-// A virtual memory area: one run of pages created by mmap. The program
-// image, the brk heap and the stack are not VMAs (yet); they keep their own
-// bookkeeping in process_t.
+// A virtual memory area: an mmap region or part of a demand-paged image.
+// The brk heap and stack still keep their own bookkeeping in process_t.
 #define VMA_SHARED 0x1                  // MAP_SHARED: fork shares, not copies
 
-#define MAX_VMAS 64
+#define MAX_VMAS 256
+
+struct vm_backing;
+struct process;
 
 typedef struct {
     u64 start, end;                     // page-aligned, end exclusive
     u32 prot;                           // PROT_*
     u32 flags;                          // VMA_*
+    struct vm_backing* backing;          // pins the file until the last mapping
+    u64 offset;                         // file offset corresponding to start
 } vma_t;
 
 // The system calls. Results are >= 0 (an address, for mmap) or -errno.
@@ -54,6 +58,9 @@ i64 mm_mprotect(u64 addr, u64 len, u64 prot);
 // page, fill a mapped-but-untouched page, or grow the stack. True if the
 // access can now be retried.
 bool mm_fault(u64 addr, bool write);
+void mm_release(struct process* p);
+void mm_release_backings(vma_t* areas, u32 count);
+void mm_clone_backings(struct process* child);
 
 // Does [start, end) overlap any VMA of the current process?
 bool mm_overlaps(u64 start, u64 end);

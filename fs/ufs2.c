@@ -64,6 +64,7 @@ typedef struct {
     u8* cgbuf;
     i64 cg_loaded;
     bool cg_dirty, cs_dirty, sb_dirty, io_dirty;
+    bool dirty_committed;              // disk knows a writable session is active
 
     // A one-sector read cache: inode reads and directory scans hit the same
     // sector over and over, and every miss is a polled PIO transfer.
@@ -177,8 +178,9 @@ static u64 cgtod(ufs_t* u, u32 c) {
 
 static bool cg_flush(ufs_t* u) {
     if (!u->cg_dirty) return true;
+    if (!dev_write(u, frag_byte(u, cgtod(u, (u32)u->cg_loaded)), u->cgbuf, (u32)u->fs.fs_cgsize)) return false;
     u->cg_dirty = false;
-    return dev_write(u, frag_byte(u, cgtod(u, (u32)u->cg_loaded)), u->cgbuf, (u32)u->fs.fs_cgsize);
+    return true;
 }
 
 static ufs2_cg_t* cg_get(ufs_t* u, u32 c) {
@@ -279,25 +281,30 @@ static i32 begin_write(ufs_t* u) {
         u->fs.fs_clean = 0;
         u->sb_dirty = true;
     }
+    // Persist the dirty marker before any metadata can be evicted from the
+    // write-back cache. A crash must never leave a falsely clean filesystem.
+    if (!u->dirty_committed) {
+        memcpy(u->sbbuf, &u->fs, sizeof(u->fs));
+        if (!dev_write(u, u->sbloc, u->sbbuf, (u32)u->fs.fs_sbsize) || !disk_flush(u->drive)) return -EIO;
+        u->dirty_committed = true;
+        u->sb_dirty = false;
+    }
     return 0;
 }
 
-// End of an operation: write what is pending, then one flush.
+// End an operation by serializing metadata into the block cache. Durability
+// is explicit (sync/fsync/shutdown); the disk layer also flushes periodically.
 static i32 commit(ufs_t* u) {
     bool ok = cg_flush(u);
     if (u->cs_dirty) {
-        u->cs_dirty = false;
-        ok = dev_write(u, frag_byte(u, (u64)u->fs.fs_csaddr), u->csum, u->csum_bytes) && ok;
+        if (dev_write(u, frag_byte(u, (u64)u->fs.fs_csaddr), u->csum, u->csum_bytes)) u->cs_dirty = false;
+        else ok = false;
     }
     if (u->sb_dirty) {
-        u->sb_dirty = false;
         u->fs.fs_time = (i64)rtc_now();
         memcpy(u->sbbuf, &u->fs, sizeof(u->fs));
-        ok = dev_write(u, u->sbloc, u->sbbuf, (u32)u->fs.fs_sbsize) && ok;
-    }
-    if (u->io_dirty) {
-        u->io_dirty = false;
-        ok = disk_flush(u->drive) && ok;
+        if (dev_write(u, u->sbloc, u->sbbuf, (u32)u->fs.fs_sbsize)) u->sb_dirty = false;
+        else ok = false;
     }
     return ok ? 0 : -EIO;
 }
@@ -1386,15 +1393,29 @@ static void ufs2_release(vnode_t* node) {
 
 // Going down: nothing is in flight between operations, so the filesystem
 // is consistent -- say so.
+static i32 ufs2_sync(const struct mount* m) {
+    ufs_t* u = (ufs_t*)m->priv;
+    i32 r = commit(u);
+    if (r < 0 || !disk_flush(u->drive)) return -EIO;
+    u->io_dirty = false;
+    return 0;
+}
+
 static void ufs2_shutdown(const struct mount* m) {
     ufs_t* u = (ufs_t*)m->priv;
     if (!u->writable || u->fs.fs_clean) return;
+    if (ufs2_sync(m) < 0) {
+        klog(LOG_WARN, "ufs2: drive %u sync failed; leaving it dirty\n", u->drive);
+        return;
+    }
     u->fs.fs_clean = 1;
     u->sb_dirty = true;
-    if (commit(u) == 0) klog(LOG_OKAY, "ufs2: drive %u marked clean\n", u->drive);
+    if (ufs2_sync(m) == 0) klog(LOG_OKAY, "ufs2: drive %u marked clean\n", u->drive);
+    else u->fs.fs_clean = 0;
 }
 
 const vfs_ops_t ufs2_vfs_ops = {
+    .sync = ufs2_sync,
     .type = "ufs2",
     .root = ufs2_root,
     .lookup = ufs2_lookup,
@@ -1493,6 +1514,7 @@ void* ufs2_mount(u8 drive) {
     // Writing is safe without soft updates and without a journal -- unless
     // the filesystem expects them to be kept up (SUJ), or snapshots exist.
     u->writable = !(fs->fs_flags & 0x0008) && fs->fs_snapinum[0] == 0;
+    u->dirty_committed = !fs->fs_clean;
     if (!fs->fs_clean) klog(LOG_WARN, "ufs2: drive %u was not cleanly unmounted; run fsck_ffs\n", drive);
     klog(LOG_OKAY, "ufs2: drive %u: %u groups, %u-byte blocks, %u-byte fragments, %u inodes, %s\n",
          drive, u->ncg, u->bsize, u->fsize, u->ncg * u->ipg, u->writable ? "read-write" : "read-only");

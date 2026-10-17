@@ -77,6 +77,8 @@ typedef int           pid_t;
 #define SYS_MMAP        43
 #define SYS_MUNMAP      44
 #define SYS_MPROTECT    45
+#define SYS_SYNC        46
+#define SYS_FSYNC       47
 
 long syscall3(long n, long a, long b, long c);
 long syscall6(long n, long a, long b, long c, long d, long e, long f);
@@ -266,6 +268,8 @@ int meminfo(struct meminfo* m);
 void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off);
 int munmap(void* addr, size_t len);
 int mprotect(void* addr, size_t len, int prot);
+int fsync(int fd);
+int sync(void);
 
 typedef long time_t;
 time_t time(time_t* out);             // seconds since 1970, UTC

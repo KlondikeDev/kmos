@@ -387,6 +387,8 @@ static void test_writes(void) {
     unlink(path);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     CHECK("create a file", fd >= 0);
+    CHECK("native fsync flushes an open file", fd >= 0 && fsync(fd) == 0);
+    CHECK("native sync flushes filesystems", sync() == 0);
     if (fd < 0) return;
 
     // 10000 bytes: spans several clusters on any sane FAT32 volume.

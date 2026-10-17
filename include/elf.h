@@ -81,7 +81,9 @@ typedef struct {
 } elf_info_t;
 
 // Validate an ELF file and map its PT_LOAD segments into p's address space,
-// reading them straight from the file. Returns 0, or -ENOEXEC (logged) for
+// faulting their file data in on demand. Returns 0, or -ENOEXEC (logged) for
 // anything we cannot run, -ENOMEM, or a read error; whatever was mapped is
 // freed along with p's address space.
 i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out);
+// Reserve disjoint image VMAs, preserving shared-page segment permissions.
+i32 mm_map_image(process_t* p, vnode_t* node, const elf64_phdr_t* headers, u32 count);

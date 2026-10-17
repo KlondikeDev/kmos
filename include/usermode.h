@@ -45,8 +45,8 @@
 #define USER_MMAP_MIN     0x10000ULL                // lowest MAP_FIXED address
 
 // Hard caps, so a hostile or broken program cannot eat all of memory.
-#define USER_MAX_PAGES    32768            // per process: 128 MiB
-#define USER_MAX_IMAGE    (64 * MB)        // largest executable we will run
+#define USER_MAX_PAGES    262144           // per process: 1 GiB resident, still bounded by RAM
+#define USER_MAX_IMAGE    (512ULL * MB)    // file size; segments are demand paged
 #define USER_MAX_ARGS     256              // each of argv and envp
 #define USER_MAX_ARGBYTES (64 * KB)        // all their strings together
 

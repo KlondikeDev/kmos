@@ -16,6 +16,7 @@
 #include <devfs.h>
 #include <tty.h>
 #include <mouse.h>
+#include <pagecache.h>
 
 // ---------------------------------------------------------------------------
 // Open vnodes
@@ -30,6 +31,7 @@
 typedef struct open_vnode {
     vnode_t node;                      // first member: a vnode_t* is an open_vnode*
     u32 refs;
+    u32 writers, images;
     struct open_vnode* next;
 } open_vnode_t;
 
@@ -52,6 +54,7 @@ static vnode_t* vnode_intern(const vnode_t* n) {
     if (!o) return NULL;
     o->node = *n;
     o->refs = 1;
+    o->writers = o->images = 0;
     o->next = open_vnodes;
     open_vnodes = o;
     return &o->node;
@@ -64,9 +67,22 @@ bool vnode_is_open(const vnode_t* n) {
     return false;
 }
 
+static open_vnode_t* open_node(const vnode_t* n) {
+    for (open_vnode_t* o = open_vnodes; o; o = o->next) {
+        if (o->node.mnt == n->mnt && vnode_key(&o->node) == vnode_key(n)) return o;
+    }
+    return NULL;
+}
+
+bool vnode_exec_busy(const vnode_t* n) {
+    open_vnode_t* o = open_node(n);
+    return o && o->images != 0;
+}
+
 static void vnode_release(vnode_t* n) {
     open_vnode_t* o = (open_vnode_t*)n;
     if (--o->refs) return;
+    pagecache_forget(n);           // an unlinked inode may be recycled next
     // The last open is gone: a file unlinked meanwhile can go now.
     if (n->mnt && n->mnt->ops->release) n->mnt->ops->release(n);
     for (open_vnode_t** pp = &open_vnodes; *pp; pp = &(*pp)->next) {
@@ -105,7 +121,12 @@ static i64 vnode_file_write(file_t* f, const void* buf, u64 len) {
 
 static void vnode_file_release(file_t* f) {
     if (f->path) kfree(f->path);
-    if (f->node) vnode_release(f->node);
+    if (f->node) {
+        open_vnode_t* o = (open_vnode_t*)f->node;
+        if (f->image) o->images--;
+        if (f->node->type == VN_REG && (f->flags & O_ACCMODE) != O_RDONLY) o->writers--;
+        vnode_release(f->node);
+    }
 }
 
 static u32 vnode_file_poll(file_t* f) {
@@ -130,6 +151,19 @@ static file_t* file_alloc(const file_ops_t* ops, u32 flags) {
     f->refs = 1;
     f->flags = flags;
     return f;
+}
+
+i32 file_hold_node(const vnode_t* node, bool image, file_t** out) {
+    open_vnode_t* o = open_node(node);
+    if (image && o && o->writers) return -ETXTBSY;
+    file_t* f = file_alloc(&vnode_file_ops, O_RDONLY);
+    if (!f) return -ENOMEM;
+    f->node = vnode_intern(node);
+    if (!f->node) { kfree(f); return -ENOMEM; }
+    f->image = image;
+    if (image) ((open_vnode_t*)f->node)->images++;
+    *out = f;
+    return 0;
 }
 
 // The number at the start of s, and where it ends; -1 if none.
@@ -235,6 +269,7 @@ i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
         return -EEXIST;
     }
     if (r < 0) return r;
+    if (node.type == VN_REG && acc != O_RDONLY && vnode_exec_busy(&node)) return -ETXTBSY;
     // The file's permissions (not for one just made: its creator may open
     // it however it asked, whatever mode it was given).
     if (!created) {
@@ -259,6 +294,7 @@ i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out) {
     if (!f) return -ENOMEM;
     f->node = vnode_intern(&node);
     if (!f->node) { kfree(f); return -ENOMEM; }
+    if (node.type == VN_REG && acc != O_RDONLY) ((open_vnode_t*)f->node)->writers++;
     maybe_acquire_ctty(devfs_tty(f->node), flags);
 
     // Truncate the shared node, so every open of this file sees it.

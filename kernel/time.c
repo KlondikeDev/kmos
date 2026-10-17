@@ -8,6 +8,7 @@
 #include <ktime.h>
 #include <pit.h>
 #include <rtc.h>
+#include <io.h>
 
 #define TICK_NS 4000000ULL           // PIT at 250 Hz
 
@@ -48,4 +49,21 @@ u64 time_boot_ns(void) {
 
 u64 time_real_ns(void) {
     return rtc_epoch_of_tick0_ms() * 1000000ULL + time_boot_ns();
+}
+
+u64 time_counter_ns(void) {
+    static u64 rate, origin, origin_ns;
+    u64 flags = irq_save();
+    if (!rate && tsc_per_tick) {
+        rate = tsc_per_tick;
+        origin = rdtsc();
+        origin_ns = (u64)ticks * TICK_NS;
+    }
+    u64 now;
+    if (rate) {
+        u64 delta = rdtsc() - origin;
+        now = origin_ns + delta / rate * TICK_NS + delta % rate * TICK_NS / rate;
+    } else now = (u64)ticks * TICK_NS;
+    irq_restore(flags);
+    return now;
 }

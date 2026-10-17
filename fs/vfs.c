@@ -8,6 +8,8 @@
 #include <vfs.h>
 #include <proc.h>
 #include <file.h>
+#include <pagecache.h>
+#include <disk.h>
 #include <errno.h>
 #include <console.h>
 #include <klog.h>
@@ -279,6 +281,8 @@ i64 vfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
 i64 vfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
     if (node->type == VN_DIR) return -EISDIR;
     if (!node->mnt->ops->write) return -EROFS;
+    if (node->type == VN_REG && vnode_exec_busy(node)) return -ETXTBSY;
+    pagecache_forget(node);
     return node->mnt->ops->write(node, off, buf, len);
 }
 
@@ -419,6 +423,8 @@ i32 vfs_truncate(vnode_t* node, u64 size) {
     if (node->type == VN_DIR) return -EISDIR;
     if (node->type != VN_REG) return 0;                  // devices ignore it
     if (!node->mnt->ops->truncate) return -EROFS;
+    if (vnode_exec_busy(node)) return -ETXTBSY;
+    pagecache_forget(node);
     return node->mnt->ops->truncate(node, size);
 }
 
@@ -539,7 +545,29 @@ void vfs_getattr(vnode_t* node) {
 }
 
 void vfs_shutdown_all(void) {
+    vfs_sync_all();
     for (u32 i = 0; i < mount_count; i++) {
         if (mounts[i].ops->shutdown) mounts[i].ops->shutdown(&mounts[i]);
     }
+    for (u8 i = 0; i < DISK_MAX; i++) if (disk_present(i)) disk_flush(i);
+}
+
+i32 vfs_sync(const vnode_t* node) {
+    if (!node || !node->mnt) return -EINVAL;
+    if (node->mnt->ops->sync) {
+        i32 r = node->mnt->ops->sync(node->mnt);
+        if (r < 0) return r;
+    }
+    // Covers filesystems without private metadata buffers, including FAT.
+    for (u8 i = 0; i < DISK_MAX; i++) if (disk_present(i) && !disk_flush(i)) return -EIO;
+    return 0;
+}
+
+i32 vfs_sync_all(void) {
+    i32 result = 0;
+    for (u32 i = 0; i < mount_count; i++) {
+        if (mounts[i].ops->sync && mounts[i].ops->sync(&mounts[i]) < 0) result = -EIO;
+    }
+    for (u8 i = 0; i < DISK_MAX; i++) if (disk_present(i) && !disk_flush(i)) result = -EIO;
+    return result;
 }

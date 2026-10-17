@@ -4,9 +4,9 @@
 // Licensed under the Kunix License v1.0 or later
 // See LICENSE for details
 
-// Static ELF64 loader. Reads the headers, checks that the file is something
-// we can safely run, then reads each PT_LOAD segment from the file straight
-// into the frames backing the virtual addresses it asks for.
+// Static ELF64 loader. Validate all headers, retain the executable and
+// reserve its PT_LOAD ranges. The VM fault path reads segment pages only
+// when needed, using the same backing in the native and Linux ABIs.
 //
 // Its complaints go to the serial port only: programs probe with execve and
 // fall back (a shell running a script), so a file that is not an
@@ -84,23 +84,6 @@ static bool elf_check_segment(const elf64_phdr_t* ph, u64 size) {
 
 #define ELF_MAX_PHDRS 64
 
-// Read file bytes into p's (already mapped) pages, through the direct map.
-static bool read_into(process_t* p, vnode_t* node, u64 off, u64 virt, u64 len) {
-    while (len) {
-        u64 pte = vmm_get_pte(p->space, virt);
-        if (!(pte & PTE_PRESENT)) return false;
-        u64 in_page = virt & (USER_PAGE_SIZE - 1);
-        u64 chunk = USER_PAGE_SIZE - in_page;
-        if (chunk > len) chunk = len;
-        void* dst = (void*)((pte & 0x000FFFFFFFFFF000ULL) + vmm_hhdm() + in_page);
-        if (vfs_read(node, off, dst, chunk) != (i64)chunk) return false;
-        virt += chunk;
-        off += chunk;
-        len -= chunk;
-    }
-    return true;
-}
-
 i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out) {
     u64 size = node->size;
     elf64_ehdr_t eh;
@@ -155,24 +138,17 @@ i32 elf_load(process_t* p, vnode_t* node, elf_info_t* out) {
         goto out;
     }
 
-    // Pass 2: map and fill. user_map hands back zeroed pages, so the .bss
-    // tail (memsz beyond filesz) needs no work. Segments are written through
-    // the kernel's direct map, so p's address space need not be loaded.
+    // Retain the executable and reserve its VMAs. No segment bytes are
+    // read here: faults fill exact file ranges and zero BSS on demand.
+    err = mm_map_image(p, node, phdrs, eh.e_phnum);
+    if (err < 0) goto out;
     u64 image_end = 0;
     err = -ENOMEM;
     for (u16 i = 0; i < eh.e_phnum; i++) {
         const elf64_phdr_t* ph = &phdrs[i];
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
 
-        u64 start = ph->p_vaddr & PAGE_MASK;
-        u64 end   = (ph->p_vaddr + ph->p_memsz + USER_PAGE_SIZE - 1) & PAGE_MASK;
-        for (u64 page = start; page < end; page += USER_PAGE_SIZE) {
-            if (!user_map(p, page, ph->p_flags & (PF_R | PF_W | PF_X))) goto out;
-        }
-        if (ph->p_filesz && !read_into(p, node, ph->p_offset, ph->p_vaddr, ph->p_filesz)) {
-            err = -EIO;
-            goto out;
-        }
+        u64 end = (ph->p_vaddr + ph->p_memsz + USER_PAGE_SIZE - 1) & PAGE_MASK;
         if (end > image_end) image_end = end;
 
         char perms[4] = {

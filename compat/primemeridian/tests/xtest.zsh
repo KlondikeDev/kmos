@@ -45,6 +45,9 @@ if [[ ! -x /usr/bin/Xfbdev ]]; then
     exit 1
 fi
 rm -f /tmp/xtest.*
+read up idle < /proc/uptime
+typeset -F x_started=$up
+say "xtest: X timing start"
 
 Xfbdev :0 -nolisten tcp -keybd keyboard -mouse mouse,,protocol=ps/2 2>/tmp/xtest.server &
 integer server=$!
@@ -61,6 +64,8 @@ xterm -geometry 80x24+${window_x}+${window_y} \
     2>/tmp/xtest.client &
 integer client=$!
 check "xterm starts a shell in its window" wait_until '[[ -s /tmp/xtest.term ]]' 200
+read up idle < /proc/uptime
+say "xtest: X startup $(( up - x_started )) seconds"
 check "with TERM=xterm" eq "$(</tmp/xtest.term)" xterm
 
 sleep 1

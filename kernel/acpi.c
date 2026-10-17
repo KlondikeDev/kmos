@@ -175,3 +175,7 @@ bool acpi_reset(void) {
     else *reset_mem = reset_value;
     return true;
 }
+
+u64 acpi_rsdp_physical(void) {
+    return rsdp_request.response ? (u64)rsdp_request.response->address : 0;
+}

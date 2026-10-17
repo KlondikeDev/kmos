@@ -68,6 +68,7 @@ struct file {
     vnode_t* node;                     // shared by every open of the same object
     char* path;                        // directories only: for readdir
     void* priv;                        // pipe state, ...
+    bool image;                        // this description pins an executable
 };
 
 // Open a path. Returns 0 and the new file, or -errno.
@@ -75,6 +76,10 @@ i32 file_open(const char* path, u32 flags, file_t** out);
 // The same, with the permission bits for O_CREAT (the umask applies).
 i32 file_open_mode(const char* path, u32 flags, u32 mode, file_t** out);
 void file_ref(file_t* f);
+// Hold an already resolved regular vnode without rechecking read permission:
+// execute-only files still need the kernel to read their loadable segments.
+i32 file_hold_node(const vnode_t* node, bool image, file_t** out);
+bool vnode_exec_busy(const vnode_t* node);
 // Is some open file using this node? (Unlinking one is refused for now.)
 bool vnode_is_open(const vnode_t* n);
 void file_unref(file_t* f);

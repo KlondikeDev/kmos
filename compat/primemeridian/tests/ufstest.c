@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -412,6 +413,9 @@ int main(int argc, char** argv) {
     say("ufstest: starting (%s)\n", mode);
     if (strcmp(mode, "verify") != 0) { phase_write(); phase_links_and_attrs(); }
     if (strcmp(mode, "write") != 0) phase_verify();
+    // The harness terminates the VM after the summary. Explicit sync makes
+    // that persistence boundary valid with a write-back disk cache.
+    CHECK("sync commits the test tree and metadata", syscall(SYS_sync) == 0);
     say("ufstest: %d passed, %d failed\n", passed, failed);
     return failed;
 }

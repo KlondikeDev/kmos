@@ -67,7 +67,9 @@
 #define SYS_MMAP        43   // (addr, len, prot, flags, fd, offset) -> addr
 #define SYS_MUNMAP      44   // (addr, len)
 #define SYS_MPROTECT    45   // (addr, len, prot)
-#define SYS_COUNT       46
+#define SYS_SYNC        46   // () -> 0 or -errno
+#define SYS_FSYNC       47   // (fd) -> 0 or -errno
+#define SYS_COUNT       48
 
 // ioctl requests on the terminal.
 #define TIOCGMODE 1          // -> TTY_MODE_* bits

@@ -67,6 +67,7 @@ t_free()          { free | grep -q Mem: }
 t_df()            { df / }
 t_mounts()        { grep -q '^tmpfs /tmp' /proc/mounts }
 t_dmesg()         { dmesg > /tmp/dmesg.txt && grep -q 'Booting Kunix' /tmp/dmesg.txt && rm /tmp/dmesg.txt }
+t_battery()       { battery | grep -q '^backend: ACPI' }
 t_env()           { env | grep -q '^PATH=' }
 
 # ---- the shell ----

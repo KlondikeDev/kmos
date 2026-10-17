@@ -19,6 +19,7 @@ void ata_print_model(void);
 bool ata_read_multi(u8 drive, u32 lba, u32 count, void* buffer);
 bool ata_write_multi(u8 drive, u32 lba, u32 count, const void* buffer);
 bool ata_flush(u8 drive);
+u64 ata_sector_count(u8 drive); // cached IDENTIFY LBA28 capacity; 0 if absent
 bool ata_present(u8 drive);         // an ATA disk (not ATAPI) answers IDENTIFY
 
 #define ATA_REG_DATA         0x1F0

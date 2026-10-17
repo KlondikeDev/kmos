@@ -26,6 +26,9 @@
 #include <klibc/string.h>
 #include <mman.h>
 #include <msr.h>
+#include <pagecache.h>
+#include <battery.h>
+#include <disk.h>
 
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PAGE_MASK     (~(USER_PAGE_SIZE - 1))
@@ -63,6 +66,7 @@ bool user_map(process_t* p, u64 virt, u32 pf_flags) {
         return false;
     }
     void* frame = pmm_alloc();
+    if (!frame) { pagecache_reclaim(); frame = pmm_alloc(); }
     if (!frame) {
         kserialoutf("usermode: out of physical memory\n");
         return false;
@@ -409,15 +413,24 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     u32 old_pages = p->user_pages;
     u64 old_brk_base = p->brk_base, old_brk = p->brk;
     u64 old_arg_start = p->arg_start, old_arg_end = p->arg_end;
+    u32 old_nvmas = p->nvmas;
+    vma_t* old_vmas = kmalloc(sizeof(p->vmas));
+    if (!old_vmas) return -ENOMEM;
+    memcpy(old_vmas, p->vmas, old_nvmas * sizeof(*old_vmas));
     u64 new_space = vmm_create_space();
-    if (!new_space) return -ENOMEM;
+    if (!new_space) { kfree(old_vmas); return -ENOMEM; }
     p->space = new_space;
     p->user_pages = 0;
+    p->nvmas = 0;
 
     registers_t frame;
     i32 r = load_into(p, path, args->argc, args->argv, args->envc, args->envp, &frame);
     if (r < 0) {
         vmm_destroy_space(new_space);
+        mm_release(p);
+        memcpy(p->vmas, old_vmas, old_nvmas * sizeof(*old_vmas));
+        p->nvmas = old_nvmas;
+        kfree(old_vmas);
         p->space = old_space;
         p->user_pages = old_pages;
         p->brk_base = old_brk_base;
@@ -430,8 +443,9 @@ i32 usermode_exec(const char* path, const user_args_t* args, registers_t* regs) 
     // Point of no return: the old image goes away.
     vmm_switch(new_space);
     vmm_destroy_space(old_space);
+    mm_release_backings(old_vmas, old_nvmas);
+    kfree(old_vmas);
     apply_exec_creds(p);
-    p->nvmas = 0;
     set_name(p, path);
     set_exe(p, path);
     fd_close_on_exec(p);
@@ -481,6 +495,9 @@ void usermode_run_and_wait(i32 pid) {
     while (proc_by_pid(pid)) {
         sched_reap_orphans();
         __asm__ volatile("hlt");
+        disk_cache_poll();
+        battery_poll();
+        sched_maintenance_done();
     }
 }
 
@@ -517,6 +534,7 @@ void usermode_fault(const char* reason, registers_t* regs) {
     // resolved and the instruction retried. (Error code bit 1: a write.)
     if (regs->int_no == 14 && mm_fault(cr2, (regs->err_code & 2) != 0)) return;
     i32 sig = signal_for_fault(regs->int_no);
+    if (regs->int_no == 14 && p->map_fault_signal == SIGBUS) sig = SIGBUS;
 
     // A fault cannot be ignored or blocked: retrying the instruction would
     // just fault again forever. Like Linux, force the default in that case.

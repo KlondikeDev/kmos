@@ -41,6 +41,7 @@
 #include <gdt.h>
 #include <serial.h>
 #include <klog.h>
+#include <disk.h>
 #include <klibc/string.h>
 #include "linux.h"
 
@@ -1413,9 +1414,10 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_utimes:      r = l_utimes(a, b, true); break;
         case LNX_utimensat:   r = l_utimensat((i64)a, b, c, d); break;
         case LNX_fsync: case LNX_fdatasync:
+                              r = fd_get(p, (i32)a) ? vfs_sync(fd_get(p, (i32)a)->node) : -EBADF; break;
         case LNX_flock: case LNX_fadvise64:
                               r = fd_get(p, (i32)a) ? 0 : -EBADF; break;
-        case LNX_sync:        r = 0; break;               // writes are synchronous already
+        case LNX_sync:        r = vfs_sync_all(); break;
         case LNX_reboot:      r = l_reboot(a, b, c); break;
         case LNX_syslog:      r = l_syslog(a, b, c); break;
         case LNX_sethostname: r = l_sethostname(a, b); break;
@@ -1575,6 +1577,7 @@ static void pm_dispatch(registers_t* regs) {
 // Entered from pm_syscall_entry (entry.s) with the caller's full frame.
 void pm_syscall(registers_t* regs) {
     pm_dispatch(regs);
+    disk_cache_poll();
     signal_deliver_from(regs, true);
     // A call that swapped in a temporary signal mask (sigsuspend, ppoll,
     // pselect6) is over: put the caller's back, unless a handler frame

@@ -24,6 +24,7 @@ Read this first. Then read `LARGELANGUAGEMODELS.TXT` and `HabilisPlan.txt`.
 
 Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 
+- **Kunix has its own native syscall ABI.** Compatibility personalities translate their ABIs onto shared kernel services.
 - **Prime Meridian** is the Linux ABI. It runs unmodified static Linux/musl binaries.
 - **Inferno** (planned) is a BSD ABI.
 - **Habilis** is a kernel-agnostic init system.
@@ -58,7 +59,7 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
   - A termios tty layer and a VT100/ANSI emulator on the framebuffer console (TERM=linux; fast scrolling through a ring buffer).
   - Unix98 ptys.
 - **IPC:** pipes, Unix domain sockets (`SCM_RIGHTS`, `SO_PEERCRED`, abstract names), `poll`/`select`.
-- **Memory:** mmap, munmap and mprotect (anonymous, file-backed copy-in, MAP_SHARED, device memory).
+- **Memory:** mmap, munmap and mprotect (anonymous, demand-paged private files/ELF, MAP_SHARED anonymous, device memory).
 - **Prime Meridian:** about 150 Linux syscalls; static musl programs run.
   - zsh 5.9.2 is the login shell; busybox provides everything else.
 - **Habilis:** `/sbin/init` with services in `/etc/habilis/*.service` and busybox `login` on the console.
@@ -115,13 +116,31 @@ grep -E " error|warning:" ~/.cache/build.log | grep -v RWX
 
 | Suite | What it tests | Checks |
 |---|---|---|
-| `ktest` | Native syscalls | 107 |
+| `ktest` | Native syscalls | 109 |
 | `pmtest` | Linux ABI via musl | 103 |
-| `pmsmoke` | zsh and busybox, as a person uses them | 45 |
+| `pmsmoke` | zsh and busybox, as a person uses them | 46 |
 | `permtest` | Users and permissions | 15 |
 | `fbtest` | Framebuffer, mouse, raw keyboard | 27 |
 | `xtest` | X end to end | 9 |
-| `ufs` | Writes, reboots, verifies, then runs host `ufsdiag.py` and FreeBSD `fsck_ffs` | 42 + 8 |
+| `vmtest` | Lazy file/ELF mappings, COW, backing lifetime, EOF and failed exec | 17 |
+| `ufs` | Writes, reboots, verifies, then runs host `ufsdiag.py` and FreeBSD `fsck_ffs` | 43 + 9 |
+
+Host sanitizer tests run with `python3 buildutils/test_host.py`. They exercise
+production block/page cache code, fault filling (including no-cache first writes
+and overlapping ELF BSS), battery normalization, logs and ACPI parsing.
+
+For a battery fixture, generate an SSDT and pass it to QEMU through the harness:
+
+```
+python3 buildutils/tests/battery_table.py /tmp/kunix-battery.aml
+python3 buildutils/test.py --command powertest --acpi-table /tmp/kunix-battery.aml
+python3 buildutils/tests/battery_table.py /tmp/kunix-battery-low.aml --low
+python3 buildutils/test.py --command 'powertest low' --acpi-table /tmp/kunix-battery-low.aml
+```
+
+These fixtures test the interpreter and reporting, not the laptop's EC. ACPI
+reset tests use `--machine q35`: the default `pc` firmware lacks a reset register
+and therefore uses the chipset fallback.
 
 How the harness works:
 - Each suite logs in as root, types the suite's name at the prompt, and reads `PASS`/`FAIL` lines and a `NAME: N passed, M failed` summary from `/dev/serial`.
@@ -190,7 +209,9 @@ How the harness works:
 | Drivers | `drivers/ata.c`, `keyboard.c`, `mouse.c`, `fb.c`, `tty.c`, `pty.c`, `vt.c`, `pci.c`, `pit.c`, `rtc.c`, `serial.c` |
 | Console: shadow buffer as a ring of text rows, flushed at most about 60 times a second; graphics mode | `kernel/console.c` |
 | TSC time | `kernel/time.c` |
-| Power: QEMU ACPI port, then keyboard-controller reset | `kernel/power.c` |
+| Power: firmware ACPI S5/reset, with platform fallbacks | `kernel/power.c`, `kernel/acpi.c` |
+| Battery: AML interpreter, EC and cached power status | `kernel/battery.c`, `kernel/battery_acpi.c`, `kernel/uacpi_host.c`, `vendor/uacpi/` |
+| Clean file page cache | `kernel/pagecache.c` |
 | Init | `habilis/habilis.c`, `etc/habilis/*.service` |
 | Files copied into `/etc` | `etc/` |
 | `startx` | `x11/startx` |
@@ -231,7 +252,17 @@ controls and X performance are not yet verified.
 4. **Larger screens.**
    - Allocate the console shadow buffer from the actual mode, and reject unsupported or unallocatable modes cleanly.
    - Test QEMU at 1920×1080: Limine's `resolution:` option or `-device VGA,xres=...`.
-5. **APIC (if the PIC misbehaves on hardware, and for SMP later).**
+5. **Battery and AC status.**
+   - Read live charge level, charging/discharging/full state and AC adapter status through the firmware's ACPI battery methods (`_BIX`/`_BIF`, `_BST`, `_PSR`) and embedded controller.
+   - Expose the information through shared kernel services and a native Kunix `battery` command, accessible alongside the compatibility ABIs.
+   - Report missing or unknown readings honestly, and warn when a discharging battery is low.
+   - This needs AML evaluation and EC access beyond the literal S5 package parser. Test real readings on the T14.
+   - Implemented with uACPI 7.0.0, bounded polling EC I/O, 30-second samples,
+     `/proc/battery` and native `/bin/battery`. The interpreter runs in PID 0;
+     SCI work is polled with its PIC line masked. Firmware fixtures verify
+     discovery, charge, units, AC state and low warnings. Real T14 readings
+     and EC behavior are still pending; this is not suspend/resume support.
+6. **APIC (if the PIC misbehaves on hardware, and for SMP later).**
    - Parse the MADT; enable the local APIC and the IO-APIC.
    - Route IRQ 1, 12 and the timer.
    - Calibrate the local APIC timer against the PIT or HPET.
@@ -241,9 +272,32 @@ controls and X performance are not yet verified.
 - `dmesg` works.
 - `poweroff` turns off both QEMU and the T14, and `reboot` restarts both.
 - X is noticeably faster on the T14.
+- Battery charge/charging/AC status updates on the T14, and low-battery warnings work.
 - All suites pass.
 
 ### Phase 2: a disk cache and demand paging (about 1–2 sessions)
+
+**Implemented (2026-10-16):** RAM-sized 4 KiB LRU write-back cache (up to
+32 MiB), deferred five-second flushing, native `sync`/`fsync` and Linux
+sync calls, and shutdown ordering that flushes UFS data before marking it
+clean. FAT32 now uses the same disk layer. `/proc/cache` exposes statistics.
+A bounded clean file cache (up to 16 MiB) backs private file mappings and
+ELF segments; faults load only touched pages, preserve COW and backing
+lifetimes, zero partial pages/BSS, and report inaccessible file pages as
+SIGBUS. Exec retains the old image on failure and refuses writes to running
+executables. Limits are now 1 GiB resident pages and a 512 MiB ELF image.
+
+A controlled BIOS/PC QEMU comparison (256 MiB RAM, identical userland and
+initial disk images) measured console startup at **7.612 → 6.210 seconds**
+and X plus xterm readiness at **2.300 → 1.286 seconds**. X is timed between
+serial markers on the host at 10 ms polling intervals: guest PIT-based uptime
+misses time during long IRQ-off disk operations and gave misleading results.
+These are single-run QEMU measurements; T14 performance remains unmeasured.
+
+All eight suites pass (378 checks), including UFS write/reboot verification and
+a clean `fsck_ffs` result. Host sanitizer checks pass. Native/Linux sync calls,
+cache failure retry, mapped-file lifetime, private COW, sparse large mappings,
+192 MiB ELF BSS residency, EOF SIGBUS and exec rollback have regression tests.
 
 1. **Block cache in the disk layer.**
    - 4 KiB blocks, LRU, write-back with a periodic flush and flush on sync/shutdown, sized from free RAM.

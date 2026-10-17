@@ -125,6 +125,8 @@ void* mmap(void* addr, size_t len, int prot, int flags, int fd, off_t off) {
     return check(r) == -1 ? MAP_FAILED : (void*)r;
 }
 int munmap(void* addr, size_t len) { return (int)check(syscall3(SYS_MUNMAP, (long)addr, (long)len, 0)); }
+int fsync(int fd) { return (int)check(syscall3(SYS_FSYNC, fd, 0, 0)); }
+int sync(void) { return (int)check(syscall3(SYS_SYNC, 0, 0, 0)); }
 int mprotect(void* addr, size_t len, int prot) {
     return (int)check(syscall3(SYS_MPROTECT, (long)addr, (long)len, prot));
 }

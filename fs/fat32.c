@@ -6,7 +6,7 @@
 
 #include <types.h>
 #include <fat32.h>
-#include <ata.h>
+#include <disk.h>
 #include <console.h>
 #include <klibc/string.h>
 #include <vfs.h>
@@ -36,7 +36,7 @@ static char     current_path[256] = "/";
 // ---- Phase 1: mount ----
 bool fat32_init(void) {
     uint8_t sector[512];
-    if (!read_sectors(0, sector)) return false;
+    if (!disk_read(0, 0, 1, sector)) return false;
     bpb_t* bpb = (bpb_t*)sector;
 
     sectors_per_cluster = bpb->sectors_per_cluster;
@@ -68,7 +68,7 @@ uint32_t fat_next_cluster(uint32_t cluster) {
     uint32_t in_sector  = offset % 512;
 
     uint8_t buf[512];
-    if (!read_sectors(fat_sector, buf)) return FAT_CLUSTER_EOC;
+    if (!disk_read(0, fat_sector, 1, buf)) return FAT_CLUSTER_EOC;
 
     uint32_t entry = *(uint32_t*)(buf + in_sector);
     return entry & FAT_ENTRY_MASK;                // low 28 bits are the cluster
@@ -123,7 +123,7 @@ static bool dir_find(uint32_t dir_cluster, const char* name,
     while (cluster < FAT_CLUSTER_EOC) {
         uint32_t lba = cluster_to_lba(cluster);
         for (uint32_t s = 0; s < sectors_per_cluster; s++) {
-            if (!read_sectors(lba + s, buf)) return false;
+            if (!disk_read(0, lba + s, 1, buf)) return false;
             dirent_t* e = (dirent_t*)buf;
             for (int i = 0; i < DIRENTS_PER_SECTOR; i++) {
                 if (e[i].name[0] == FAT_DIRENT_END) return false;  // end of dir
@@ -207,7 +207,7 @@ static void fat32_list_dir(uint32_t dir_cluster) {
     while (cluster < FAT_CLUSTER_EOC) {
         uint32_t lba = cluster_to_lba(cluster);
         for (uint32_t s = 0; s < sectors_per_cluster; s++) {
-            if (!read_sectors(lba + s, buf)) return;
+            if (!disk_read(0, lba + s, 1, buf)) return;
             dirent_t* e = (dirent_t*)buf;
             for (int i = 0; i < DIRENTS_PER_SECTOR; i++) {
                 if (e[i].name[0] == FAT_DIRENT_END) return;
@@ -302,7 +302,7 @@ i32 fat32_read_file(const char* path, void* buffer, uint32_t max_bytes) {
     while (cluster < FAT_CLUSTER_EOC && copied < limit) {
         uint32_t lba = cluster_to_lba(cluster);
         for (uint32_t s = 0; s < sectors_per_cluster && copied < limit; s++) {
-            if (!read_sectors(lba + s, buf)) return -1;
+            if (!disk_read(0, lba + s, 1, buf)) return -1;
             for (int i = 0; i < 512 && copied < limit; i++) {
                 dest[copied++] = buf[i];
             }
@@ -359,7 +359,7 @@ static i32 dir_slots(uint32_t dir_cluster, slot_visit_t visit, void* ctx) {
     while (cluster_valid(cluster)) {
         uint32_t lba = cluster_to_lba(cluster);
         for (uint32_t s = 0; s < sectors_per_cluster; s++) {
-            if (!read_sectors(lba + s, buf)) return -EIO;
+            if (!disk_read(0, lba + s, 1, buf)) return -EIO;
             dirent_t* e = (dirent_t*)buf;
             for (int i = 0; i < DIRENTS_PER_SECTOR; i++, slot++) {
                 if (e[i].name[0] == FAT_DIRENT_END) return 0;
@@ -443,7 +443,7 @@ static i64 fat_read(vnode_t* node, u64 off, void* buf, u64 len) {
     while (done < len) {
         if (!cluster_valid(cluster)) return -EIO;
         uint32_t within = (uint32_t)(pos % 512);
-        if (!read_sectors(cluster_to_lba(cluster) + (uint32_t)(pos / 512), sector)) return -EIO;
+        if (!disk_read(0, cluster_to_lba(cluster) + (uint32_t)(pos / 512), 1, sector)) return -EIO;
         u64 n = 512 - within;
         if (n > len - done) n = len - done;
         for (u64 i = 0; i < n; i++) out[done + i] = sector[within + i];
@@ -486,10 +486,10 @@ static bool fat_set(uint32_t cluster, uint32_t value) {
     uint8_t buf[512];
     for (uint32_t copy = 0; copy < fat_count; copy++) {
         uint32_t lba = fat_start + copy * fat_sectors + offset / 512;
-        if (!read_sectors(lba, buf)) return false;
+        if (!disk_read(0, lba, 1, buf)) return false;
         uint32_t* entry = (uint32_t*)(buf + offset % 512);
         *entry = (*entry & ~FAT_ENTRY_MASK) | (value & FAT_ENTRY_MASK);  // keep the top 4 bits
-        if (!write_sectors(lba, buf)) return false;
+        if (!disk_write(0, lba, 1, buf)) return false;
     }
     return true;
 }
@@ -499,7 +499,7 @@ static bool zero_cluster(uint32_t cluster) {
     memset(zeros, 0, sizeof(zeros));
     uint32_t lba = cluster_to_lba(cluster);
     for (uint32_t s = 0; s < sectors_per_cluster; s++) {
-        if (!write_sectors(lba + s, zeros)) return false;
+        if (!disk_write(0, lba + s, 1, zeros)) return false;
     }
     return true;
 }
@@ -512,11 +512,11 @@ static void fsinfo_invalidate(void) {
     if (done || !fsinfo_sector) return;
     done = true;
     uint8_t buf[512];
-    if (!read_sectors(fsinfo_sector, buf)) return;
+    if (!disk_read(0, fsinfo_sector, 1, buf)) return;
     if (*(uint32_t*)buf != 0x41615252 || *(uint32_t*)(buf + 484) != 0x61417272) return;
     *(uint32_t*)(buf + 488) = 0xFFFFFFFF;    // free count: unknown
     *(uint32_t*)(buf + 492) = 0xFFFFFFFF;    // next free hint: unknown
-    write_sectors(fsinfo_sector, buf);
+    disk_write(0, fsinfo_sector, 1, buf);
 }
 
 // Find a free cluster, mark it as the end of a chain, zero it. 0 if full.
@@ -531,7 +531,7 @@ static uint32_t alloc_cluster(void) {
         for (; c < end; c++) {
             uint32_t sector = fat_start + (c * 4) / 512;
             if (sector != cached) {
-                if (!read_sectors(sector, buf)) return 0;
+                if (!disk_read(0, sector, 1, buf)) return 0;
                 cached = sector;
             }
             if ((*(uint32_t*)(buf + (c * 4) % 512) & FAT_ENTRY_MASK) == 0) {
@@ -574,7 +574,7 @@ static i32 dirent_sync(const vnode_t* node) {
     uint32_t lba, index;
     if (!slot_location((uint32_t)(node->aux >> 32), (uint32_t)node->aux, &lba, &index)) return -EIO;
     uint8_t buf[512];
-    if (!read_sectors(lba, buf)) return -EIO;
+    if (!disk_read(0, lba, 1, buf)) return -EIO;
     dirent_t* e = (dirent_t*)buf + index;
     e->cluster_hi = (uint16_t)(node->id >> 16);
     e->cluster_lo = (uint16_t)(node->id & 0xFFFF);
@@ -582,7 +582,7 @@ static i32 dirent_sync(const vnode_t* node) {
     uint32_t now = fat_now();
     e->write_date = e->access_date = (uint16_t)(now >> 16);
     e->write_time = (uint16_t)now;
-    return write_sectors(lba, buf) ? 0 : -EIO;
+    return disk_write(0, lba, 1, buf) ? 0 : -EIO;
 }
 
 // "readme.txt" -> "README  TXT". Fails for anything that is not a plain 8.3
@@ -617,7 +617,7 @@ static i32 free_slot(uint32_t dir_cluster, uint32_t* slot_out) {
     while (cluster_valid(cluster)) {
         uint32_t lba = cluster_to_lba(cluster);
         for (uint32_t s = 0; s < sectors_per_cluster; s++) {
-            if (!read_sectors(lba + s, buf)) return -EIO;
+            if (!disk_read(0, lba + s, 1, buf)) return -EIO;
             dirent_t* e = (dirent_t*)buf;
             for (int i = 0; i < DIRENTS_PER_SECTOR; i++, slot++) {
                 if (e[i].name[0] == FAT_DIRENT_END || e[i].name[0] == FAT_DIRENT_DELETED) {
@@ -640,9 +640,9 @@ static i32 write_slot(uint32_t dir_cluster, uint32_t slot, const dirent_t* entry
     uint32_t lba, index;
     if (!slot_location(dir_cluster, slot, &lba, &index)) return -EIO;
     uint8_t buf[512];
-    if (!read_sectors(lba, buf)) return -EIO;
+    if (!disk_read(0, lba, 1, buf)) return -EIO;
     ((dirent_t*)buf)[index] = *entry;
-    return write_sectors(lba, buf) ? 0 : -EIO;
+    return disk_write(0, lba, 1, buf) ? 0 : -EIO;
 }
 
 static void make_entry(dirent_t* e, const uint8_t name[11], uint8_t attr, uint32_t cluster) {
@@ -733,9 +733,9 @@ static i64 write_range(vnode_t* node, u64 off, const uint8_t* src, u64 len, bool
         u64 n = 512 - within;
         if (n > len - done) n = len - done;
         // Partial sectors need the rest of the sector preserved.
-        if (n != 512 && !read_sectors(lba, sector)) return -EIO;
+        if (n != 512 && !disk_read(0, lba, 1, sector)) return -EIO;
         for (u64 i = 0; i < n; i++) sector[within + i] = src ? src[done + i] : 0;
-        if (!write_sectors(lba, sector)) return -EIO;
+        if (!disk_write(0, lba, 1, sector)) return -EIO;
         done += n;
     }
     return (i64)done;
@@ -809,9 +809,9 @@ static bool find_slot(dirent_t* e, uint32_t slot, void* ctx) {
 static bool mark_deleted(uint32_t dir_cluster, uint32_t slot) {
     uint32_t lba, index;
     uint8_t buf[512];
-    if (!slot_location(dir_cluster, slot, &lba, &index) || !read_sectors(lba, buf)) return false;
+    if (!slot_location(dir_cluster, slot, &lba, &index) || !disk_read(0, lba, 1, buf)) return false;
     ((dirent_t*)buf)[index].name[0] = FAT_DIRENT_DELETED;
-    return write_sectors(lba, buf);
+    return disk_write(0, lba, 1, buf);
 }
 
 static i32 fat_unlink(const vnode_t* dir, const char* name) {
@@ -834,11 +834,11 @@ static i32 fat_unlink(const vnode_t* dir, const char* name) {
     for (uint32_t s = f.slot; s > 0; s--) {
         uint32_t lba, index;
         uint8_t buf[512];
-        if (!slot_location(dir_cluster, s - 1, &lba, &index) || !read_sectors(lba, buf)) break;
+        if (!slot_location(dir_cluster, s - 1, &lba, &index) || !disk_read(0, lba, 1, buf)) break;
         dirent_t* e = (dirent_t*)buf + index;
         if (e->attr != FAT_ATTR_LONG_NAME || e->name[0] == FAT_DIRENT_DELETED) break;
         e->name[0] = FAT_DIRENT_DELETED;
-        if (!write_sectors(lba, buf)) break;
+        if (!disk_write(0, lba, 1, buf)) break;
     }
     free_chain((uint32_t)node.id);
     return 0;
@@ -852,7 +852,7 @@ static bool is_ancestor(uint32_t cluster, uint32_t dir) {
         if (dir == root_cluster) return false;
         // ".." is filtered out of normal lookups; it is always slot 1.
         uint8_t buf[512];
-        if (!read_sectors(cluster_to_lba(dir), buf)) return false;
+        if (!disk_read(0, cluster_to_lba(dir), 1, buf)) return false;
         dirent_t* e = (dirent_t*)buf + 1;
         if (e->name[0] != '.' || e->name[1] != '.') return false;
         uint32_t up = ((uint32_t)e->cluster_hi << 16) | e->cluster_lo;
@@ -899,23 +899,23 @@ static i32 fat_rename(const vnode_t* olddir, const char* oldname,
     for (uint32_t s = f.slot; s > 0; s--) {                  // and its long name
         uint32_t lba, index;
         uint8_t buf[512];
-        if (!slot_location(from, s - 1, &lba, &index) || !read_sectors(lba, buf)) break;
+        if (!slot_location(from, s - 1, &lba, &index) || !disk_read(0, lba, 1, buf)) break;
         dirent_t* lfn = (dirent_t*)buf + index;
         if (lfn->attr != FAT_ATTR_LONG_NAME || lfn->name[0] == FAT_DIRENT_DELETED) break;
         lfn->name[0] = FAT_DIRENT_DELETED;
-        if (!write_sectors(lba, buf)) break;
+        if (!disk_write(0, lba, 1, buf)) break;
     }
 
     // A directory that changed parents must have its ".." repointed.
     if (is_dir && to != from && cluster_valid(moving)) {
         uint32_t lba, index;
         uint8_t buf[512];
-        if (slot_location(moving, 1, &lba, &index) && read_sectors(lba, buf)) {
+        if (slot_location(moving, 1, &lba, &index) && disk_read(0, lba, 1, buf)) {
             dirent_t* dd = (dirent_t*)buf + index;
             uint32_t parent = to == root_cluster ? 0 : to;
             dd->cluster_hi = (uint16_t)(parent >> 16);
             dd->cluster_lo = (uint16_t)(parent & 0xFFFF);
-            write_sectors(lba, buf);
+            disk_write(0, lba, 1, buf);
         }
     }
     return 0;

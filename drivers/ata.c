@@ -236,3 +236,19 @@ bool ata_present(u8 drive) {
     for (int i = 0; i < 256; i++) identify_data[i] = inw(io);
     return true;
 }
+
+// LBA28 capacity is discovered once, alongside IDENTIFY, and never probed on
+// cache hits. Zero also remembers an absent device.
+u64 ata_sector_count(u8 drive) {
+    static u64 sectors[4];
+    static bool probed[4];
+    if (drive >= 4) return 0;
+    if (!probed[drive]) {
+        probed[drive] = true;
+        if (ata_present(drive)) {
+            u64 n = (u64)identify_data[60] | ((u64)identify_data[61] << 16);
+            sectors[drive] = n > (1ULL << 28) ? (1ULL << 28) : n;
+        }
+    }
+    return sectors[drive];
+}
