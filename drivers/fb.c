@@ -34,6 +34,14 @@ const fb_info_t* fb_info(void) {
     return &info;
 }
 
+u64 fb_cache_flags(u64 physical) {
+    const fb_info_t* fb = fb_info();
+    if (physical < fb->phys || physical - fb->phys >= fb->size) return 0;
+    // Limine configures PAT[5] as WC and uses it for the framebuffer.
+    // Reuse its actual mapping rather than create a WB alias of WC memory.
+    return vmm_cache_flags(vmm_kernel_space(), framebuffer_addr + physical - fb->phys);
+}
+
 i64 fb_read(u64 off, void* buf, u64 len) {
     u64 size = (u64)fb_pitch * fb_height;
     if (off >= size) return 0;

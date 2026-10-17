@@ -116,8 +116,8 @@ grep -E " error|warning:" ~/.cache/build.log | grep -v RWX
 | Suite | What it tests | Checks |
 |---|---|---|
 | `ktest` | Native syscalls | 107 |
-| `pmtest` | Linux ABI via musl | 94 |
-| `pmsmoke` | zsh and busybox, as a person uses them | 44 |
+| `pmtest` | Linux ABI via musl | 103 |
+| `pmsmoke` | zsh and busybox, as a person uses them | 45 |
 | `permtest` | Users and permissions | 15 |
 | `fbtest` | Framebuffer, mouse, raw keyboard | 27 |
 | `xtest` | X end to end | 9 |
@@ -199,11 +199,21 @@ How the harness works:
 
 ## 4. The roadmap
 
-The phases are in recommended order. Each lists what "done" means. Sizes are rough, in focused working sessions.
+The phases follow the owner's chosen order: T14 basics, disk cache and demand paging, NVMe and the installer, networking and SSH, self-hosting, desktop, USB, threads and supporting kernel capabilities, Claude Code/Codex, and finally arf. Each lists what "done" means. Sizes are rough, in focused working sessions.
 
 ### Phase 1: T14 hardware basics (about 1 session)
 
 The live image boots the T14. Make it pleasant and debuggable there.
+
+**Implemented and verified in QEMU (2026-10-16); T14 checks pending:** the log ring, `syslog` reads,
+`/proc/kmsg`, panic log display, ACPI S5/reset, consistent framebuffer cache
+attributes and dynamically allocated console storage are implemented. All seven
+regression suites pass, including a clean `fsck_ffs` result. BIOS and UEFI ACPI
+shutdown/reset checks pass; framebuffer and X checks pass at 1920×1080 and
+2560×1440, with an additional UEFI framebuffer check at 1920×1080. Host sanitizer
+checks pass (`python3 buildutils/test_host.py`), and the panic display was checked
+visually. The updated live image still needs testing on the T14; laptop power
+controls and X performance are not yet verified.
 
 1. **Kernel log you can read without serial.**
    - Keep a ring buffer (64 KiB or so) of everything `klog` and `kserialout` print.
@@ -215,11 +225,11 @@ The live image boots the T14. Make it pleasant and debuggable there.
    - Reset: the FADT reset register; fall back to port 0xCF9, then the keyboard controller.
    - Keep QEMU's 0x604 path working.
 3. **Write-combining framebuffer.**
-   - Program the PAT MSR (0x277) so one PAT entry is WC.
-   - Map the framebuffer (kernel and user `/dev/fb0` mappings) with that entry.
-   - At 1920×1080, plain write-back mapping of video memory is slow.
+   - Limine already configures PAT entry 5 as WC and uses it for the kernel's framebuffer mapping.
+   - Preserve those cache attributes in user `/dev/fb0` mappings, including across fork and `mprotect`, so both mappings use the same memory type.
+   - Check X performance on the T14 at 1920×1080.
 4. **Larger screens.**
-   - The console shadow buffer is a static 1920×1080×4 array; size it from the real mode (allocate it), or at least refuse bigger modes cleanly.
+   - Allocate the console shadow buffer from the actual mode, and reject unsupported or unallocatable modes cleanly.
    - Test QEMU at 1920×1080: Limine's `resolution:` option or `-device VGA,xres=...`.
 5. **APIC (if the PIC misbehaves on hardware, and for SMP later).**
    - Parse the MADT; enable the local APIC and the IO-APIC.
@@ -289,22 +299,16 @@ The live image boots the T14. Make it pleasant and debuggable there.
 - `ssh root@kunix` works from another machine.
 - New `nettest` suite passes.
 
-### Phase 5: arf, the package manager (about 1–2 sessions; can start before networking)
+### Phase 5: self-hosting
 
-Owner's choice: the name is **arf**, packages are **`.pkg`** files.
+Build Kunix from inside Kunix through Prime Meridian.
 
-- **Format:** a `.pkg` is a compressed tar (gzip now, zstd later) containing the files plus `+MANIFEST`:
-  - name, version, architecture, dependencies
-  - the file list with SHA-256 hashes and modes
-  - `origin`: `kunix` | `linux` | `gnu` | ... This "breed" tag feeds the Kunix analyzer.
-- **Database:** `/var/db/arf/` holds installed manifests.
-- **Commands:** `arf install FILE|NAME`, `arf remove`, `arf list`, `arf info`, `arf verify`, `arf files`, `arf owner PATH`.
-- **Signing from day one:** an ed25519-signed repository index (`index.sig`), so plain HTTP mirrors are safe before arf speaks TLS.
-- **Written in C** against musl (moves to klibc later). Small.
-- **Build integration:** build.sh packages zsh, busybox and X as `.pkg` files and installs them into the root image with arf, so the image is "base plus packages".
-- **Hosting:** after Phase 4, `arf fetch` and `arf update`. Hosting is static files: an index plus `.pkg` files on any web server or GitHub Releases.
+1. **Development tools.** Bring up a musl-hosted C compiler, assembler, linker and `make`, plus the shell and utilities needed by the build scripts.
+2. **Kernel build.** Provide an `x86_64-elf` toolchain that runs on Kunix and adapt the build scripts to use it.
+3. **Image build.** Port the remaining build dependencies needed to produce the userland, filesystem images and bootable ISOs on Kunix.
+4. **Build workflow.** Use persistent storage from Phase 3 and networking/SSH from Phase 4 to keep sources, fetch dependencies and transfer builds.
 
-**Done when:** the root image is built from packages, `arf verify` passes, and later `arf install jwm` downloads, checks and installs.
+**Done when:** Kunix can build its kernel, userland and bootable image from source, and the resulting image boots and passes the test suites when tested from the development machine.
 
 ### Phase 6: desktop (each item about 0.5–1 session unless noted)
 
@@ -319,7 +323,7 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 6. **CDE** (several sessions). Needs:
    - networking (ToolTalk uses Sun RPC plus rpcbind on loopback)
    - a C++ compiler for musl (build musl-cross-make's gcc/g++)
-   - realistically, shared libraries (Phase 7)
+   - realistically, shared libraries (Phase 8.3); revisit CDE after that support lands
    - probably glibc-isms fixed
 7. **Wi-Fi** (much later; the T14 has Realtek or Intel Wi-Fi). Hard: firmware loading, 802.11, WPA.
 
@@ -329,7 +333,11 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 - The default root cursor is invisible.
 - kdrive rejects mouse jumps over 50 px until the protocol is "proven" (patched to skip when a protocol is given).
 
-### Phase 7: kernel capabilities for big software (several sessions)
+### Phase 7: USB (about 2–3 sessions)
+
+xHCI host controller driver, then HID (keyboard and mouse, boot protocol first), then mass storage (BOT, then UAS) through the disk layer. The T14's USB-C and USB-A ports and the docking story depend on this. The internal keyboard and TrackPoint are PS/2 and already work.
+
+### Phase 8: threads and supporting kernel capabilities (several sessions)
 
 1. **Threads:**
    - `clone(CLONE_VM|CLONE_THREAD|CLONE_SIGHAND|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID)`.
@@ -345,25 +353,40 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 4. **SMP:** after the APIC, bring up the other cores (locking audit first; the kernel assumes one CPU and uses `irq_save` as its lock).
 5. **Real timer and clock work:** HPET or APIC timer, tickless idle (battery life on the T14).
 
-### Phase 8: USB (about 2–3 sessions)
+### Phase 9: Claude Code and Codex on Kunix (after phases 2, 4 and 8)
 
-xHCI host controller driver, then HID (keyboard and mouse, boot protocol first), then mass storage (BOT, then UAS) through the disk layer. The T14's USB-C and USB-A ports and the docking story depend on this. The internal keyboard and TrackPoint are PS/2 and already work.
-
-### Phase 9: Claude Code on Kunix (after phases 2, 4 and 7)
-
-- Run it **through Prime Meridian**, not as a native port.
-- It ships as a single native binary (a JavaScript runtime with the app bundled in); there may be a musl build.
-- Check whether that binary is static or dynamic. If dynamic, Phase 7.3 is a prerequisite.
-- It needs:
-  - TCP plus TLS (the runtime brings its own TLS)
+- Run Claude Code and the Codex CLI **through Prime Meridian**.
+- Check the available Linux builds, musl compatibility and runtime requirements for each tool when this phase begins.
+- Check whether each binary is static or dynamic. Dynamic binaries require Phase 8.3.
+- Check each tool's needs for:
+  - TCP plus TLS (verify how each tool supplies TLS)
   - DNS
   - threads
   - epoll, eventfd, timerfd
   - a large address space
   - `git` and `ripgrep` (port them)
-- The console's 8×16 font is CP437-only, so run it in xterm with a Unicode font (or add UTF-8 to `drivers/vt.c`).
+- The console's 8×16 font is CP437-only, so run the tools in xterm with a Unicode font (or add UTF-8 to `drivers/vt.c`).
 
-### Phase 10: breeds, installer polish and the analyzer (long term)
+**Done when:** Claude Code and the Codex CLI can authenticate and complete a coding task from Kunix.
+
+### Phase 10: arf, the package manager (about 1–2 sessions)
+
+Owner's choice: the name is **arf**, packages are **`.pkg`** files.
+
+- **Format:** a `.pkg` is a compressed tar (gzip now, zstd later) containing the files plus `+MANIFEST`:
+  - name, version, architecture, dependencies
+  - the file list with SHA-256 hashes and modes
+  - `origin`: `kunix` | `linux` | `gnu` | ... This "breed" tag feeds the Kunix analyzer.
+- **Database:** `/var/db/arf/` holds installed manifests.
+- **Commands:** `arf install FILE|NAME`, `arf remove`, `arf list`, `arf info`, `arf verify`, `arf files`, `arf owner PATH`.
+- **Signing from day one:** an ed25519-signed repository index (`index.sig`), so plain HTTP mirrors are safe before arf speaks TLS.
+- **Written in C** against musl (moves to klibc later). Small.
+- **Build integration:** build.sh packages zsh, busybox and X as `.pkg` files and installs them into the root image with arf, so the image is "base plus packages".
+- **Hosting:** `arf fetch` and `arf update`. Hosting is static files: an index plus `.pkg` files on any web server or GitHub Releases.
+
+**Done when:** the root image is built from packages, `arf verify` passes, and later `arf install jwm` downloads, checks and installs.
+
+### Longer-term ideas: breeds, installer polish and the analyzer
 
 - **Breeds in the NT-style installer:** Poodle, Bernard (default), Newfoundland, and a fourth to be named.
 - **klibc and kutils:** a native libc and utilities for Poodle.

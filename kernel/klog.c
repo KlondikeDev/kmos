@@ -9,6 +9,38 @@
 #include <pit.h>
 #include <stdarg.h>
 #include <itoa.h>
+#include <io.h>
+
+// Retain early boot and serial-only diagnostics even without a UART. The
+// ring needs no allocator and never calls back into either output path.
+static char messages[KMSG_CAPACITY];
+static u64 message_end;
+
+void kmsg_putc(char c) {
+    u64 irq = irq_save();
+    messages[message_end++ % KMSG_CAPACITY] = c;
+    irq_restore(irq);
+}
+
+u64 kmsg_read(u64 off, void* buf, u64 len) {
+    u64 irq = irq_save();
+    u64 n = message_end < KMSG_CAPACITY ? message_end : KMSG_CAPACITY;
+    u64 start = message_end - n;
+    if (off >= n) len = 0;
+    else if (len > n - off) len = n - off;
+    for (u64 i = 0; i < len; i++) ((char*)buf)[i] = messages[(start + off + i) % KMSG_CAPACITY];
+    irq_restore(irq);
+    return len;
+}
+
+u64 kmsg_tail(void* buf, u64 len) {
+    u64 irq = irq_save();
+    u64 n = message_end < KMSG_CAPACITY ? message_end : KMSG_CAPACITY;
+    if (len > n) len = n;
+    u64 result = kmsg_read(n - len, buf, len);
+    irq_restore(irq);
+    return result;
+}
 
 
 kernel_logs_t log_messages[4] = {

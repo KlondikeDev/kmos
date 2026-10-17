@@ -30,6 +30,7 @@
 #include <sys/random.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/klog.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -89,6 +90,37 @@ static void test_basics(void) {
     CHECK("strtod", strtod("1.5e3", NULL) == 1500.0);
     unsigned char r[32] = { 0 };
     CHECK("getrandom", getrandom(r, sizeof(r), 0) == sizeof(r));
+}
+
+static void test_kernel_log(void) {
+    int size = klogctl(10, NULL, 0);
+    CHECK("kernel log has a 64 KiB buffer", size == 65536);
+    char* buf = malloc(65537);
+    if (!buf) { CHECK("allocate kernel log buffer", 0); return; }
+    int n = klogctl(3, buf, 65536);
+    if (n >= 0 && n <= 65536) buf[n] = 0;
+    CHECK("syslog reads the boot log", n > 0 && n <= 65536 && strstr(buf, "Booting Kunix"));
+    char tail[8];
+    n = klogctl(3, buf, 65536);
+    int short_n = klogctl(3, tail, sizeof(tail));
+    CHECK("syslog short read returns the newest bytes", n >= 8 && short_n == 8 &&
+          !memcmp(tail, buf + n - 8, 8));
+    // CHECK itself writes to /dev/serial, so take two reads without printing.
+    n = klogctl(3, buf, 65536);
+    int again = klogctl(3, buf, 65536);
+    CHECK("syslog READ_ALL is nondestructive", n > 0 && n == again);
+    CHECK("syslog zero length", klogctl(3, NULL, 0) == 0);
+    errno = 0;
+    CHECK("syslog rejects negative length", klogctl(3, buf, -1) == -1 && errno == EINVAL);
+    errno = 0;
+    CHECK("syslog rejects bad user pointer", klogctl(3, (char*)1, 8) == -1 && errno == EFAULT);
+    errno = 0;
+    CHECK("syslog rejects unknown action", klogctl(99, NULL, 0) == -1 && errno == EINVAL);
+    int fd = open("/proc/kmsg", O_RDONLY);
+    ssize_t got = fd >= 0 ? read(fd, buf, 65536) : -1;
+    CHECK("proc kmsg exposes the boot log", got > 0 && memmem(buf, got, "Booting Kunix", 13));
+    if (fd >= 0) close(fd);
+    free(buf);
 }
 
 static void test_memory(void) {
@@ -631,6 +663,7 @@ int main(int argc, char** argv) {
     serial = fopen("/dev/serial", "w");
     say("pmtest: starting (pid %d)\n", getpid());
     test_basics();
+    test_kernel_log();
     test_memory();
     test_files();
     test_terminal();

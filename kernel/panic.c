@@ -6,8 +6,18 @@
 #include <console.h>
 #include <serial.h>
 #include <idt.h>
+#include <klog.h>
 
 void panic(const char* reason, registers_t* regs) {
+    __asm__ volatile("cli");
+    // Reclaim the framebuffer from X before printing a fatal diagnostic.
+    // Read without allocating: the heap may be what caused the panic.
+    char recent[1025];
+    u64 n = kmsg_tail(recent, sizeof(recent) - 1);
+    recent[n] = 0;
+    console_set_graphics(false, 0);
+    terminal_clear();
+    terminal_printf(WHITE, BLACK, "Recent kernel log:\n%s\n", recent);
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     uint64_t cr2;

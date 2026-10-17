@@ -23,6 +23,7 @@ passed.
 """
 
 import argparse
+import atexit
 import os
 import re
 import socket
@@ -76,14 +77,26 @@ def main():
     ap.add_argument("--timeout", type=float, default=180, help="seconds to wait")
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
     ap.add_argument("--log", help="also save the whole serial log here")
+    ap.add_argument("--iso", help="boot a different ISO (for display mode and live image checks)")
+    ap.add_argument("--machine", default="pc", help="QEMU machine type (default pc)")
+    ap.add_argument("--firmware", help="boot with this firmware ROM, e.g. OVMF_CODE_4M.fd")
+    ap.add_argument("--firmware-vars", help="variable-store template for split OVMF firmware (copied per VM)")
+    ap.add_argument("--expect-power", choices=["off", "restart"],
+                    help="expect the command to power off or reset QEMU instead of a test summary")
     ap.add_argument("--all", action="store_true",
                     help="run every suite (" + ", ".join(SUITES) + "), each in a fresh boot")
     ap.add_argument("--suite", help="run one suite by name (as --all would)")
     args = ap.parse_args()
+    if args.firmware_vars and not args.firmware:
+        ap.error("--firmware-vars requires --firmware")
 
     def boot(command):
+        extra = ["--machine", args.machine]
+        if args.iso: extra += ["--iso", args.iso]
+        if args.firmware: extra += ["--firmware", args.firmware]
+        if args.firmware_vars: extra += ["--firmware-vars", args.firmware_vars]
         return subprocess.run([sys.executable, os.path.abspath(__file__), "--mem", args.mem,
-                               "--timeout", str(args.timeout), "--command", command]).returncode == 0
+                               "--timeout", str(args.timeout), "--command", command, *extra]).returncode == 0
 
     def run_suite(suite):
         if suite != "ufs":
@@ -102,11 +115,14 @@ def main():
         sys.exit(1 if failures else 0)
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    iso = os.path.join(root, "build/binaries/kunix-kodiak.iso")
+    iso = args.iso or os.path.join(root, "build/binaries/kunix-kodiak.iso")
     if not os.path.exists(iso):
         sys.exit(f"no ISO at {iso}: build first")
 
     work = tempfile.mkdtemp(prefix="kunix-test-")
+    # Every VM gets a private 128 MiB home disk. Retaining it after each
+    # suite fills /tmp during repeated runs; --log preserves diagnostics.
+    atexit.register(shutil.rmtree, work, ignore_errors=True)
     serial = os.path.join(work, "serial.log")
     monitor = os.path.join(work, "monitor.sock")
     drives = ["-drive", f"file={root}/disk.img,format=raw,if=ide,index=0"]
@@ -119,8 +135,17 @@ def main():
         shutil.copyfile(os.path.join(root, "home.img"), home)
         drives += ["-drive", f"file={home},format=raw,if=ide,index=3"]
 
+    extra = ["-machine", args.machine]
+    if args.firmware_vars:
+        varstore = os.path.join(work, "firmware-vars.fd")
+        shutil.copyfile(args.firmware_vars, varstore)
+        extra += ["-drive", f"if=pflash,format=raw,readonly=on,file={args.firmware}",
+                  "-drive", f"if=pflash,format=raw,file={varstore}"]
+    elif args.firmware:
+        extra += ["-bios", args.firmware]
+    if args.expect_power: extra += ["-no-reboot"]
     qemu = subprocess.Popen(
-        ["qemu-system-x86_64", "-cdrom", iso, "-boot", "d", *drives,
+        ["qemu-system-x86_64", *extra, "-cdrom", iso, "-boot", "d", *drives,
          "-serial", f"file:{serial}", "-monitor", f"unix:{monitor},server,nowait",
          "-display", "none", "-m", args.mem],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -185,6 +210,14 @@ def main():
                 break
             time.sleep(0.2)
         out = log()
+        if args.expect_power:
+            marker = "power: switching off" if args.expect_power == "off" else "power: restarting"
+            acpi_marker = "acpi: entering S5" if args.expect_power == "off" else "acpi: issuing firmware reset"
+            ok = (qemu.poll() == 0 and marker in out and acpi_marker in out and
+                  "power: using fallback" not in out)
+            print(f"{'PASS' if ok else 'FAIL'} ACPI {args.expect_power} on {args.machine}")
+            if not ok: print(out[-2000:])
+            sys.exit(0 if ok else 1)
         for line in out.splitlines():
             if line.startswith(("PASS ", "FAIL ")) or "PANIC" in line:
                 print(line)

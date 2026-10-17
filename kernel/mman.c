@@ -32,6 +32,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <klog.h>
+#include <fb.h>
 
 #define PAGE      USER_PAGE_SIZE
 #define PAGE_MASK (~(PAGE - 1))
@@ -60,7 +61,7 @@ static bool nx_enabled(void) {
 
 // The PTE flag word for a present page with these rights.
 static u64 pte_flags(u64 frame, u32 prot, bool shared) {
-    u64 f = PTE_PRESENT;
+    u64 f = PTE_PRESENT | fb_cache_flags(frame);
     if (prot != PROT_NONE) f |= PTE_USER;
     if (prot & PROT_WRITE) {
         // A private frame someone else still holds must be copied on write.

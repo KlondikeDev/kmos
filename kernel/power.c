@@ -11,6 +11,7 @@
 #include <console.h>
 #include <vt.h>
 #include <klog.h>
+#include <acpi.h>
 
 char kernel_hostname[65] = "kunix";
 
@@ -20,6 +21,9 @@ __attribute__((noreturn)) void power_down(u32 how) {
 
     if (how == POWER_OFF) {
         klog(LOG_OKAY, "power: switching off\n");
+        acpi_poweroff();
+        for (u32 i = 0; i < 10000; i++) inb(0x80);
+        klog(LOG_WARN, "power: using fallback shutdown ports\n");
         // ACPI sleep state S5 through the PM1a control register, wherever
         // the (virtual) chipset keeps it: QEMU's PIIX4 and Q35, Bochs and
         // older QEMU, VirtualBox.
@@ -28,6 +32,13 @@ __attribute__((noreturn)) void power_down(u32 how) {
         outw(0x4004, 0x3400);
     } else if (how == POWER_RESTART) {
         klog(LOG_OKAY, "power: restarting\n");
+        acpi_reset();
+        // Let a posted firmware reset reach the chipset before fallback.
+        for (u32 i = 0; i < 10000; i++) inb(0x80);
+        klog(LOG_WARN, "power: using fallback chipset reset\n");
+        outb(0xCF9, 0x02);
+        outb(0xCF9, 0x06);
+        for (u32 i = 0; i < 10000; i++) inb(0x80);
         // Pulse the CPU reset line through the keyboard controller...
         for (int i = 0; i < 100000 && (inb(0x64) & 0x02); i++) { }
         outb(0x64, 0xFE);

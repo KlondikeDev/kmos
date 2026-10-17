@@ -15,6 +15,7 @@
 #include <io.h>
 #include <limine.h>
 #include <vt.h>
+#include <memory.h>
 
 extern volatile struct limine_framebuffer_request fb_request;
 
@@ -47,7 +48,7 @@ uint32_t color_bg = BLACK;
 #define FONT_HEIGHT 16
 #define FONT_WIDTH 8
 
-static uint8_t shadow[1920 * 1080 * 4];
+static uint8_t* shadow;
 static uint32_t dirty_top = UINT32_MAX;
 static uint32_t dirty_bottom = 0;
 
@@ -59,6 +60,25 @@ void framebuffer_init(void) {
     }
 
     struct limine_framebuffer *fb = fb_request.response->framebuffers[0];
+
+    // The drawing routines support packed RGB/BGR pixels. Reject an
+    // unusable mode before narrowing Limine's 64-bit sizes or allocating.
+    if (fb->width < FONT_WIDTH || fb->height < FONT_HEIGHT ||
+        fb->width > UINT32_MAX || fb->height > UINT32_MAX || fb->pitch > UINT32_MAX ||
+        (fb->bpp != 24 && fb->bpp != 32) || fb->pitch < fb->width * (fb->bpp / 8) ||
+        fb->height > UINT32_MAX / fb->pitch ||
+        fb->red_mask_size != 8 || fb->green_mask_size != 8 || fb->blue_mask_size != 8 ||
+        fb->green_mask_shift != 8 ||
+        !((fb->red_mask_shift == 0 && fb->blue_mask_shift == 16) ||
+          (fb->red_mask_shift == 16 && fb->blue_mask_shift == 0))) {
+        kserialout("ERROR: Unsupported framebuffer mode\n");
+        for (;;) __asm__ volatile("cli; hlt");
+    }
+    shadow = kmalloc(fb->height * fb->pitch);
+    if (!shadow) {
+        kserialout("ERROR: Not enough memory for console shadow buffer\n");
+        for (;;) __asm__ volatile("cli; hlt");
+    }
 
     framebuffer_addr     = (uint64_t)fb->address;
     fb_pitch             = fb->pitch;
@@ -72,12 +92,8 @@ void framebuffer_init(void) {
     fb_green_mask_size   = fb->green_mask_size;
     fb_blue_mask_size    = fb->blue_mask_size;
 
-    // The shadow buffer is statically sized; on a framebuffer larger than
-    // 1920x1080x32 clamp the drawable height rather than overflow .bss.
-    if ((uint64_t)fb_height * fb_pitch > sizeof(shadow)) {
-        kserialout("WARNING: framebuffer exceeds console shadow buffer, clamping height\n");
-        fb_height = sizeof(shadow) / fb_pitch;
-    }
+    kserialoutf("framebuffer: %ux%u, cache flags 0x%lx\n", fb_width, fb_height,
+                vmm_cache_flags(vmm_kernel_space(), framebuffer_addr));
 }
 
 static void mark_dirty(uint32_t y_pixel) {

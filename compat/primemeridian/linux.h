@@ -89,6 +89,7 @@
 #define LNX_sysinfo           99
 #define LNX_times             100
 #define LNX_getuid            102
+#define LNX_syslog            103
 #define LNX_getgid            104
 #define LNX_setuid            105
 #define LNX_setgid            106

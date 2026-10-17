@@ -28,6 +28,7 @@ void vmm_switch(uint64_t space);
 bool vmm_map_in(uint64_t space, uint64_t virt, uint64_t phys, uint64_t flags);
 void vmm_unmap_in(uint64_t space, uint64_t virt);
 uint64_t vmm_get_pte(uint64_t space, uint64_t virt);  // 0 if not mapped
+uint64_t vmm_cache_flags(uint64_t space, uint64_t virt); // cache bits as a 4 KiB PTE
 uint64_t vmm_next_mapped(uint64_t space, uint64_t va, uint64_t end);
 bool vmm_clone_user(uint64_t src, uint64_t dst, uint32_t* pages_out);  // fork, COW
 bool vmm_break_cow(uint64_t space, uint64_t virt);

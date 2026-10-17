@@ -42,6 +42,7 @@
 #include <tty.h>
 #include <rtc.h>
 #include <devfs.h>
+#include <acpi.h>
 
 // Limine nuke!
 static volatile LIMINE_BASE_REVISION(3);
@@ -82,6 +83,7 @@ void kernel_main(void) {
     pit_init();
     klog(LOG_OKAY, "Programmable Interval Timer (PIT) set to 250hz (Square Wave)!\n");
     rtc_init();
+    acpi_init();
     
     pci_list_devices();
     bool fat = identify_drive(0xA0) && fat32_init();

@@ -51,9 +51,12 @@ integer server=$!
 export DISPLAY=:0
 check "the server starts and listens on /tmp/.X11-unix/X0" wait_until '[[ -S /tmp/.X11-unix/X0 ]]' 200
 
-# The pointer starts in the middle of the screen; the xterm is put over it,
-# so the keys go to it (no window manager: focus follows the pointer).
-xterm -geometry 80x24+300+200 \
+# The pointer starts in the middle of the screen. The console's cell size
+# is 8x16; place the xterm over that point even on larger framebuffers.
+# Without a window manager, keyboard focus follows the pointer.
+read rows cols <<< "$(stty size)"
+integer window_x=$(( cols * 4 - 200 )) window_y=$(( rows * 8 - 100 ))
+xterm -geometry 80x24+${window_x}+${window_y} \
     -e /bin/sh -c 'echo "$TERM" > /tmp/xtest.term; read line; echo "$line" > /tmp/xtest.line' \
     2>/tmp/xtest.client &
 integer client=$!

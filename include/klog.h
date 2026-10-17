@@ -20,3 +20,8 @@ extern kernel_logs_t log_messages[4];
 #define LOG_ERROR (&log_messages[3])
 
 void klog(kernel_logs_t* log, const char* format, ...);
+
+#define KMSG_CAPACITY 65536
+void kmsg_putc(char c);
+u64 kmsg_read(u64 off, void* buf, u64 len);
+u64 kmsg_tail(void* buf, u64 len);

@@ -40,6 +40,7 @@
 #include <msr.h>
 #include <gdt.h>
 #include <serial.h>
+#include <klog.h>
 #include <klibc/string.h>
 #include "linux.h"
 
@@ -1052,6 +1053,17 @@ static i64 l_uname(u64 out) {
     return 0;
 }
 
+// The nondestructive kernel log operations used by busybox dmesg.
+static i64 l_syslog(u64 action, u64 buf, u64 size) {
+    if ((i32)action == 10) return KMSG_CAPACITY;
+    if ((i32)action != 3 || (i32)size < 0) return -EINVAL;
+    u64 len = (u32)size;
+    if (len > KMSG_CAPACITY) len = KMSG_CAPACITY;
+    if (!len) return 0;
+    if (!uok(buf, len, true)) return -EFAULT;
+    return (i64)kmsg_tail((void*)buf, len);
+}
+
 // reboot(2): the two magic numbers, then what to do.
 static i64 l_reboot(u64 magic1, u64 magic2, u64 cmd) {
     if (me()->euid != 0) return -EPERM;
@@ -1405,6 +1417,7 @@ static void pm_dispatch(registers_t* regs) {
                               r = fd_get(p, (i32)a) ? 0 : -EBADF; break;
         case LNX_sync:        r = 0; break;               // writes are synchronous already
         case LNX_reboot:      r = l_reboot(a, b, c); break;
+        case LNX_syslog:      r = l_syslog(a, b, c); break;
         case LNX_sethostname: r = l_sethostname(a, b); break;
         case LNX_umask:       r = p->umask; p->umask = (u32)a & 0777; break;
 

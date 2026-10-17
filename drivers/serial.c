@@ -6,6 +6,7 @@
 #include <itoa.h>
 #include <stdarg.h>
 #include <serial.h>
+#include <klog.h>
 
 volatile bool faulty = false;
 
@@ -20,8 +21,13 @@ int init_serial() {
    outb(COM1 + 4, 0x1E);    // Set in loopback mode, test the serial chip
    outb(COM1 + 0, 0xAE);    // Test serial chip (send byte 0xAE and check if serial returns same byte)
 
+   // A UART need not finish the loopback byte before the next instruction.
+   // UEFI boots exposed this race: do not permanently disable a working
+   // port just because its receive register was checked too early.
+   u32 tries = 100000;
+   while (!(inb(COM1 + 5) & 1) && --tries) { }
    // Check if serial is faulty (i.e: not same byte as sent)
-   if(inb(COM1 + 0) != 0xAE) {
+   if(!tries || inb(COM1 + 0) != 0xAE) {
         faulty = true;
    }
 
@@ -34,12 +40,15 @@ int init_serial() {
 }
 
 void kserialputchar(char c) {
+    kmsg_putc(c);
     if(faulty){
         return;
     }
     else{
     if (c == '\n') {
-        kserialputchar('\r'); // Carriage return before newline
+        // The UART needs CRLF; the in-memory log retains the original LF.
+        while (!(inb(COM1 + 5) & 0x20));
+        outb(COM1, '\r');
     }
 
     while (!(inb(COM1 + 5) & 0x20));

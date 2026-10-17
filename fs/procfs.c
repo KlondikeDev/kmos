@@ -28,6 +28,7 @@
 #include <kprintf.h>
 #include <klibc/string.h>
 #include <file.h>
+#include <klog.h>
 
 void cpuid_vendor(char* vendor);
 void cpuid_brand(char* brand);
@@ -39,7 +40,7 @@ void cpuid_brand(char* brand);
 // pid << 8 and its files pid << 8 | kind.
 enum {
     P_ROOT = 1, P_SELF, P_MEMINFO, P_UPTIME, P_LOADAVG, P_STAT, P_VERSION,
-    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_GLOBAL_END,
+    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_GLOBAL_END,
 };
 enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_EXE, F_CWD, F_END };
 // .../fd/N nodes (opening them is file_open's job: it shares descriptor N).
@@ -49,6 +50,7 @@ static const char* const global_names[P_GLOBAL_END] = {
     [P_SELF] = "self", [P_MEMINFO] = "meminfo", [P_UPTIME] = "uptime",
     [P_LOADAVG] = "loadavg", [P_STAT] = "stat", [P_VERSION] = "version",
     [P_MOUNTS] = "mounts", [P_CPUINFO] = "cpuinfo", [P_FILESYSTEMS] = "filesystems",
+    [P_KMSG] = "kmsg",
 };
 static const char* const proc_file_names[F_END] = {
     [F_STAT] = "stat", [F_STATUS] = "status", [F_CMDLINE] = "cmdline", [F_COMM] = "comm",
@@ -319,6 +321,9 @@ static u64 gen_global(u64 id, char* b) {
 }
 
 static i64 procfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
+    // A nondestructive view, like the other generated proc files. Avoid
+    // GEN_MAX: the boot log can be much larger than a single text page.
+    if (node->id == P_KMSG) return (i64)kmsg_read(off, buf, len);
     char* b = kmalloc(GEN_MAX);
     if (!b) return -ENOMEM;
     u64 n;

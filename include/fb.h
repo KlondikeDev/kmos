@@ -18,5 +18,6 @@ typedef struct {
 } fb_info_t;
 
 const fb_info_t* fb_info(void);
+u64 fb_cache_flags(u64 physical);
 i64 fb_read(u64 off, void* buf, u64 len);
 i64 fb_write(u64 off, const void* buf, u64 len);

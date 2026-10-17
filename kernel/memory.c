@@ -362,6 +362,23 @@ uint64_t vmm_get_pte(uint64_t space, uint64_t virt) {
     return pt[(virt >> 12) & 0x1FF];
 }
 
+// Limine may use 1 GiB or 2 MiB leaves in its direct map. For those the
+// PAT bit is 12, rather than bit 7 of a 4 KiB PTE. Preserve the selected
+// memory type when a device gets a second mapping in a user process.
+uint64_t vmm_cache_flags(uint64_t space, uint64_t virt) {
+    uint64_t* table = table_virt(space);
+    for (int level = 3; level >= 0; level--) {
+        uint64_t entry = table[(virt >> (12 + 9 * level)) & 0x1ff];
+        if (!(entry & 1)) return 0;
+        if (level == 0) return entry & 0x98;
+        if (level < 3 && (entry & 0x80)) {
+            return (entry & 0x18) | ((entry & 0x1000) >> 5);
+        }
+        table = table_virt(entry & 0x000FFFFFFFFFF000ULL);
+    }
+    return 0;
+}
+
 // The first page in [va, end) that is mapped, or end. Skips whole empty
 // tables, so sweeping a mostly-empty gigabyte is cheap.
 uint64_t vmm_next_mapped(uint64_t space, uint64_t va, uint64_t end) {
