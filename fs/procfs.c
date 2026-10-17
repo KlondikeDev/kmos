@@ -16,6 +16,7 @@
 // if nothing changed in between -- as on Linux, read it in one go.
 
 #include <types.h>
+#include <build.h>
 #include <procfs.h>
 #include <vfs.h>
 #include <proc.h>
@@ -32,6 +33,8 @@
 #include <battery.h>
 #include <disk.h>
 #include <pagecache.h>
+#include <inet.h>
+#include <iwx200.h>
 
 void cpuid_vendor(char* vendor);
 void cpuid_brand(char* brand);
@@ -43,7 +46,7 @@ void cpuid_brand(char* brand);
 // pid << 8 and its files pid << 8 | kind.
 enum {
     P_ROOT = 1, P_SELF, P_MEMINFO, P_UPTIME, P_LOADAVG, P_STAT, P_VERSION,
-    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_BATTERY, P_CACHE, P_GLOBAL_END,
+    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_BATTERY, P_CACHE, P_NETINFO, P_WIFI, P_GLOBAL_END,
 };
 enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_EXE, F_CWD, F_END };
 // .../fd/N nodes (opening them is file_open's job: it shares descriptor N).
@@ -54,7 +57,7 @@ static const char* const global_names[P_GLOBAL_END] = {
     [P_LOADAVG] = "loadavg", [P_STAT] = "stat", [P_VERSION] = "version",
     [P_MOUNTS] = "mounts", [P_CPUINFO] = "cpuinfo", [P_FILESYSTEMS] = "filesystems",
     [P_KMSG] = "kmsg",
-    [P_BATTERY] = "battery", [P_CACHE] = "cache",
+    [P_BATTERY] = "battery", [P_CACHE] = "cache", [P_NETINFO] = "netinfo", [P_WIFI] = "wifi",
 };
 static const char* const proc_file_names[F_END] = {
     [F_STAT] = "stat", [F_STATUS] = "status", [F_CMDLINE] = "cmdline", [F_COMM] = "comm",
@@ -255,6 +258,25 @@ static u64 gen_global(u64 id, char* b) {
     switch (id) {
         case P_BATTERY:
             return battery_read_text(b, GEN_MAX);
+        case P_WIFI: {
+            static const char* stages[]={"unprobed","absent","firmware-missing",
+                "firmware-invalid","pci-bar","prepare","persistence","reset",
+                "clock","mac-access","rfkill","dma","firmware-load","alive","nvm","ready"};
+            iwx200_status_t st;iwx200_status(&st);
+            const char* stage=(u32)st.stage<sizeof(stages)/sizeof(*stages)?stages[st.stage]:"unknown";
+            return ksnprintf(b,GEN_MAX,
+                "device: Intel AX200\nstage: %s\nerror: %d\npresent: %u\n"
+                "firmware-staged: %u\nfirmware-alive: %u\nnvm-ready: %u\n"
+                "firmware-api: %u\nlink: %u\ninterrupt: 0x%x\ngp-control: 0x%x\n"
+                "fh-status: 0x%x\nrfkill-clear: %u\n",
+                stage,st.error,st.present,st.firmware_staged,st.firmware_alive,
+                st.nvm_ready,st.firmware_api,iwx200_link(),st.csr_interrupt,st.csr_gp,
+                st.csr_fh_status,st.rfkill_clear);
+        }
+        case P_NETINFO: {
+            net_info_t info;net_info(&info);char name[16];net_ifname(name);u8* ip=(u8*)&info.address;u8* dns=(u8*)&info.dns;
+            return ksnprintf(b,GEN_MAX,"%s: up=%u link=%u mtu=%u ip=%u.%u.%u.%u dns=%u.%u.%u.%u\nrx=%llu tx=%llu rx_dropped=%llu tx_dropped=%llu\n",name,info.up,info.link,info.mtu,ip[0],ip[1],ip[2],ip[3],dns[0],dns[1],dns[2],dns[3],info.rx_packets,info.tx_packets,info.rx_dropped,info.tx_dropped);
+        }
         case P_CACHE: {
             disk_cache_stats_t d;
             disk_cache_stats(&d);
@@ -309,7 +331,7 @@ static u64 gen_global(u64 id, char* b) {
         }
         case P_VERSION:
             return (u64)ksnprintf(b, GEN_MAX,
-                "Linux version 6.1.0-primemeridian (Kunix Millennium Operating System, codename Kodiak)\n");
+                "Linux version 6.1.0-primemeridian (" KUNIX_BUILD_DESCRIPTION ")\n");
         case P_MOUNTS: {
             u64 n = 0;
             for (u32 i = 0; ; i++) {

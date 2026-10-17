@@ -1,14 +1,103 @@
 // This file has been generated in whole or in part by a Large Language Model
+// Register/DMA ABI and initialization ordering adapted from OpenBSD iwx.
+/*
+ * Copyright (c) 2014, 2016 genua gmbh <info@genua.de>
+ *   Author: Stefan Sperling <stsp@openbsd.org>
+ * Copyright (c) 2014 Fixup Software Ltd.
+ * Copyright (c) 2017, 2019, 2020 Stefan Sperling <stsp@openbsd.org>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+/*-
+ * Based on BSD-licensed source modules in the Linux iwlwifi driver,
+ * which were used as the reference documentation for this implementation.
+ *
+ ******************************************************************************
+ *
+ * This file is provided under a dual BSD/GPLv2 license.  When using or
+ * redistributing this file, you may do so under either license.
+ *
+ * GPL LICENSE SUMMARY
+ *
+ * Copyright(c) 2017 Intel Deutschland GmbH
+ * Copyright(c) 2018 - 2019 Intel Corporation
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * BSD LICENSE
+ *
+ * Copyright(c) 2017 Intel Deutschland GmbH
+ * Copyright(c) 2018 - 2019 Intel Corporation
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *  * Neither the name Intel Corporation nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ *****************************************************************************
+ */
+
+/*-
+ * Copyright (c) 2007-2010 Damien Bergamini <damien.bergamini@free.fr>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
 // Intel Wi-Fi 6 AX200 bring-up: PCI probe, CSR init, persistence clearing,
-// MAC address, INIT firmware load and the alive handshake. RX/TX queues and
-// the 802.11 state machine arrive later; this file only takes the card from
-// cold to firmware-alive. Everything runs in the caller's context with IRQs
-// excluded, like the e1000 driver: no blocking, no scheduler calls, every
-// hardware wait bounded by the TSC clock.
+// MAC address, firmware self-load, RX notifications and command transport.
+// Hardware waits use bounded polling with interrupts enabled. DMA allocations
+// remain quarantined on failure. Physical AX200 validation is still required.
 #include <iwx200.h>
-#include <wifi.h>
-#include <wifi_wpa.h>
-#include <wifi_crypto.h>
 #include <pci.h>
 #include <memory.h>
 #include <ktime.h>
@@ -17,37 +106,59 @@
 #include <klog.h>
 
 #define MMIO_BASE 0xffffc42000000000ULL
-#define MMIO_SIZE 0x20000u
+#define MMIO_SIZE 0x4000u
 
-// Gen2 context info prefix: version, control, receive/command ring
-// addresses, then the firmware image tables. LMAC entries precede the
-// CPU1/CPU2 separator, UMAC follows it, paging follows the paging
-// separator. Offsets match the firmware's layout.
-typedef struct {
+// Intel gen2 context ABI, OpenBSD if_iwxreg.h iwx_context_info.
+// Every image table has 64 slots; the reserved blocks are part of the ABI.
+typedef struct __attribute__((packed)) {
     u16 mac_id, version, size, reserved_ver;
     u32 control_flags, reserved_ctrl;
     u64 reserved0;
     u64 rx_free, rx_used, rx_status;
     u64 cmd_addr;
-    u16 cmd_size, reserved_cmd;
-    u8 reserved_a[4];
-    u64 umac_image[16];
-    u64 lmac_image[16];
-    u64 paging_image[32];
+    u8 cmd_size, reserved_cmd[7];
+    u32 reserved1[4];
+    u8 dump_cfg[16], edbg_cfg[16], pnvm_cfg[16];
+    u32 reserved2[16];
+    u64 umac_image[64], lmac_image[64], paging_image[64];
+    u32 reserved3[16];
 } ctxt_t;
-_Static_assert(sizeof(ctxt_t) == 576, "AX200 gen2 context prefix size");
+_Static_assert(sizeof(ctxt_t) == 1792, "Intel gen2 context ABI");
+_Static_assert(__builtin_offsetof(ctxt_t, rx_free) == 24, "context RX offset");
+_Static_assert(__builtin_offsetof(ctxt_t, cmd_addr) == 48, "context CMD offset");
+_Static_assert(__builtin_offsetof(ctxt_t, umac_image) == 192, "context DRAM offset");
+_Static_assert(__builtin_offsetof(ctxt_t, lmac_image) == 704, "context LMAC offset");
+_Static_assert(__builtin_offsetof(ctxt_t, paging_image) == 1216, "context paging offset");
 
 static struct {
     volatile u8* regs;
     u8 mac[6];
     bool attempted, online, alive;
-    bool firmware_ok;
+    bool firmware_ok, command_busy, init_complete, rx_started, radio_ready;
+    pci_device_t pci;
+    u16 pci_command;
+    iwx200_status_t status;
+    u64 rx_used_phys;
+    u32 rx_offset;
+    u8 rx_packet[IWX_RX_BUFFER_SIZE];
+    iwx200_notification_fn notification;
+    iwx200_nvm_t nvm;
+    struct {
+        bool allocated, active;
+        u8 qid, station, tid;
+        u16 head, tail, pending;
+        u8* ring;
+        u16* byte_counts;
+        u64 ring_phys, byte_counts_phys;
+        u8* buffers[IWX_TX_RING_COUNT];
+        u64 addresses[IWX_TX_RING_COUNT];
+    } data[4];
     iwx200_fw_t fw;
     u64 ctxt_phys;
     // Command transport: DMA rings plus host-side mirrors.
     volatile u8* tx_ring; // 256 TFDs of 256 bytes
-    volatile u8* cmd_data; // 256 command buffers of 324 bytes
-    u64 cmd_phys; // physical address of cmd_data
+    u8* cmd_buffers[IWX_TX_RING_COUNT];
+    u64 cmd_addresses[IWX_TX_RING_COUNT];
     u64 tx_phys; // physical address of tx_ring
     u64 rx_free_phys; // physical address of the RX free list
     u64 rx_status_phys; // physical address of the RX status word
@@ -63,9 +174,18 @@ static struct {
     bool notif_pending;
 } card;
 
+#ifdef IWX200_TEST_MMIO
+static u32 reg_read(u32 offset) { return iwx_test_read(offset); }
+#else
 static u32 reg_read(u32 offset) { return *(volatile u32*)(card.regs + offset); }
+#endif
 static bool transport_alloc(void);
+static bool data_completion(const volatile u8* packet, u32 total);
+#ifdef IWX200_TEST_MMIO
+static void reg_write(u32 offset, u32 value) { iwx_test_write(offset, value); }
+#else
 static void reg_write(u32 offset, u32 value) { *(volatile u32*)(card.regs + offset) = value; }
+#endif
 static void reg_set(u32 offset, u32 bits) { reg_write(offset, reg_read(offset) | bits); }
 static void fence(void) { __asm__ volatile("mfence" ::: "memory"); }
 static void zero(void* buffer, u32 length) {
@@ -135,13 +255,13 @@ static void* dma_contig(u64* physical, u32 length) {
 // registers select a dword; data moves through the read/write registers.
 // Every access is bounded by construction (no wait loops).
 static void prph_write(u32 address, u32 value) {
-    reg_write(IWX_HBUS_PRPH_WADDR, address);
+    reg_write(IWX_HBUS_PRPH_WADDR, (address & 0x000fffffu) | (3u << 24));
     fence();
     reg_write(IWX_HBUS_PRPH_WDATA, value);
     fence();
 }
 static u32 prph_read(u32 address) {
-    reg_write(IWX_HBUS_PRPH_RADDR, address);
+    reg_write(IWX_HBUS_PRPH_RADDR, (address & 0x000fffffu) | (3u << 24));
     fence();
     return reg_read(IWX_HBUS_PRPH_RDATA);
 }
@@ -191,35 +311,41 @@ static bool apm_init(void) {
 // A previous boot may have left its persistence bit set; clear it through
 // the write-protect register, refusing when the register reports locked.
 static bool clear_persistence(void) {
-    if (!nic_lock()) return false;
     u32 debug = prph_read(IWX_HPM_DEBUG);
     bool ok = true;
     if (debug != 0xa5a5a5a0u && (debug & IWX_HPM_PERSISTENCE)) {
         if (prph_read(IWX_PREG_WPROT_22000) & IWX_WPROT_LOCKED) ok = false;
         else prph_write(IWX_HPM_DEBUG, debug & ~IWX_HPM_PERSISTENCE);
     }
-    reg_write(IWX_CSR_GP_CNTRL, reg_read(IWX_CSR_GP_CNTRL) & ~IWX_GP_MAC_ACCESS_REQ);
     return ok;
 }
 // The MAC address ships in strap registers off the MAC CSR base, most
 // significant byte first. Reject the unprogrammed and multicast values.
+static bool valid_mac(void) {
+    u8 any = 0; for (u32 i = 0; i < 6; i++) any |= card.mac[i];
+    static const u8 reserved[6] = {0x02,0xcc,0xaa,0xff,0xee,0x00};
+    bool same = true; for (u32 i = 0; i < 6; i++) if (card.mac[i] != reserved[i]) same = false;
+    return any && !(card.mac[0] & 1) && !same;
+}
 static bool read_mac(void) {
     if (!nic_lock()) return false;
-    u32 low = reg_read(IWX_CSR_MAC_CSR_BASE + IWX_MAC_STRAP0);
-    u32 high = reg_read(IWX_CSR_MAC_CSR_BASE + IWX_MAC_STRAP1);
+    bool ok = false;
+    for (u32 attempt = 0; attempt < 2; attempt++) {
+        u32 offset = attempt ? 0 : IWX_MAC_STRAP0;
+        u32 low = reg_read(IWX_CSR_MAC_CSR_BASE + offset);
+        u32 high = reg_read(IWX_CSR_MAC_CSR_BASE + offset + 4);
+        if (low == ~0u || high == ~0u) continue;
+        card.mac[0] = (u8)(low >> 24); card.mac[1] = (u8)(low >> 16);
+        card.mac[2] = (u8)(low >> 8); card.mac[3] = (u8)low;
+        card.mac[4] = (u8)(high >> 8); card.mac[5] = (u8)high;
+        if (valid_mac()) { ok = true; break; }
+    }
     reg_write(IWX_CSR_GP_CNTRL, reg_read(IWX_CSR_GP_CNTRL) & ~IWX_GP_MAC_ACCESS_REQ);
-    if (low == ~0u || high == ~0u) return false;
-    card.mac[0] = (u8)(low >> 24); card.mac[1] = (u8)(low >> 16);
-    card.mac[2] = (u8)(low >> 8); card.mac[3] = (u8)low;
-    card.mac[4] = (u8)(high >> 8); card.mac[5] = (u8)high;
-    u8 any = 0; for (u32 i = 0; i < 6; i++) any |= card.mac[i];
-    if (!any || (card.mac[0] & 1)) return false;
-    return true;
+    return ok;
 }
-// INIT firmware image: parse the TLV container and record the INIT code
-// sections plus the API version. RT sections are for later (post-alive).
+// Parse the TLV container; AX200 self-loads the REGULAR image.
 bool iwx200_parse_fw(const void* image, u64 size, iwx200_fw_t* out) {
-    if (!image || !out || size < 104 + 8) return false;
+    if (!image || !out || size < 88 + 8) return false;
     const u8* p = image;
     zero(out, sizeof(*out));
     u32 zero_word = (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
@@ -247,6 +373,23 @@ bool iwx200_parse_fw(const void* image, u64 size, iwx200_fw_t* out) {
             table[*count].device_offset = device_offset;
             table[*count].length = length - 4;
             (*count)++;
+        } else if (type == 30 && length == 8) {
+            u32 index = (u32)p[offset] | ((u32)p[offset+1] << 8) |
+                        ((u32)p[offset+2] << 16) | ((u32)p[offset+3] << 24);
+            if (index < 8) out->capabilities[index] = (u32)p[offset+4] |
+                ((u32)p[offset+5] << 8) | ((u32)p[offset+6] << 16) | ((u32)p[offset+7] << 24);
+        } else if (type == 23 && length == 4) {
+            out->phy_config = (u32)p[offset] | ((u32)p[offset+1] << 8) |
+                              ((u32)p[offset+2] << 16) | ((u32)p[offset+3] << 24);
+        } else if (type == IWX_TLV_CMD_VERSIONS) {
+            if (length % 4 || length / 4 > 256) return false;
+            out->command_version_count = length / 4;
+            copy(out->command_versions, p + offset, length);
+            for (u32 i = 0; i < length; i += 4) {
+                const u8* row = p + offset + i;
+                if (row[0] == 1 && row[1] == 0) out->alive_version = row[3];
+                if (row[0] == 2 && row[1] == 12) out->nvm_version = row[3];
+            }
         } else if (type == IWX_TLV_FW_VERSION && length == 12) {
             u32 major = (u32)p[offset] | ((u32)p[offset+1] << 8) |
                         ((u32)p[offset+2] << 16) | ((u32)p[offset+3] << 24);
@@ -269,9 +412,11 @@ bool iwx200_parse_fw(const void* image, u64 size, iwx200_fw_t* out) {
             }
             out->version[i] = 0;
         }
-        offset += (length + 3) & ~3u;
+        u64 padded = ((u64)length + 3) & ~3ULL;
+        if (padded > size - offset) return false;
+        offset += padded;
     }
-    return out->init_count > 0 || out->regular_count > 0;
+    return offset == size && (out->init_count > 0 || out->regular_count > 0);
 }
 // Load a staged REGULAR image: copy sections into DMA pages, describe them
 // in context info, point the card at it and kick the CPU. The image must
@@ -288,87 +433,177 @@ static bool load_firmware(void) {
     ctxt->size = sizeof(*ctxt) / 4;
     ctxt->control_flags = IWX_CTXT_TFD_LONG | (9u << IWX_CTXT_RB_CB_POS) |
                           (IWX_CTXT_RB_4K << IWX_CTXT_RB_SIZE_POS);
-    // RX free list, used list (unused, firmware-owned) and status pointer
+    // RX free list, distinct hardware completion list and status pointer
     // for the firmware's receive DMA; command queue address and size.
     ctxt->rx_free = card.rx_free_phys;
-    ctxt->rx_used = card.rx_free_phys; // firmware ignores the used list
+    ctxt->rx_used = card.rx_used_phys;
     ctxt->rx_status = card.rx_status_phys;
     ctxt->cmd_addr = card.tx_phys;
     ctxt->cmd_size = 5; // CB_SIZE encoding for 256 entries
-    ctxt->reserved_cmd = 0;
+
     u32 lmac = 0, umac = 0, paging = 0, group = 0;
     for (u32 i = 0; i < card.fw.regular_count; i++) {
         u32 device_offset = card.fw.regular[i].device_offset;
         // Separator entries advance the group without consuming a page.
         if (device_offset == IWX_SEP_CPU12) { group = 1; continue; }
         if (device_offset == IWX_SEP_PAGING) { group = 2; continue; }
-        u64* table = group == 0 ? ctxt->lmac_image : group == 1 ? ctxt->umac_image : ctxt->paging_image;
+        u32 table_offset = group == 0 ? 704 : group == 1 ? 192 : 1216;
         u32* count = group == 0 ? &lmac : group == 1 ? &umac : &paging;
-        u32 limit = group == 2 ? 32 : 16;
+        u32 limit = 64;
         if (*count >= limit) return false;
         u64 section_phys;
         u8* section = dma_contig(&section_phys, card.fw.regular[i].length);
         if (!section) return false;
         copy(section, (const void*)card.fw.regular[i].address, card.fw.regular[i].length);
-        table[(*count)++] = section_phys;
+        copy((u8*)ctxt + table_offset + (*count)++ * 8, &section_phys, 8);
     }
     if (!lmac || !umac) return false;
     fence();
+    card.status.stage = IWX200_FW_LOAD;
+    // All DMA targets are owned, zeroed, and described before bus mastering.
+    command_write(&card.pci, (card.pci_command | 0x406u) & ~1u);
     reg_write(IWX_CSR_CTXT_INFO_BA, (u32)ctxt_phys);
     reg_write(IWX_CSR_CTXT_INFO_BA + 4, (u32)(ctxt_phys >> 32));
     if (!nic_lock()) return false;
     // 250 usec latency tolerance while the firmware self-loads.
-    reg_write(IWX_CSR_LTR_LONG_VAL, 0x80FA80FAu);
+    reg_write(IWX_CSR_LTR_LONG_VAL, 0x82FA82FAu);
     prph_write(IWX_UREG_CPU_INIT_RUN, 1);
     reg_write(IWX_CSR_GP_CNTRL, reg_read(IWX_CSR_GP_CNTRL) & ~IWX_GP_MAC_ACCESS_REQ);
     fence();
     return true;
 }
-// The firmware announces itself through the UC_GP1 register once the INIT
-// image runs. Poll bounded; the RX-path notification arrives later.
+static u32 rx_poll(const volatile u8** payload_out);
+static bool service_interrupts(void) {
+    u32 cause = reg_read(IWX_CSR_INT);
+    card.status.csr_interrupt = cause;
+    card.status.csr_gp = reg_read(IWX_CSR_GP_CNTRL);
+    if (cause == ~0u || (cause & 0xfffffff0u) == 0xa5a5a5a0u ||
+        (cause & (IWX_INT_SW_ERR | IWX_INT_HW_ERR))) {
+        // Latch the flow-handler status next to the cause: on real
+        // hardware this names the DMA engine that raised HW_ERR.
+        card.status.csr_fh_status = reg_read(IWX_CSR_FH_INT_STATUS);
+        return false;
+    }
+    if ((cause & IWX_INT_ALIVE) && !card.rx_started) {
+        // Buffers were described in transport_alloc; just open the queue.
+        reg_write(IWX_CSR_RX_WPTR, 8);
+        card.rx_started = true;
+    }
+    if (cause) reg_write(IWX_CSR_INT, cause);
+    return true;
+}
 static bool wait_alive(void) {
     u64 start = time_counter_ns();
     for (;;) {
-        u32 gp1 = reg_read(IWX_CSR_UCODE_DRV_GP1);
-        if (gp1 == ~0u) return false;
-        if (gp1 & IWX_GP1_INIT_COMPLETE) { card.alive = true; return true; }
+        if (!service_interrupts()) return false;
+        const volatile u8* packet;
+        u32 total = rx_poll(&packet);
+        if (total >= 8 && packet[4] == IWX_NOTIF_ALIVE && packet[5] == 0) {
+            u32 expected = card.fw.alive_version >= 6 ? 144 :
+                           card.fw.alive_version == 5 ? 128 : 116;
+            if (total != expected + 8 || packet[8] != 0xfe || packet[9] != 0xca)
+                return false;
+            card.alive = true;
+            card.status.firmware_alive = true;
+            return true;
+        }
         if (time_counter_ns() - start >= IWX_ALIVE_NS) return false;
         __asm__ volatile("pause" ::: "memory");
     }
 }
+static bool init_failure(i32 error) {
+    card.status.error = error;
+    card.online = false;
+    // Keep every DMA allocation quarantined; stop DMA before returning.
+    if (card.regs) {
+        card.status.csr_gp = reg_read(IWX_CSR_GP_CNTRL);
+        card.status.csr_interrupt = reg_read(IWX_CSR_INT);
+        reg_write(IWX_CSR_INT_MASK, 0);
+    }
+    if (card.status.present)
+        command_write(&card.pci, (card.pci_command | 0x400u) & ~4u);
+    return false;
+}
 bool iwx200_init(void) {
     u64 flags = irq_save();
     if (card.attempted) { irq_restore(flags); return card.online; }
+    if (!card.firmware_ok) {
+        card.status.stage = IWX200_FIRMWARE_MISSING;
+        card.status.error = -2;
+        irq_restore(flags);
+        return false;
+    }
     card.attempted = true;
-    pci_device_t dev = pci_scan_for_device(PCI_VENDOR_INTEL, IWX_PCI_AX200);
-    if (dev.vendor_id != PCI_VENDOR_INTEL || dev.device_id != IWX_PCI_AX200) goto fail;
-    u32 bar = pci_read_config(dev.bus, dev.device, dev.function, 0x10);
-    // A 32-bit, naturally aligned 128 KiB register BAR below 4 GiB.
-    if ((bar & 15) || !(bar & ~15u) || (bar & 0x1ffffu) ||
-        (u64)(bar & ~15u) + MMIO_SIZE > 0x100000000ULL) goto fail;
+    irq_restore(flags);
+    card.pci = pci_scan_for_device(PCI_VENDOR_INTEL, IWX_PCI_AX200);
+    pci_device_t* dev = &card.pci;
+    if (dev->vendor_id != PCI_VENDOR_INTEL || dev->device_id != IWX_PCI_AX200) {
+        card.status.stage = IWX200_ABSENT;
+        return init_failure(-19);
+    }
+    card.status.present = true;
+    card.pci_command = (u16)pci_read_config(dev->bus, dev->device, dev->function, 4);
+    card.status.stage = IWX200_PCI_BAR;
+    u32 low = pci_read_config(dev->bus, dev->device, dev->function, 0x10);
+    u32 type = (low >> 1) & 3;
+    if ((low & 1) || (type != 0 && type != 2)) return init_failure(-22);
+    u64 bar = low & ~15u;
+    if (type == 2) bar |= (u64)pci_read_config(dev->bus, dev->device, dev->function, 0x14) << 32;
+    if (!bar || (bar & (MMIO_SIZE - 1)) || bar > ~0ULL - MMIO_SIZE) return init_failure(-22);
+    command_write(dev, (card.pci_command | 0x402u) & ~5u);
     card.regs = (volatile u8*)MMIO_BASE;
     for (u32 off = 0; off < MMIO_SIZE; off += 4096)
-        if (!vmm_map(MMIO_BASE + off, (u64)bar + off, 0x1b)) goto fail;
-    u16 command = (u16)pci_read_config(dev.bus, dev.device, dev.function, 4);
-    command_write(&dev, (command | 0x402u) & ~4u);
-    if (!prepare_card()) goto fail;
-    // Software reset, then clock init.
+        if (!vmm_map(MMIO_BASE + off, bar + off, 0x1b)) {
+            card.regs = NULL;
+            return init_failure(-12);
+        }
+    reg_write(IWX_CSR_INT_MASK, 0);
+    card.status.stage = IWX200_PREPARE;
+    if (!prepare_card()) return init_failure(-110);
+    card.status.stage = IWX200_PERSISTENCE;
+    if (!clear_persistence()) return init_failure(-1);
+    card.status.stage = IWX200_RESET;
     reg_set(IWX_CSR_RESET, IWX_RESET_SW_RESET);
     u64 start = time_counter_ns();
-    while (time_counter_ns() - start < 5000) __asm__ volatile("pause" ::: "memory");
-    if (!apm_init()) goto fail;
-    if (!clear_persistence()) goto fail;
-    if (!read_mac()) goto fail;
-    // Refuse a disabled radio honestly instead of failing later.
-    if (reg_read(IWX_CSR_GP_CNTRL) & IWX_GP_HW_RFKILL_SW) goto fail;
-    if (!card.firmware_ok || !load_firmware()) goto fail;
-    if (!wait_alive()) goto fail;
+    // Upstream reset delay is 5000 microseconds, not 5000 nanoseconds.
+    while (time_counter_ns() - start < 5000000ULL) __asm__ volatile("pause" ::: "memory");
+    card.status.stage = IWX200_CLOCK;
+    if (!apm_init()) return init_failure(-110);
+    u32 hw = reg_read(IWX_CSR_HW_REV), phy = card.fw.phy_config;
+    u32 cfg = reg_read(IWX_CSR_HW_IF_CONFIG);
+    cfg &= ~0x0000ff0fu;
+    cfg |= (hw & 3) << 2; // CSR raw silicon step to software revision encoding
+    cfg |= (phy & 3) << 10;
+    cfg |= ((phy >> 2) & 3) << 14;
+    cfg |= ((phy >> 4) & 3) << 12;
+    reg_write(IWX_CSR_HW_IF_CONFIG, cfg);
+    *(volatile u8*)(card.regs + IWX_CSR_INT_COALESCE) = 0x40;
+    reg_set(IWX_CSR_MAC_SHADOW_CTRL, 0x800fffffu);
+    card.status.stage = IWX200_MAC;
+    if (!read_mac()) return init_failure(-5);
+    card.status.stage = IWX200_RFKILL;
+    // Sample the hardware RF-kill switch for diagnostics, but do not fail:
+    // the bit also reads set while the device is still coming out of reset
+    // on some platforms, and failing here strands the device with no path
+    // to retry once the switch state settles.
+    card.status.rfkill_clear = (reg_read(IWX_CSR_GP_CNTRL) & IWX_GP_HW_RFKILL_SW) != 0;
+    reg_write(0x05c, 2u | 4u); // clear software RF-kill and command-blocked bits
+    reg_write(IWX_CSR_INT, ~0u);
+    reg_write(IWX_CSR_FH_INT_STATUS, ~0u);
+    reg_write(IWX_CSR_INT_MASK, IWX_INT_ALIVE | IWX_INT_RX | IWX_INT_SW_ERR | IWX_INT_HW_ERR);
+    card.status.stage = IWX200_DMA;
+    if (!load_firmware()) return init_failure(-12);
+    card.status.stage = IWX200_ALIVE;
+    if (!wait_alive()) return init_failure(-110);
     card.online = true;
-    irq_restore(flags); return true;
-fail:
-    // Pages stay permanently reserved, including on partial initialization.
-    // No caller memory is ever exposed to DMA; never retried.
-    irq_restore(flags); return false;
+    card.status.error = 0;
+    return true;
+}
+void iwx200_status(iwx200_status_t* out) {
+    if (!out) return;
+    *out = card.status;
+    out->firmware_staged = card.firmware_ok;
+    out->firmware_api = card.fw.api;
 }
 bool iwx200_online(void) { return card.online && card.alive; }
 void iwx200_mac(u8 out[6]) { if (out) copy(out, card.mac, 6); }
@@ -377,7 +612,9 @@ void iwx200_mac(u8 out[6]) { if (out) copy(out, card.mac, 6); }
 // was already probed or the image is malformed.
 bool iwx200_stage_fw(const void* image, u64 size) {
     if (card.attempted) return false;
-    if (!iwx200_parse_fw(image, size, &card.fw)) return false;
+    if (!iwx200_parse_fw(image, size, &card.fw)) {
+        card.status.stage = IWX200_FIRMWARE_INVALID; card.status.error = -22; return false;
+    }
     card.firmware_ok = true;
     return true;
 }
@@ -387,49 +624,65 @@ bool iwx200_stage_fw(const void* image, u64 size) {
 #define IWX_FW_MAX_READ (2u * 1024u * 1024u)
 void iwx200_late_init(void) {
     if (card.attempted) return;
+    pci_device_t device = pci_scan_for_device(PCI_VENDOR_INTEL, IWX_PCI_AX200);
+    if (device.vendor_id != PCI_VENDOR_INTEL || device.device_id != IWX_PCI_AX200) {
+        card.status.stage = IWX200_ABSENT; card.status.error = -19;
+        card.attempted = true;
+        return;
+    }
+    card.status.present = true;
     file_t* file;
-    if (file_open(IWX_FW_PATH, O_RDONLY, &file) < 0) return;
+    if (file_open(IWX_FW_PATH, O_RDONLY, &file) < 0) {
+        card.status.stage = IWX200_FIRMWARE_MISSING; card.status.error = -2;
+        klog(LOG_WARN, "iwx200: AX200 present, firmware missing: %s\n", IWX_FW_PATH);
+        return;
+    }
     u8* image = kmalloc(IWX_FW_MAX_READ);
-    if (!image) { file_unref(file); return; }
+    if (!image) {
+        card.status.stage = IWX200_FIRMWARE_MISSING; card.status.error = -12;
+        klog(LOG_WARN, "iwx200: AX200 firmware buffer allocation failed\n");
+        file_unref(file); return;
+    }
     u64 used = 0;
     for (;;) {
         i64 n = file_read(file, image + used, IWX_FW_MAX_READ - used);
-        if (n < 0) { kfree(image); file_unref(file); return; }
+        if (n < 0) {
+            card.status.stage = IWX200_FIRMWARE_INVALID; card.status.error = (i32)n;
+            klog(LOG_WARN, "iwx200: AX200 firmware read failed: %d\n", (i32)n);
+            kfree(image); file_unref(file); return;
+        }
         if (!n) break;
         used += (u64)n;
         if (used == IWX_FW_MAX_READ) break;
     }
     file_unref(file);
-    if (!used || !iwx200_stage_fw(image, used)) { kfree(image); return; }
+    if (!used || !iwx200_stage_fw(image, used)) {
+        card.status.stage = IWX200_FIRMWARE_INVALID; card.status.error = -22;
+        klog(LOG_WARN, "iwx200: AX200 invalid firmware image: %s\n", IWX_FW_PATH);
+        kfree(image); return;
+    }
     // The staged image borrows this buffer; it is never freed.
-    if (!iwx200_init()) { klog(LOG_WARN, "iwx200: AX200 not ready\n"); return; }
-    if (iwx200_run_init()) { klog(LOG_WARN, "iwx200: AX200 init commands failed\n"); return; }
+    if (!iwx200_init()) {
+        klog(LOG_WARN, "iwx200: AX200 bootstrap failed stage=%u error=%d int=%08x gp=%08x\n",
+             (u32)card.status.stage, card.status.error, card.status.csr_interrupt, card.status.csr_gp);
+        return;
+    }
+    if (iwx200_run_init()) { klog(LOG_WARN, "iwx200: AX200 NVM init failed: %d\n", card.status.error); return; }
     klog(LOG_OKAY, "iwx200: AX200 firmware alive, MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
          card.mac[0], card.mac[1], card.mac[2], card.mac[3], card.mac[4], card.mac[5]);
 }
 // --- Command transport ---
 // A TFD entry: transfer descriptor for one command. Two transfer buffers
-// at most: the 8-byte header plus up to 316 bytes of payload.
-typedef struct {
+// at most: the first20B plus the remaining command bytes.
+typedef struct __attribute__((packed)) {
     u16 count;
-    u8 pad[2];
-    struct { u16 length; u16 reserved; u32 address_low; u32 address_high; } tb[2];
-    u8 reserved[256 - 4 - 24];
+    struct __attribute__((packed)) { u16 length; u64 address; } tb[25];
+    u32 pad;
 } tfd_t;
-_Static_assert(sizeof(tfd_t) == 256, "AX200 TFD size");
-// A command buffer: wide header plus inline payload.
-typedef struct {
-    u8 opcode, group, index, queue;
-    u16 length, reserved;
-    u8 version;
-    u8 payload[IWX_CMD_MAX_PAYLOAD];
-} cmd_t;
-// An RX notification: firmware header plus payload in a 4 KiB buffer.
-typedef struct {
-    u32 length_flags;
-    u8 code, flags, index, queue;
-    u8 payload[];
-} notif_t;
+_Static_assert(sizeof(tfd_t) == 256, "Intel long TFD ABI");
+_Static_assert(__builtin_offsetof(tfd_t, tb[0].length) == 2, "TFD TB length");
+_Static_assert(__builtin_offsetof(tfd_t, tb[0].address) == 4, "TFD TB address");
+_Static_assert(sizeof(((tfd_t*)0)->tb[0]) == 10, "TFD TB stride");
 static void cmd_put16(volatile u8* p, u16 value) { p[0] = (u8)value; p[1] = (u8)(value >> 8); }
 static void cmd_put32(volatile u8* p, u32 value) {
     p[0] = (u8)value; p[1] = (u8)(value >> 8); p[2] = (u8)(value >> 16); p[3] = (u8)(value >> 24);
@@ -441,20 +694,26 @@ static u32 get32(const volatile u8* p) {
 // stay permanently reserved. The context info points at these; this must
 // run before the firmware is kicked.
 static bool transport_alloc(void) {
-    u64 tx_phys, cmd_phys, free_phys, status_phys;
+    u64 tx_phys, free_phys, status_phys, used_phys;
     u8* tx = dma_contig(&tx_phys, IWX_TX_RING_COUNT * 256);
-    u8* cmd = dma_contig(&cmd_phys, IWX_TX_RING_COUNT * 324);
     u8* free_ring = dma_contig(&free_phys, IWX_RX_RING_COUNT * 8);
     u8* status = dma_contig(&status_phys, 16);
-    if (!tx || !cmd || !free_ring || !status) return false;
+    u8* used_ring = dma_contig(&used_phys, IWX_RX_RING_COUNT * 4);
+    if (!tx || !free_ring || !status || !used_ring) return false;
+    card.rx_used_phys = used_phys;
     card.tx_ring = (volatile u8*)tx;
     card.tx_phys = tx_phys;
-    card.cmd_data = (volatile u8*)cmd;
-    card.cmd_phys = cmd_phys;
+    for (u32 i = 0; i < IWX_TX_RING_COUNT; i++) {
+        card.cmd_buffers[i] = dma_page(&card.cmd_addresses[i]);
+        if (!card.cmd_buffers[i]) return false;
+    }
     card.rx_free_phys = free_phys;
     card.rx_status_phys = status_phys;
     card.rx_free = (u64*)free_ring;
     card.rx_status = (volatile u16*)status;
+    // Describe every receive buffer before the firmware runs: the first
+    // thing it does after self-load is DMA its ALIVE notification, and it
+    // has no other way to learn where to write it.
     for (u32 i = 0; i < IWX_RX_RING_COUNT; i++) {
         u64 phys;
         u8* buffer = dma_contig(&phys, IWX_RX_BUFFER_SIZE);
@@ -462,6 +721,7 @@ static bool transport_alloc(void) {
         card.rx_buffers[i] = buffer;
         card.rx_free[i] = phys | (i & 0xfff);
     }
+    fence();
     return true;
 }
 // The firmware consumes RX buffers in order; replenish by handing it the
@@ -474,19 +734,39 @@ static void rx_replenish(u32 index) {
 // when no notification is waiting. The buffer is reused after the caller
 // copies out; the caller must copy before the next call.
 static u32 rx_poll(const volatile u8** payload_out) {
-    u16 closed = *card.rx_status;
-    if ((closed & 0xfff) >= IWX_RX_RING_COUNT) return 0;
-    if (card.rx_next == (closed & 0x1ff)) return 0;
-    u32 index = card.rx_next;
+    if (!card.rx_status || !card.rx_started) return 0;
+    // iwx_notif_intr masks closed_rb_num to the configured cyclic ring:
+    // hardware status exposes12bits, our AX200 ring uses9bits (512 slots).
+    u16 closed = *card.rx_status & (IWX_RX_RING_COUNT - 1);
+    if (card.rx_next == closed) return 0;
+    u32 index = card.rx_next, offset = card.rx_offset;
     const volatile u8* buffer = card.rx_buffers[index];
-    u32 length_flags = get32(buffer);
-    if (length_flags == 0x55550000u) return 0; // invalid marker
-    u32 length = length_flags & 0x3fff;
-    if (length < 8 || length > IWX_RX_BUFFER_SIZE) return 0;
-    *payload_out = buffer;
-    card.rx_next = (card.rx_next + 1) % IWX_RX_RING_COUNT;
-    rx_replenish(index);
-    return length;
+    u32 wire = get32(buffer + offset);
+    u32 size = wire & 0x3fff;
+    // Wire size includes the four-byte command header, excludes length word.
+    if (wire == 0x55550000u || size < 4 || size > IWX_RX_BUFFER_SIZE - offset - 4) {
+        card.rx_offset = 0;
+        zero(card.rx_buffers[index], IWX_RX_BUFFER_SIZE);
+        card.rx_next = (index + 1) % IWX_RX_RING_COUNT;
+        rx_replenish(index);
+        reg_write(IWX_CSR_RX_WPTR, ((card.rx_next + IWX_RX_RING_COUNT - 1) % IWX_RX_RING_COUNT) & ~7u);
+        return 0;
+    }
+    u32 total = size + 4;
+    for (u32 i = 0; i < total; i++) card.rx_packet[i] = buffer[offset + i];
+    *payload_out = card.rx_packet;
+    u32 next = offset + ((total + 63) & ~63u);
+    u32 next_wire = next + 8 <= IWX_RX_BUFFER_SIZE ? get32(buffer + next) : 0;
+    if (next_wire && next_wire != 0x55550000u && (next_wire & 0x3fff) >= 4) {
+        card.rx_offset = next;
+    } else {
+        card.rx_offset = 0;
+        zero(card.rx_buffers[index], IWX_RX_BUFFER_SIZE);
+        card.rx_next = (index + 1) % IWX_RX_RING_COUNT;
+        rx_replenish(index);
+        reg_write(IWX_CSR_RX_WPTR, ((card.rx_next + IWX_RX_RING_COUNT - 1) % IWX_RX_RING_COUNT) & ~7u);
+    }
+    return total;
 }
 // Send a synchronous command and wait for its response. Polls the RX ring
 // with a TSC deadline; never blocks. Matched by slot index.
@@ -495,22 +775,32 @@ i32 iwx200_command(u32 group, u32 opcode, u32 version,
                    void* response, u32 capacity) {
     if (!card.online) return -22; // EINVAL
     if ((!payload && payload_length) || payload_length > IWX_CMD_MAX_PAYLOAD) return -90; // EMSGSIZE
-    if (payload_length && !response && capacity) return -22;
+    if (!response && capacity) return -22;
     u64 flags = irq_save();
+    if (card.command_busy) { irq_restore(flags); return -16; }
+    card.command_busy = true;
+    irq_restore(flags);
+    if (!group) group = IWX_GRP_LONG;
     u32 slot = card.tx_next;
     u8 index = card.tx_index++;
-    volatile u8* cmd = card.cmd_data + (u64)slot * 324;
+    volatile u8* cmd = card.cmd_buffers[slot];
     cmd[0] = (u8)opcode; cmd[1] = (u8)group; cmd[2] = index; cmd[3] = 0;
     cmd_put16(cmd + 4, (u16)payload_length); cmd[6] = 0; cmd[7] = (u8)version;
-    for (u32 i = 0; i < payload_length; i++) cmd[8 + i] = ((const u8*)payload)[i];    // TFD: one transfer buffer covering header plus payload.
+    for (u32 i = 0; i < payload_length; i++) cmd[8 + i] = ((const u8*)payload)[i];    // TFD starts with the writable20-byte scratch transfer buffer.
     volatile u8* tfd = card.tx_ring + (u64)slot * 256;
-    u64 cmd_phys = card.cmd_phys + (u64)slot * 324;
+    u64 cmd_phys = card.cmd_addresses[slot];
     cmd_put16(tfd, 1); // one TB
-    tfd[2] = tfd[3] = 0;
-    cmd_put16(tfd + 4, (u16)(8 + payload_length));
-    cmd_put16(tfd + 6, 0);
-    cmd_put32(tfd + 8, (u32)cmd_phys);
-    cmd_put32(tfd + 12, (u32)(cmd_phys >> 32));
+    for (u32 i = 2; i < 256; i++) tfd[i] = 0;
+    u32 first = 8 + payload_length > 20 ? 20 : 8 + payload_length;
+    cmd_put16(tfd + 2, (u16)first);
+    cmd_put32(tfd + 4, (u32)cmd_phys);
+    cmd_put32(tfd + 8, (u32)(cmd_phys >> 32));
+    if (8 + payload_length > first) {
+        cmd_put16(tfd, 2);
+        cmd_put16(tfd + 12, (u16)(8 + payload_length - first));
+        cmd_put32(tfd + 14, (u32)(cmd_phys + first));
+        cmd_put32(tfd + 18, (u32)((cmd_phys + first) >> 32));
+    }
     fence();
     card.tx_next = (card.tx_next + 1) % IWX_TX_RING_COUNT;
     reg_write(IWX_HBUS_WRPTR, (IWX_CMD_QUEUE << 16) | card.tx_next);
@@ -519,9 +809,11 @@ i32 iwx200_command(u32 group, u32 opcode, u32 version,
     u64 start = time_counter_ns();
     i32 result = -110; // ETIMEDOUT
     for (;;) {
+        if (!service_interrupts()) { result = -5; break; }
         const volatile u8* buffer;
         u32 length = rx_poll(&buffer);
         if (length >= 8) {
+            if (data_completion(buffer, length)) continue;
             u8 code = buffer[4], rflags = buffer[5], rindex = buffer[6], queue = buffer[7];
             u32 payload_length = length - 8;
             // Unsolicited notifications (high queue bit) are recorded for
@@ -530,21 +822,23 @@ i32 iwx200_command(u32 group, u32 opcode, u32 version,
             // notification so mgmt_rx can retrieve it after the command.
             if (queue & 0x80) {
                 card.notif_code = code;
-                card.notif_group = 0; // legacy group; wide groups decoded later
+                card.notif_group = rflags;
                 card.notif_length = payload_length > sizeof(card.notif_payload) ?
                     sizeof(card.notif_payload) : payload_length;
                 for (u32 i = 0; i < card.notif_length; i++)
                     card.notif_payload[i] = buffer[8 + i];
                 card.notif_pending = true;
-                if (code == IWX_CMD_INIT_COMPLETE) {
-                    // Init-complete needs no response; keep polling for
-                    // the solicited reply if one is outstanding.
-                    if (group == 0 && opcode == 0) { result = 0; break; }
+                if (card.notification) card.notification(rflags, code, card.rx_packet + 8, payload_length);
+                if (code == IWX_CMD_INIT_COMPLETE && rflags == 0) {
+                    card.init_complete = true;
+                    // Keep polling for the solicited command acknowledgement.
                 }
                 continue;
             }
-            if (rindex == index) {
-                if (rflags & IWX_CMD_FAILED) result = -5; // EIO
+            if (rindex == index && queue == IWX_CMD_QUEUE &&
+                ((code == opcode && (rflags & ~IWX_CMD_FAILED) == group) || (code == 2 && rflags == 0))) {
+                if ((rflags & IWX_CMD_FAILED) || (code == 2 && rflags == 0)) result = -5; // EIO
+                else if (!response && !capacity) result = 0;
                 else if (payload_length > capacity) result = -90;
                 else {
                     for (u32 i = 0; i < payload_length; i++)
@@ -558,7 +852,13 @@ i32 iwx200_command(u32 group, u32 opcode, u32 version,
         if (time_counter_ns() - start >= IWX_CMD_NS) break;
         __asm__ volatile("pause" ::: "memory");
     }
+    flags = irq_save();
+    card.command_busy = false;
     irq_restore(flags);
+    if (result < 0) {
+        card.status.error = result;
+        if (result == -110 || result == -5) init_failure(result);
+    }
     return result;
 }
 // --- Post-alive init sequence ---
@@ -570,8 +870,10 @@ static void put32le(u8* p, u32 value) {
 static u8 nvm_mac[6];
 i32 iwx200_run_init(void) {
     if (!card.online) return -22;
+    if (card.status.nvm_ready) return 0;
     u8 payload[8];
     u8 response[512];
+    card.status.stage = IWX200_NVM;
     // INIT_EXTENDED_CFG with the NVM flag.
     put32le(payload, IWX_SYS_INIT_NVM);
     if (iwx200_command(IWX_GRP_SYSTEM, IWX_SYS_INIT_EXTENDED_CFG, 0, payload, 4, response, sizeof(response)) < 0)
@@ -583,311 +885,221 @@ i32 iwx200_run_init(void) {
     // INIT_COMPLETE arrives as an unsolicited notification, consumed by
     // the transport during the commands above. Check the recorded flag
     // first, then poll once more in case it arrives late.
-    bool complete = card.notif_pending && card.notif_code == IWX_CMD_INIT_COMPLETE;
+    bool complete = card.init_complete;
     card.notif_pending = false;
     for (u32 attempt = 0; !complete && attempt < 2; attempt++) {
-        u64 flags = irq_save();
         u64 start = time_counter_ns();
         while (time_counter_ns() - start < IWX_CMD_NS) {
             const volatile u8* buffer;
-            if (rx_poll(&buffer) >= 8 && (buffer[7] & 0x80) && buffer[4] == IWX_CMD_INIT_COMPLETE)
-                { complete = true; break; }
+            if (!service_interrupts()) { init_failure(-5); return -5; }
+            if (rx_poll(&buffer) >= 8 && (buffer[7] & 0x80) && buffer[4] == IWX_CMD_INIT_COMPLETE && buffer[5] == 0)
+                { complete = true; card.init_complete = true; break; }
             __asm__ volatile("pause" ::: "memory");
         }
-        irq_restore(flags);
     }
-    if (!complete) return -110;
+    if (!complete) { init_failure(-110); return -110; }
     put32le(payload, 0);
     i32 n = iwx200_command(IWX_GRP_REGULATORY, IWX_REG_NVM_GET_INFO, 0, payload, 4, response, sizeof(response));
-    if (n < 8) return -110;
+    u32 expected = card.fw.nvm_version >= 4 ? 468 : 128;
+    if (n != (i32)expected) { init_failure(-5); return -5; }
     // NVM general section: flags(4) version(2) board(1) addrs(1).
     u8 addrs = response[7];
-    if (!addrs) return -5;
+    if (!addrs) { init_failure(-5); return -5; }
+    card.nvm.tx_chains = get32(response + 12);
+    card.nvm.rx_chains = get32(response + 16);
+    card.nvm.phy_config = card.fw.phy_config;
+    card.nvm.lar_enabled = get32(response + 20);
+    card.nvm.channel_count = card.fw.nvm_version >= 4 ? get32(response + 24) : 51;
+    if (card.nvm.channel_count > 110) { init_failure(-5); return -5; }
+    for (u32 i = 0; i < card.nvm.channel_count; i++)
+        card.nvm.channel_profiles[i] = card.fw.nvm_version >= 4 ? get32(response + 28 + i * 4) :
+            (u32)response[24 + i * 2] | ((u32)response[25 + i * 2] << 8);
     // The factory MAC comes from the strap registers (already validated
     // during probe); NVM confirms an address exists for this card.
     copy(nvm_mac, card.mac, 6);
+    card.status.nvm_ready = true;
+    card.status.stage = IWX200_READY;
     return 0;
 }
 void iwx200_nvm_mac(u8 out[6]) { if (out) copy(out, nvm_mac, 6); }
-// --- Wireless data path ---
-// Station MAC context: BSS client mode. Field order per the firmware API.
-static i32 mac_context(u8 action, const u8 bssid[6], bool associated, u16 aid) {
-    u8 cmd[128];
-    for (u32 i = 0; i < sizeof(cmd); i++) cmd[i] = 0;
-    put32le(cmd, 0); // id and color
-    put32le(cmd + 4, action); // 1 add, 2 modify, 3 remove
-    put32le(cmd + 8, 5); // BSS_STA
-    put32le(cmd + 12, 0); // tsf id A
-    copy(cmd + 16, card.mac, 6); // node address
-    copy(cmd + 24, bssid, 6);
-    put32le(cmd + 32, 0x0000000f); // CCK rates 1/2/5.5/11
-    put32le(cmd + 36, 0x00000ff5); // OFDM rates
-    put32le(cmd + 44, 0x20); // short preamble
-    put32le(cmd + 48, 0x10); // short slot
-    put32le(cmd + 52, (1u << 2) | (associated ? 0 : (1u << 6))); // accept group + beacons pre-assoc
-    // mac_data_sta past the QoS/AC blocks (offset 96 in this layout).
-    put32le(cmd + 96, associated ? 1 : 0); // is_assoc
-    put32le(cmd + 116, 10); // listen interval
-    put32le(cmd + 120, aid); // assoc id
-    u8 response[16];
-    i32 n = iwx200_command(IWX_GRP_MAC_CONF, 0x28, 0, cmd, sizeof(cmd), response, sizeof(response));
-    return n < 0 ? n : 0;
-}
-// Station entry for the AP: link-layer address plus HT/VHT capability flags.
-static i32 add_station(const u8 bssid[6], bool modify) {
-    u8 cmd[64];
-    for (u32 i = 0; i < sizeof(cmd); i++) cmd[i] = 0;
-    cmd[0] = modify ? 1 : 0;
-    put32le(cmd + 4, 0); // mac id and color
-    copy(cmd + 8, bssid, 6);
-    cmd[16] = 0; // station id 0
-    // station flags: FAT 80 MHz (2 << 26), MIMO2 (1 << 28).
-    put32le(cmd + 20, (2u << 26) | (1u << 28));
-    u8 response[16];
-    i32 n = iwx200_command(IWX_GRP_LEGACY, 0x18, 0, cmd, sizeof(cmd), response, sizeof(response));
-    return n < 0 ? n : 0;
-}
-// Install the pairwise CCMP key for station 0 (ADD_STA_KEY, legacy 0x17).
-static i32 install_key(const u8 tk[16]) {
-    u8 cmd[64];
-    for (u32 i = 0; i < sizeof(cmd); i++) cmd[i] = 0;
-    cmd[0] = 0; // station id
-    cmd[1] = 0; // pairwise offset
-    cmd[2] = 2; cmd[3] = 0; // CCMP key flags
-    copy(cmd + 4, tk, 16);
-    u8 response[16];
-    i32 n = iwx200_command(IWX_GRP_LEGACY, 0x17, 0, cmd, sizeof(cmd), response, sizeof(response));
-    return n < 0 ? n : 0;
-}
-// Session protection around the association exchange (900 TU).
-static i32 session_protect(bool add) {
-    u8 cmd[24];
-    for (u32 i = 0; i < sizeof(cmd); i++) cmd[i] = 0;
-    put32le(cmd + 4, add ? 1 : 3);
-    put32le(cmd + 8, 0); // assoc conf id
-    put32le(cmd + 12, 900); // duration
-    u8 response[16];
-    i32 n = iwx200_command(IWX_GRP_MAC_CONF, 0x05, 0, cmd, sizeof(cmd), response, sizeof(response));
-    return n < 0 ? n : 0;
-}
-// Link state and association context for the network layer.
-static u8 link_state = IWX_LINK_DOWN;
-static u8 link_bssid[6];
-static wifi_sta_t mlme;
-static wpa_t handshake;
-iwx_link_t iwx200_link(void) { return card.online ? link_state : IWX_LINK_DOWN; }
-// Management frame transmit through the firmware's auxiliary queue. The
-// frame is built by the MLME core (wifi_next_tx) and sent as a TX command
-// on the management queue; the reply arrives as an RX notification.
-static i32 mgmt_tx(const void* frame, u32 length) {
-    if (length > 256 || !length) return -90;
-    u8 cmd[8 + 256];
-    // TX_CMD gen2 prefix: length, offload, flags (rate-controlled mgmt),
-    // DRAM info, rate flags zero (firmware rate control for data only).
-    cmd[0] = (u8)(length + 8); cmd[1] = (u8)((length + 8) >> 8);
-    cmd[2] = 24; cmd[3] = 0; // offload: MAC header size
-    put32le(cmd + 4, 0x01); // CMD_RATE: fixed legacy rate for mgmt
-    for (u32 i = 0; i < length; i++) cmd[8 + i] = ((const u8*)frame)[i];
-    u8 response[16];
-    // Data-path TX commands travel the same queue-0 transport until the
-    // SCD data queues are configured on hardware.
-    i32 n = iwx200_command(IWX_GRP_LEGACY, 0x1c, 0, cmd, 8 + length, response, sizeof(response));
-    return n < 0 ? n : 0;
-}
-// Poll one RX management frame into the buffer. Returns the length, 0
-// when nothing arrives before the deadline.
-static u32 mgmt_rx(void* buffer, u32 capacity, u64 nanoseconds) {
-    // A command wait may have already consumed the frame into the stash.
-    if (card.notif_pending && card.notif_code == 0xc1 && card.notif_length > 16) {
-        u32 frame_length = card.notif_length - 16;
-        if (frame_length <= capacity) {
-            for (u32 i = 0; i < frame_length; i++)
-                ((u8*)buffer)[i] = card.notif_payload[16 + i];
-            card.notif_pending = false;
-            return frame_length;
-        }
+i32 iwx200_cmd_version(u8 group, u8 opcode) {
+    if (!group) group = IWX_GRP_LONG;
+    for (u32 i = 0; i < card.fw.command_version_count; i++) {
+        const u8* row = card.fw.command_versions[i];
+        if (row[0] == opcode && row[1] == group) return row[2] == 99 ? -1 : row[2];
     }
-    u64 start = time_counter_ns();
-    for (;;) {
-        const volatile u8* notif;
-        u32 length = rx_poll(&notif);
-        // RX MPDU notifications carry 802.11 frames past an 8-byte header
-        // plus a 16-byte descriptor; management frames route to the MLME.
-        if (length > 24) {
-            u32 frame_length = length - 24;
-            if (frame_length <= capacity) {
-                for (u32 i = 0; i < frame_length; i++)
-                    ((u8*)buffer)[i] = notif[24 + i];
-                return frame_length;
-            }
-        }
-        if (time_counter_ns() - start >= nanoseconds) return 0;
-        __asm__ volatile("pause" ::: "memory");
-    }
+    return -1;
 }
-i32 iwx200_connect(const void* ssid, u32 ssid_length, const char* passphrase) {
-    if (!card.online) return -22;
-    if (!ssid || !ssid_length || ssid_length > WIFI_SSID_MAX) return -22;
-    // The BSSID comes from a prior scan; without scan results there is no
-    // target. Scanning needs the UMAC_SCAN command, verified on hardware.
-    // Until then, association targets the configured BSSID only.
-    if (!link_bssid[0] && !link_bssid[1] && !link_bssid[2] &&
-        !link_bssid[3] && !link_bssid[4] && !link_bssid[5]) return -95;
-    wifi_sta_init(&mlme, card.mac);
-    if (!wifi_sta_join(&mlme, link_bssid, ssid, ssid_length)) return -22;
-    link_state = IWX_LINK_ASSOCIATING;
-    if (session_protect(true)) goto fail;
-    if (mac_context(1, link_bssid, false, 0)) goto fail;
-    if (add_station(link_bssid, false)) goto fail;
-    // Open-system authentication + association through the MLME core.
-    u8 frame[512];
-    for (u32 round = 0; round < 4; round++) {
-        u32 tx_length = wifi_next_tx(&mlme);
-        if (!tx_length) break;
-        if (mgmt_tx(mlme.last_tx, tx_length)) goto fail;
-        u32 rx_length = mgmt_rx(frame, sizeof(frame), 1000000000ULL);
-        if (!rx_length || !wifi_receive(&mlme, frame, rx_length)) goto fail;
-        if (mlme.state == WIFI_ASSOCIATED) break;
+i32 iwx200_notif_version(u8 group, u8 opcode) {
+    for (u32 i = 0; i < card.fw.command_version_count; i++) {
+        const u8* row = card.fw.command_versions[i];
+        if (row[0] == opcode && row[1] == group) return row[3] == 99 ? -1 : row[3];
     }
-    if (mlme.state != WIFI_ASSOCIATED) goto fail;
-    if (mac_context(2, link_bssid, true, mlme.aid)) goto fail;
-    if (add_station(link_bssid, true)) goto fail;
-    session_protect(false);
-    // Open network: link is up with no keys.
-    if (!passphrase || !passphrase[0]) { link_state = IWX_LINK_UP; return 0; }
-    // WPA2-PSK: run the 4-way handshake. EAPOL frames are 802.11 data to
-    // the AP's MAC with LLC/SNAP encapsulation (RFC 1042).
-    link_state = IWX_LINK_HANDSHAKE;
-    wpa_derive_pmk(&handshake, passphrase, ssid, ssid_length);
-    wpa_start(&handshake, link_bssid, card.mac);
-    u8 eapol[512], data[1536], reply[512];
-    for (u32 round = 0; round < 8; round++) {
-        u32 rx_length = mgmt_rx(data, sizeof(data), 2000000000ULL);
-        if (!rx_length) goto fail;
-        // Strip the 802.11 data header (24 bytes) and LLC/SNAP (8 bytes)
-        // to reach the EAPOL PDU.
-        if (rx_length < 32) continue;
-        u32 reply_length = 0;
-        if (!wpa_receive(&handshake, data + 32, rx_length - 32, reply, sizeof(reply), &reply_length))
-            continue;
-        if (wpa_completed(&handshake)) break;
-        if (!reply_length) continue;
-        // Encapsulate the reply: data header + LLC/SNAP + EAPOL.
-        u8* tx = eapol;
-        tx[0] = 0x08; tx[1] = 0x01; // data, to-DS
-        tx[2] = tx[3] = 0;
-        copy(tx + 4, link_bssid, 6); copy(tx + 10, card.mac, 6); copy(tx + 16, link_bssid, 6);
-        tx[22] = 0; tx[23] = 0;
-        static const u8 snap[8] = { 0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e };
-        copy(tx + 24, snap, 8);
-        copy(tx + 32, reply, reply_length);
-        if (mgmt_tx(tx, 32 + reply_length)) goto fail;
-    }
-    if (!wpa_completed(&handshake)) goto fail;
-    // Install the pairwise key, then report the link up.
-    u8 tk[16]; wpa_tk(&handshake, tk);
-    if (install_key(tk)) goto fail;
-    link_state = IWX_LINK_UP;
-    return 0;
-fail:
-    session_protect(false);
-    link_state = IWX_LINK_DOWN;
-    return -5;
+    return -1;
 }
-// Explicit BSSID for association (from a scan; the UMAC scan command
-// arrives with hardware verification). Returns false on a bad address.
-bool iwx200_set_bssid(const u8 bssid[6]) {
-    if (!bssid) return false;
-    u8 any = 0; for (u32 i = 0; i < 6; i++) any |= bssid[i];
-    if (!any || (bssid[0] & 1)) return false;
-    copy(link_bssid, bssid, 6);
+void iwx200_set_notification_handler(iwx200_notification_fn callback) { card.notification = callback; }
+void iwx200_poll(void) {
+    if (!card.online) return;
+    u64 flags = irq_save();
+    if (card.command_busy) { irq_restore(flags); return; }
+    card.command_busy = true;
+    irq_restore(flags);
+    if (!service_interrupts()) { init_failure(-5); }
+    else for (u32 i = 0; i < IWX_RX_RING_COUNT; i++) {
+        const volatile u8* packet;
+        u32 total = rx_poll(&packet);
+        if (!total) break;
+        if (data_completion(packet, total)) continue;
+        if ((packet[7] & 0x80) && card.notification)
+            card.notification(packet[5], packet[4], card.rx_packet + 8, total - 8);
+    }
+    flags = irq_save(); card.command_busy = false; irq_restore(flags);
+}
+bool iwx200_get_nvm(iwx200_nvm_t* out) {
+    if (!out || !card.status.nvm_ready) return false;
+    *out = card.nvm;
     return true;
 }
-// Transmit one Ethernet frame: 802.11 data header, CCMP protection with
-// the pairwise key and a fresh packet number, then the TX command.
-bool iwx200_send(const void* frame, u32 length) {
-    if (!card.online || link_state != IWX_LINK_UP || !frame) return false;
-    if (length < 14 || length > 1500) return false;
-    const u8* eth = frame;
-    u8 data[1600];
-    // 802.11 data header: to-DS, addresses BSSID/station/BSSID.
-    data[0] = 0x08; data[1] = 0x01;
-    data[2] = data[3] = 0;
-    copy(data + 4, link_bssid, 6); copy(data + 10, card.mac, 6); copy(data + 16, link_bssid, 6);
-    data[22] = 0; data[23] = 0;
-    u8* payload = data + 24;
-    u32 payload_length;
-    if (wpa_completed(&handshake)) {
-        // CCMP header: PN bytes plus key id 0.
-        u8 tk[16]; wpa_tk(&handshake, tk);
-        u8 pn[6];
-        u64 pn_value = ++handshake.tx_pn;
-        for (u32 i = 0; i < 6; i++) pn[i] = (u8)(pn_value >> (i * 8));
-        payload[0] = pn[0]; payload[1] = pn[1]; payload[2] = 0x20;
-        payload[3] = pn[2]; payload[4] = pn[3]; payload[5] = pn[4]; payload[6] = pn[5]; payload[7] = 0;
-        // AAD: masked frame control, A1, A2, A3, sequence (22 bytes).
-        u8 aad[28];
-        aad[0] = 0x08; aad[1] = 0x41; // protected bit set for the MIC
-        copy(aad + 2, link_bssid, 6); copy(aad + 8, card.mac, 6); copy(aad + 14, link_bssid, 6);
-        aad[20] = 0; aad[21] = 0;
-        u8 llc[8] = { 0xaa, 0xaa, 0x03, 0, 0, 0, eth[12], eth[13] };
-        u8 plain[1520];
-        copy(plain, llc, 8); copy(plain + 8, eth + 14, length - 14);
-        u32 protected_length = 0;
-        if (!wifi_ccmp_encrypt(tk, pn, card.mac, aad, 22, plain, length - 14 + 8,
-                               payload + 8, &protected_length)) return false;
-        payload_length = 8 + protected_length;
-    } else {
-        // Open network: LLC/SNAP encapsulation, no protection.
-        static const u8 snap[6] = { 0xaa, 0xaa, 0x03, 0, 0, 0 };
-        copy(payload, snap, 6);
-        payload[6] = eth[12]; payload[7] = eth[13];
-        copy(payload + 8, eth + 14, length - 14);
-        payload_length = length - 14 + 8;
+
+i32 iwx200_configure_radio(void) {
+    if (!card.online || !card.status.nvm_ready) return -19;
+    if (card.radio_ready) return 0;
+    // The currently bundled, audited discrete firmware is cc-a0 API71.
+    if (card.fw.api != 71) return -95;
+    u8 cmd[8] = {0}, response[16];
+    put32le(cmd, card.nvm.tx_chains & ((card.fw.phy_config >> 16) & 15));
+    if (!get32(cmd)) return -5;
+    i32 n = iwx200_command(0, 0x98, 0, cmd, 4, response, sizeof(response));
+    if (n < 0) return n;
+    // AX200 has no SISO diversity: upstream does not send PHY_CFG here.
+    put32le(cmd, 3); put32le(cmd + 4, 0); // BT_COEX_WIFI, no modules
+    n = iwx200_command(0, 0x9b, 0, cmd, 8, response, sizeof(response));
+    if (n < 0) return n;
+    put32le(cmd, 1); // SOC discrete, crystal latency0 for cc-a0
+    n = iwx200_command(2, 1, 0, cmd, 8, response, sizeof(response));
+    if (n < 0) return n;
+    // OpenBSD gates DQA_ENABLE on capability12. The bundled API71 does
+    // not advertise it; gen2 queue configuration works without this command.
+    if (card.fw.capabilities[0] & (1u << 12)) {
+        put32le(cmd, 0);
+        n = iwx200_command(5, 0, 0, cmd, 4, response, sizeof(response));
+        if (n < 0) return n;
     }
-    return !mgmt_tx(data, 24 + payload_length);
+    card.radio_ready = true;
+    return 0;
 }
-// Receive one Ethernet frame: strip the 802.11 header, verify CCMP,
-// convert LLC/SNAP to Ethernet. Returns the length, 0 when empty.
-u32 iwx200_receive(void* frame, u32 capacity) {
-    if (!card.online || link_state != IWX_LINK_UP || !frame) return 0;
-    u8 data[1600];
-    u32 rx_length = mgmt_rx(data, sizeof(data), 0);
-    if (rx_length < 32) return 0;
-    if (data[0] != 0x08 || !(data[1] & 0x02)) return 0; // data, from-DS
-    const u8* payload = data + 24;
-    u32 payload_length = rx_length - 24;
-    u8 plain[1600];
-    u32 plain_length = 0;
-    if (wpa_completed(&handshake)) {
-        if (payload_length < 16) return 0;
-        // CCMP header PN; reject replays.
-        u64 pn = (u64)payload[0] | ((u64)payload[1] << 8) | ((u64)payload[3] << 16) |
-                 ((u64)payload[4] << 24) | ((u64)payload[5] << 32) | ((u64)payload[6] << 40);
-        if (pn <= handshake.rx_pn) return 0;
-        u8 pn_bytes[6];
-        for (u32 i = 0; i < 6; i++) pn_bytes[i] = (u8)(pn >> (i * 8));
-        u8 aad[28];
-        aad[0] = 0x08; aad[1] = 0x41;
-        copy(aad + 2, data + 4, 6); copy(aad + 8, data + 16, 6); copy(aad + 14, data + 10, 6);
-        aad[20] = data[22]; aad[21] = data[23];
-        u8 tk[16]; wpa_tk(&handshake, tk);
-        if (!wifi_ccmp_decrypt(tk, pn_bytes, data + 16, aad, 22, payload + 8,
-                               payload_length - 8, plain, &plain_length)) return 0;
-        handshake.rx_pn = pn;
-    } else {
-        // Open network: payload starts with LLC/SNAP directly.
-        if (payload_length < 8) return 0;
-        plain_length = payload_length;
-        copy(plain, payload, plain_length);
+static i32 data_slot(u8 qid) {
+    for (u32 i = 0; i < 4; i++) if (card.data[i].active && card.data[i].qid == qid) return i;
+    return -1;
+}
+i32 iwx200_data_queue_enable(u8 station_id, u8 tid) {
+    if (!card.online || !card.radio_ready) return -19;
+    if (station_id >= 32 || tid > 15) return -22;
+    if (iwx200_cmd_version(5, 0x17) >= 0 || iwx200_cmd_version(1, 0x1d) != 2) return -95;
+    if (iwx200_cmd_version(1, 0x1c) != 9 || iwx200_notif_version(1, 0x1c) != 7) return -95;
+    i32 slot = -1;
+    for (u32 i = 0; i < 4; i++) {
+        if (card.data[i].active && card.data[i].station == station_id && card.data[i].tid == tid)
+            return card.data[i].qid;
+        if (!card.data[i].active && slot < 0) slot = i;
     }
-    // LLC/SNAP to Ethernet: destination, source, ethertype, payload.
-    if (plain_length < 8 || plain[0] != 0xaa || plain[1] != 0xaa || plain[2] != 0x03) return 0;
-    u32 eth_length = 14 + (plain_length - 8);
-    if (eth_length > capacity) return 0;
-    u8* out = frame;
-    copy(out, data + 4, 6); copy(out + 6, data + 16, 6);
-    out[12] = plain[6]; out[13] = plain[7];
-    copy(out + 14, plain + 8, plain_length - 8);
-    return eth_length;
+    if (slot < 0) return -28;
+    if (!card.data[slot].allocated) {
+        card.data[slot].ring = dma_contig(&card.data[slot].ring_phys, IWX_TX_RING_COUNT * 256);
+        card.data[slot].byte_counts = dma_page(&card.data[slot].byte_counts_phys);
+        if (!card.data[slot].ring || !card.data[slot].byte_counts) return -12;
+        card.data[slot].allocated = true;
+    }
+    zero(card.data[slot].ring, IWX_TX_RING_COUNT * 256);
+    zero(card.data[slot].byte_counts, 4096);
+    u8 cmd[24] = {0}, response[8];
+    cmd[0] = station_id; cmd[1] = tid; cmd_put16(cmd + 2, 1);
+    put32le(cmd + 4, 5); //256 entries, exponent minus3
+    copy(cmd + 8, &card.data[slot].byte_counts_phys, 8);
+    copy(cmd + 16, &card.data[slot].ring_phys, 8);
+    i32 n = iwx200_command(0, 0x1d, 0, cmd, sizeof(cmd), response, sizeof(response));
+    if (n < 0) return n;
+    if (n != 8 || response[2] || response[3]) return -5;
+    u32 qid = (u32)response[0] | ((u32)response[1] << 8);
+    u32 pointer = (u32)response[4] | ((u32)response[5] << 8);
+    if (!qid || qid >= 32 || pointer >= IWX_TX_RING_COUNT || data_slot(qid) >= 0) return -5;
+    card.data[slot].active = true; card.data[slot].qid = qid;
+    card.data[slot].station = station_id; card.data[slot].tid = tid;
+    card.data[slot].head = card.data[slot].tail = pointer;
+    card.data[slot].pending = 0;
+    return qid;
+}
+i32 iwx200_data_queue_disable(u8 qid) {
+    i32 slot = data_slot(qid);
+    if (slot < 0) return -22;
+    u8 cmd[24] = {0}, response[8];
+    cmd[0] = card.data[slot].station; cmd[1] = card.data[slot].tid;
+    i32 n = iwx200_command(0, 0x1d, 0, cmd, sizeof(cmd), response, sizeof(response));
+    if (n < 0) return n;
+    if (n != 8 || response[2] || response[3]) return -5;
+    card.data[slot].active = false;
+    card.data[slot].pending = 0;
+    return 0;
+}
+static void data_tb(volatile u8* descriptor, u32 tb, u64 address, u16 length) {
+    u32 offset = 2 + tb * 10;
+    cmd_put16(descriptor + offset, length);
+    cmd_put32(descriptor + offset + 2, (u32)address);
+    cmd_put32(descriptor + offset + 6, (u32)(address >> 32));
+}
+bool iwx200_data_tx(u8 qid, const u8 prefix[20], const void* frame, u32 length) {
+    i32 which = data_slot(qid);
+    if (!card.online || which < 0 || !prefix || !frame || length < 24 || length > 2304) return false;
+    const u8* bytes = frame;
+    u32 header = 24 + (((bytes[0] & 0x8c) == 0x88) ? 2 : 0);
+    if ((bytes[1] & 3) == 3 || length < header) return false;
+    if (((u32)prefix[0] | ((u32)prefix[1] << 8)) != length) return false;
+    u32 slot = card.data[which].head;
+    if (card.data[which].pending >= IWX_TX_RING_COUNT - 1) return false;
+    if (!card.data[which].buffers[slot]) {
+        card.data[which].buffers[slot] = dma_page(&card.data[which].addresses[slot]);
+        if (!card.data[which].buffers[slot]) return false;
+    }
+    u8* buffer = card.data[which].buffers[slot];
+    u64 physical = card.data[which].addresses[slot];
+    u32 pad = (4 - (header & 3)) & 3;
+    u32 first_size = 4 + 20 + header + pad;
+    zero(buffer, 4096);
+    buffer[0] = 0x1c; buffer[2] = slot; buffer[3] = qid; // narrow TX header
+    copy(buffer + 4, prefix, 20);
+    u16 assist = (u16)(prefix[2] | ((u16)prefix[3] << 8));
+    assist &= ~((31u << 8) | (1u << 13));
+    assist |= (header / 2) << 8;
+    if (pad) assist |= 1u << 13;
+    cmd_put16(buffer + 6, assist);
+    copy(buffer + 24, frame, header);
+    copy(buffer + first_size, bytes + header, length - header);
+    volatile u8* descriptor = card.data[which].ring + slot * 256;
+    zero((void*)descriptor, 256);
+    cmd_put16(descriptor, length > header ? 3 : 2);
+    data_tb(descriptor, 0, physical, 20);
+    data_tb(descriptor, 1, physical + 20, first_size - 20);
+    if (length > header) data_tb(descriptor, 2, physical + first_size, length - header);
+    // Gen2 scheduler length is in dwords; three TBs fit one64B TFD chunk.
+    card.data[which].byte_counts[slot] = (length + 3) / 4;
+    fence();
+    card.data[which].head = (slot + 1) % IWX_TX_RING_COUNT;
+    card.data[which].pending++;
+    reg_write(IWX_HBUS_WRPTR, ((u32)qid << 16) | card.data[which].head);
+    return true;
+}
+static bool data_completion(const volatile u8* packet, u32 total) {
+    u8 qid = packet[7];
+    i32 which = data_slot(qid);
+    if (which < 0 || packet[4] != 0x1c || packet[5] != 0) return false;
+    // API71 TX_RSPv7 uses the current44B fixed response plus trailing SSN.
+    // Aggregation is disabled: only frame_count1 is valid for these queues.
+    if (total < 8 + 48 || packet[8] != 1) return true;
+    u32 ssn = get32(packet + 8 + 44) & 0xfff;
+    if (ssn >= IWX_TX_RING_COUNT) return true;
+    u32 completed = (ssn + IWX_TX_RING_COUNT - card.data[which].tail) % IWX_TX_RING_COUNT;
+    if (completed > card.data[which].pending) return true;
+    card.data[which].pending -= completed;
+    card.data[which].tail = ssn;
+    return true;
 }
