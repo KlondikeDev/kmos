@@ -453,6 +453,26 @@ static void test_time(void) {
     CHECK("mkstemp twice in a row, in /tmp (tmpfs)", f1 >= 0 && f2 >= 0 && strcmp(t1, t2) != 0);
     if (f1 >= 0) { close(f1); unlink(t1); }
     if (f2 >= 0) { close(f2); unlink(t2); }
+
+    // Hard links in tmpfs: the X server takes its lock this way.
+    int lf = open("/tmp/pmtest-a", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (lf >= 0) { write(lf, "42", 2); close(lf); }
+    struct stat la, lb;
+    CHECK("link in /tmp: two names, one file",
+          link("/tmp/pmtest-a", "/tmp/pmtest-b") == 0 &&
+          stat("/tmp/pmtest-a", &la) == 0 && stat("/tmp/pmtest-b", &lb) == 0 &&
+          la.st_ino == lb.st_ino && la.st_nlink == 2);
+    errno = 0;
+    CHECK("link onto an existing name: EEXIST", link("/tmp/pmtest-a", "/tmp/pmtest-b") < 0 && errno == EEXIST);
+    CHECK("rename between two names of one file does nothing",
+          rename("/tmp/pmtest-a", "/tmp/pmtest-b") == 0 && access("/tmp/pmtest-a", F_OK) == 0);
+    char lbuf[4] = { 0 };
+    lf = open("/tmp/pmtest-b", O_RDONLY);
+    CHECK("unlink one name, the other still reads",
+          unlink("/tmp/pmtest-a") == 0 && lf >= 0 && read(lf, lbuf, 2) == 2 && !strcmp(lbuf, "42") &&
+          stat("/tmp/pmtest-b", &lb) == 0 && lb.st_nlink == 1);
+    if (lf >= 0) close(lf);
+    unlink("/tmp/pmtest-b");
 }
 
 static int cow_value = 1;

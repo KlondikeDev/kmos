@@ -39,11 +39,12 @@ fetch() {   # url
         curl -fL --retry 3 -o "$file.part" "$1" || { rm -f "$file.part"; return 1; }
         mv "$file.part" "$file"
     fi
-    case $file in
-        *.tar.gz)  tar -C "$SRC" -xzf "$file" ;;
-        *.tar.xz)  tar -C "$SRC" -xJf "$file" ;;
-        *.tar.bz2) tar -C "$SRC" -xjf "$file" ;;
-    esac
+    # Fresh every time: unpacked over an old build, make finds yesterday's
+    # generated files up to date (ncurses' built-in terminals, say).
+    local dir
+    dir=$(tar -tf "$file" | awk -F/ 'NR == 1 { print $1 }')
+    rm -rf "${SRC:?}/$dir"
+    tar -C "$SRC" -xf "$file"
 }
 
 build_musl() {
@@ -69,10 +70,11 @@ build_ncurses() {
     fetch https://ftp.gnu.org/gnu/ncurses/ncurses-$NCURSES_VER.tar.gz
     cd "$SRC/ncurses-$NCURSES_VER"
     # The terminal descriptions are compiled into the library, so nothing
-    # needs a terminfo database on the Kunix disk.
+    # needs a terminfo database on the Kunix disk: the console's (linux)
+    # and xterm's.
     CC="$(CC_MUSL)" ./configure --prefix="$MUSL" --without-shared --without-cxx \
         --without-cxx-binding --without-ada --without-tests --without-manpages \
-        --without-progs --disable-database --with-fallbacks=linux,vt100,dumb \
+        --without-progs --disable-database --with-fallbacks=linux,vt100,dumb,xterm,xterm-256color \
         --enable-termcap --with-termlib
     make -j"$JOBS"
     make install

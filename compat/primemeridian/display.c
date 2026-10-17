@@ -37,6 +37,8 @@
 #define FBIOPAN_DISPLAY     0x4606
 #define FBIOBLANK           0x4611
 
+#define KIOCSOUND  0x4B2F
+#define KDMKTONE   0x4B30
 #define KDGETLED   0x4B31
 #define KDSETLED   0x4B32
 #define KDGKBTYPE  0x4B33
@@ -171,6 +173,9 @@ static i64 console_ioctl(u32 req, u64 arg) {
         case KDSETLED:
         case KDSKBLED:
             leds = (u32)arg & 0xFF;
+            return 0;
+        case KIOCSOUND:                          // the bell: there is no speaker driver
+        case KDMKTONE:
             return 0;
 
         case VT_OPENQRY:                         // the free one is the only one

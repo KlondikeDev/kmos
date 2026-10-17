@@ -157,6 +157,31 @@ disk(){
 # /test -- so anything written to it on Kunix is gone after the next build.
 # What should last belongs in /home (below). Needs NetBSD's makefs (Debian
 # package "makefs").
+# X (buildutils/x11.sh), when it has been built: the server, xkbcomp, twm
+# and xterm in /usr/bin, with what they read -- keymaps, fonts, locale
+# tables, resources. Xfbdev is set-user-ID root: it must be root to take
+# the console.
+x11(){
+    local XROOT=${PM_PREFIX:-$HOME/opt/primemeridian}/x11
+    [ -x "$XROOT/usr/bin/Xfbdev" ] || return 0
+    local U=build/ufsroot/usr
+    mkdir -p $U/bin $U/share/X11/locale $U/share/fonts/X11
+    for p in Xfbdev xkbcomp twm xterm; do strip -o $U/bin/$p "$XROOT/usr/bin/$p"; done
+    cp x11/startx $U/bin/startx
+    cp -r "$XROOT/usr/share/X11/xkb" $U/share/X11/
+    # Resources (XTerm's): xterm puts them under lib/, libXt reads share/ too.
+    mkdir -p $U/share/X11/app-defaults
+    cp "$XROOT"/usr/lib/X11/app-defaults/* "$XROOT"/usr/share/X11/app-defaults/* $U/share/X11/app-defaults/ 2>/dev/null || true
+    [ -d "$XROOT/usr/share/X11/twm" ] && cp -r "$XROOT/usr/share/X11/twm" $U/share/X11/
+    cp "$XROOT"/usr/share/X11/XErrorDB "$XROOT"/usr/share/X11/XKeysymDB $U/share/X11/ 2>/dev/null || true
+    # Locales: just C and UTF-8 English (libX11 has some sixty).
+    local L="$XROOT/usr/share/X11/locale"
+    cp "$L"/locale.alias "$L"/locale.dir "$L"/compose.dir $U/share/X11/locale/
+    cp -r "$L/C" "$L/en_US.UTF-8" "$L/iso8859-1" $U/share/X11/locale/
+    cp -r "$XROOT/usr/share/fonts/X11/misc" $U/share/fonts/X11/
+    chmod 4755 $U/bin/Xfbdev
+}
+
 ufs(){
     if ! command -v makefs >/dev/null; then
         info "makefs not installed; skipping ufs.img (sudo apt install makefs)"
@@ -187,6 +212,7 @@ ufs(){
         cp build/habilis/habilis build/ufsroot/sbin/init
         ln build/ufsroot/sbin/init build/ufsroot/sbin/habilis
     fi
+    x11
     T=build/ufsroot/test
     printf 'Hello from UFS2!\nThis file lives on the second disk.\n' > $T/hello.txt
     printf 'Nested three levels down.\n' > $T/docs/deeper/nested.txt
@@ -204,9 +230,9 @@ ufs(){
     # privilege at once for every applet that does not need it.
     [ -f build/ufsroot/bin/busybox ] && chmod 4755 build/ufsroot/bin/busybox
     rm -f ufs.img
-    # Room to write in: 64 MiB, and at least 8192 inodes free (makefs would
+    # Room to write in: 128 MiB, and at least 8192 inodes free (makefs would
     # otherwise size the inode table to exactly what is on the image).
-    makefs -t ffs -o version=2 -s 64m -f 8192 ufs.img build/ufsroot > /dev/null
+    makefs -t ffs -o version=2 -s 128m -f 8192 ufs.img build/ufsroot > /dev/null
     python3 buildutils/ufschown.py ufs.img 0 0          # everything is root's
 }
 

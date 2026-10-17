@@ -8,8 +8,10 @@
 // characters but '/', and gone at reboot -- what scratch files want (and
 // what FAT32's 8.3 names cannot give them yet).
 //
-// Every file and directory is a tnode. A vnode's id is its tnode's address,
-// which never changes while the node exists, so open files and renames are
+// Every file and directory is a tnode; the names in a directory are its
+// tdents, each pointing at a tnode. A file may have several (hard links);
+// a directory has exactly one. A vnode's id is its tnode's address, which
+// never changes while the node exists, so open files and renames are
 // simple. Contents are one kmalloc'd buffer per file, grown by doubling.
 
 #include <types.h>
@@ -26,20 +28,27 @@
 
 #define TMPFS_MAX_BYTES (32 * MB)       // all file contents together
 
+struct tdent;
+
 typedef struct tnode {
-    char name[VFS_NAME_MAX];
-    u32 type;                           // VN_REG, VN_DIR or VN_LNK (target in data)
+    u32 type;                           // VN_REG, VN_DIR, VN_SOCK or VN_LNK (target in data)
     u32 mode, uid, gid;
-    bool orphan;                        // unlinked while open: freed on release
+    u32 links;                          // tdents naming it
+    bool orphan;                        // no names left but open: freed on release
     u8* data;
     u64 size, cap;
     u64 mtime;
-    struct tnode* parent;
-    struct tnode* children;             // directories: first child
-    struct tnode* next;                 // next sibling
+    struct tnode* parent;               // directories: the one they are in
+    struct tdent* entries;              // directories: what is in them
 } tnode_t;
 
-static tnode_t root = { .name = "", .type = VN_DIR, .mode = 01777 };   // like /tmp everywhere
+typedef struct tdent {
+    char name[VFS_NAME_MAX];
+    tnode_t* node;
+    struct tdent* next;
+} tdent_t;
+
+static tnode_t root = { .type = VN_DIR, .mode = 01777, .links = 1 };   // like /tmp everywhere
 static u64 used_bytes;
 
 static tnode_t* T(const vnode_t* n) {
@@ -56,27 +65,65 @@ static void fill(tnode_t* t, vnode_t* out) {
     out->mode = t->mode;
     out->uid = t->uid;
     out->gid = t->gid;
-    out->nlink = t->type == VN_DIR ? 2 : 1;
+    out->nlink = t->type == VN_DIR ? 2 : t->links;
 }
 
-static tnode_t* find(tnode_t* dir, const char* name) {
-    for (tnode_t* c = dir->children; c; c = c->next) {
-        if (!strcmp(c->name, name)) return c;
+static tdent_t* find(tnode_t* dir, const char* name) {
+    for (tdent_t* d = dir->entries; d; d = d->next) {
+        if (!strcmp(d->name, name)) return d;
     }
     return NULL;
 }
 
-static void detach(tnode_t* t) {
-    for (tnode_t** pp = &t->parent->children; *pp; pp = &(*pp)->next) {
-        if (*pp == t) { *pp = t->next; break; }
+// Take entry d out of directory dir (it is not freed).
+static void detach(tnode_t* dir, tdent_t* d) {
+    for (tdent_t** pp = &dir->entries; *pp; pp = &(*pp)->next) {
+        if (*pp == d) { *pp = d->next; break; }
     }
-    t->next = NULL;
+    d->next = NULL;
 }
 
-static void attach(tnode_t* dir, tnode_t* t) {
-    t->parent = dir;
-    t->next = dir->children;
-    dir->children = t;
+static void attach(tnode_t* dir, tdent_t* d) {
+    d->next = dir->entries;
+    dir->entries = d;
+    if (d->node->type == VN_DIR) d->node->parent = dir;
+}
+
+// A new name in dir for node t.
+static i32 add_name(tnode_t* dir, const char* name, tnode_t* t) {
+    tdent_t* d = kmalloc(sizeof(tdent_t));
+    if (!d) return -ENOSPC;
+    memset(d, 0, sizeof(*d));
+    strcpy(d->name, name);
+    d->node = t;
+    t->links++;
+    attach(dir, d);
+    return 0;
+}
+
+static void destroy(tnode_t* t) {
+    if (t->data) {
+        used_bytes -= t->cap;
+        kfree(t->data);
+    }
+    kfree(t);
+}
+
+// One name fewer: with none left, free the node now -- or at its last
+// close, if it is open.
+static void drop_link(const struct mount* m, tnode_t* t) {
+    if (--t->links) return;
+    vnode_t probe = { .mnt = m, .id = (u64)t };
+    if (vnode_is_open(&probe)) t->orphan = true;
+    else destroy(t);
+}
+
+// Remove entry d from dir, and the name's hold on its node.
+static void remove_name(const struct mount* m, tnode_t* dir, tdent_t* d) {
+    tnode_t* t = d->node;
+    detach(dir, d);
+    kfree(d);
+    drop_link(m, t);
 }
 
 static i32 tmpfs_root(vnode_t* out) {
@@ -87,9 +134,9 @@ static i32 tmpfs_root(vnode_t* out) {
 
 static i32 tmpfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
     if (T(dir)->type != VN_DIR) return -ENOTDIR;
-    tnode_t* t = find(T(dir), name);
-    if (!t) return -ENOENT;
-    fill(t, out);
+    tdent_t* d = find(T(dir), name);
+    if (!d) return -ENOENT;
+    fill(d->node, out);
     return 0;
 }
 
@@ -150,11 +197,11 @@ static i32 tmpfs_truncate(vnode_t* node, u64 size) {
 
 static i32 tmpfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t* out) {
     if (T(dir)->type != VN_DIR) return -ENOTDIR;
-    tnode_t* c = T(dir)->children;
-    while (c && index--) c = c->next;
-    if (!c) return 0;
-    strcpy(name_out, c->name);
-    fill(c, out);
+    tdent_t* d = T(dir)->entries;
+    while (d && index--) d = d->next;
+    if (!d) return 0;
+    strcpy(name_out, d->name);
+    fill(d->node, out);
     return 1;
 }
 
@@ -164,39 +211,31 @@ static i32 tmpfs_create(const vnode_t* dir, const char* name, u32 type, u32 mode
     tnode_t* t = kmalloc(sizeof(tnode_t));
     if (!t) return -ENOSPC;
     memset(t, 0, sizeof(*t));
-    strcpy(t->name, name);
     t->type = (type == VN_DIR || type == VN_SOCK) ? type : VN_REG;
     t->mode = mode & 07777;
     t->uid = proc_current()->euid;
     t->gid = proc_current()->egid;
     t->mtime = rtc_now();
-    attach(T(dir), t);
+    if (add_name(T(dir), name, t) < 0) { kfree(t); return -ENOSPC; }
     fill(t, out);
     return 0;
 }
 
-static void destroy(tnode_t* t) {
-    if (t->data) {
-        used_bytes -= t->cap;
-        kfree(t->data);
-    }
-    kfree(t);
-}
-
-// Gone from the tree: free it now, or at its last close if it is open.
-static void discard(const struct mount* m, tnode_t* t) {
-    detach(t);
-    vnode_t probe = { .mnt = m, .id = (u64)t };
-    if (vnode_is_open(&probe)) t->orphan = true;
-    else destroy(t);
-}
-
 static i32 tmpfs_unlink(const vnode_t* dir, const char* name) {
-    tnode_t* t = find(T(dir), name);
-    if (!t) return -ENOENT;
-    if (t->type == VN_DIR && t->children) return -ENOTEMPTY;
-    discard(dir->mnt, t);
+    tdent_t* d = find(T(dir), name);
+    if (!d) return -ENOENT;
+    if (d->node->type == VN_DIR && d->node->entries) return -ENOTEMPTY;
+    remove_name(dir->mnt, T(dir), d);
     return 0;
+}
+
+// Another name for a file (never a directory).
+static i32 tmpfs_link(const vnode_t* dir, const char* name, const vnode_t* target) {
+    if (T(dir)->type != VN_DIR) return -ENOTDIR;
+    if (T(target)->type == VN_DIR) return -EPERM;
+    if (strlen(name) >= VFS_NAME_MAX) return -ENAMETOOLONG;
+    if (find(T(dir), name)) return -EEXIST;
+    return add_name(T(dir), name, T(target));
 }
 
 static void tmpfs_release(vnode_t* node) {
@@ -210,7 +249,7 @@ static i32 tmpfs_symlink(const vnode_t* dir, const char* name, const char* targe
     tnode_t* t = T(out);
     t->type = VN_LNK;
     u64 len = strlen(target);
-    if ((r = reserve(t, len)) < 0) { detach(t); destroy(t); return r; }
+    if ((r = reserve(t, len)) < 0) { tmpfs_unlink(dir, name); return r; }
     memcpy(t->data, target, len);
     t->size = len;
     fill(t, out);
@@ -246,22 +285,23 @@ static i32 tmpfs_statfs(const struct mount* m, vfs_statfs_t* out) {
 
 static i32 tmpfs_rename(const vnode_t* olddir, const char* oldname,
                         const vnode_t* newdir, const char* newname) {
-    tnode_t* t = find(T(olddir), oldname);
-    if (!t) return -ENOENT;
+    tdent_t* d = find(T(olddir), oldname);
+    if (!d) return -ENOENT;
     if (strlen(newname) >= VFS_NAME_MAX) return -ENAMETOOLONG;
     // A directory cannot move inside itself.
     for (tnode_t* a = T(newdir); a; a = a->parent) {
-        if (a == t) return -EINVAL;
+        if (a == d->node) return -EINVAL;
     }
-    tnode_t* existing = find(T(newdir), newname);
-    if (existing == t) return 0;
+    tdent_t* existing = find(T(newdir), newname);
+    // Two names for the same file: POSIX says do nothing at all.
+    if (existing && existing->node == d->node) return 0;
     if (existing) {
-        if (existing->type == VN_DIR && existing->children) return -ENOTEMPTY;
-        discard(newdir->mnt, existing);
+        if (existing->node->type == VN_DIR && existing->node->entries) return -ENOTEMPTY;
+        remove_name(newdir->mnt, T(newdir), existing);
     }
-    detach(t);
-    strcpy(t->name, newname);
-    attach(T(newdir), t);
+    detach(T(olddir), d);
+    strcpy(d->name, newname);
+    attach(T(newdir), d);
     return 0;
 }
 
@@ -278,6 +318,7 @@ const vfs_ops_t tmpfs_vfs_ops = {
     .rename = tmpfs_rename,
     .readlink = tmpfs_readlink,
     .symlink = tmpfs_symlink,
+    .link = tmpfs_link,
     .setattr = tmpfs_setattr,
     .statfs = tmpfs_statfs,
     .release = tmpfs_release,

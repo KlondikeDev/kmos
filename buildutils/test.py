@@ -36,10 +36,11 @@ import time
 # Meridian (musl). pmsmoke: zsh and busybox, as a user drives them.
 # permtest: users and permissions (root dropping to an ordinary user).
 # fbtest: the framebuffer, mouse and raw keyboard, as the X server uses them.
+# xtest: X itself -- the server, an xterm typed into, the console handed back.
 # ufs: the UFS2 driver -- one boot writes a tree, a second boot checks and
 # removes it, then the host checks the image (ufsdiag.py, and FreeBSD's
 # fsck_ffs if buildutils/fsck-ffs.sh has built it).
-SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "fbtest", "ufs"]
+SUITES = ["ktest", "pmtest", "pmsmoke", "permtest", "fbtest", "xtest", "ufs"]
 UFS_PHASES = ["ufstest write", "ufstest verify"]
 FSCK = os.path.expanduser("~/opt/kunix-host/bin/fsck_ffs")
 

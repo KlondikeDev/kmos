@@ -1,0 +1,35 @@
+#!/bin/sh
+# This file has been generated in whole or in part by a Large Language Model
+
+# Copyright (c) 2026 Joseph Jones
+# Licensed under the Kunix License v1.0 or later
+# See LICENSE for details
+
+# startx: X on the console -- the server, twm, and an xterm. When that
+# xterm exits, X goes too and the console comes back.
+#
+#   startx [server arguments...]
+
+display=:0
+# Xfbdev takes input only from devices it is told of: the console's
+# keyboard (raw scancodes) and the mouse (it finds /dev/input/mice), whose
+# protocol is plain PS/2 -- left to guess, the server starts out parsing
+# 4-byte packets and needs a good shake of the mouse to change its mind.
+Xfbdev $display -nolisten tcp -keybd keyboard -mouse mouse,,protocol=ps/2 "$@" 2>/tmp/Xfbdev.log &
+server=$!
+export DISPLAY=$display
+
+# Wait for the server to start listening (up to ten seconds).
+i=0
+while [ ! -S /tmp/.X11-unix/X0 ] && [ $i -lt 100 ]; do
+    kill -0 $server 2>/dev/null || { echo "startx: the server died; see /tmp/Xfbdev.log" >&2; exit 1; }
+    sleep 0.1
+    i=$((i + 1))
+done
+
+# Their complaints go to a log: the console is X's while it runs (and in
+# raw mode, so they would come out as a staircase when it comes back).
+twm 2>>/tmp/X.log &
+xterm -geometry 80x24+20+20 2>>/tmp/X.log
+kill $server 2>/dev/null
+wait $server 2>/dev/null

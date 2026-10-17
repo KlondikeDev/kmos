@@ -2,9 +2,10 @@
 #
 # / is UFS2: /bin holds zsh, busybox (and /bin/sh, which is its ash) and
 # Kunix's own programs (as name.elf, and by plain name where busybox has
-# no tool of that name). The FAT32 boot disk is at /fat, and home
-# directories live on their own disk at /home, which survives rebuilds.
-export PATH=/bin
+# no tool of that name); /usr/bin has X (startx). The FAT32 boot disk is
+# at /fat, and home directories live on their own disk at /home, which
+# survives rebuilds.
+export PATH=/bin:/usr/bin
 export TERM=${TERM:-linux}
 export HOME=${HOME:-/home/root}
 [[ -d $HOME ]] || export HOME=/        # no home disk attached
