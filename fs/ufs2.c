@@ -1511,6 +1511,10 @@ void* ufs2_mount(u8 drive) {
         return NULL;
     }
 
+    if(fs->fs_flags & 0x0004) {
+        klog(LOG_ERROR,"ufs2: drive %u requires fsck after incomplete metadata changes\n",drive);
+        kfree(u->sbbuf);kfree(u->csum);kfree(u->cgbuf);kfree(u);return NULL;
+    }
     // Writing is safe without soft updates and without a journal -- unless
     // the filesystem expects them to be kept up (SUJ), or snapshots exist.
     u->writable = !(fs->fs_flags & 0x0008) && fs->fs_snapinum[0] == 0;

@@ -29,6 +29,7 @@
 #define VN_CHR  3              // character device
 #define VN_FIFO 4              // pipe
 #define VN_LNK  5              // symbolic link
+#define VN_BLK  7              // seekable raw disk
 #define VN_SOCK 6              // a local socket's name in the filesystem
 
 struct mount;

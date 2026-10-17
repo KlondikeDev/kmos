@@ -21,6 +21,7 @@
 #include <vfs.h>
 #include <tty.h>
 #include <devfs.h>
+#include <disk_ioctl.h>
 #include <signal.h>
 #include <errno.h>
 #include <pit.h>
@@ -130,6 +131,7 @@ void fill_stat(const vnode_t* n, kstat_t* st) {
     st->st_size = n->size;
     switch (n->type) {
         case VN_DIR:  st->st_mode = S_IFDIR | 0755; break;
+        case VN_BLK:  st->st_mode = S_IFBLK | 0600; break;
         case VN_CHR:  st->st_mode = S_IFCHR | 0666; break;
         case VN_FIFO: st->st_mode = S_IFIFO | 0600; break;
         case VN_LNK:  st->st_mode = S_IFLNK | 0777; break;
@@ -259,6 +261,12 @@ i64 sys_getcwd(u64 buf, u64 len) {
 static i64 sys_ioctl(u64 fd, u64 req, u64 arg) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
+    if(devfs_is_disk(f->node)) {
+        u32 size=devfs_disk_ioctl_size((u32)req);
+        if(size && !user_range_ok(arg,size,true)) return -EFAULT;
+        if(req==KDISK_RESCAN && !(f->flags&O_ACCMODE)) return -EBADF;
+        return devfs_disk_ioctl(f->node,(u32)req,(void*)arg);
+    }
     tty_t* t = file_tty(f);
     if (!t) return -ENOTTY;
     switch (req) {

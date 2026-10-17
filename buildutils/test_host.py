@@ -12,6 +12,8 @@ with tempfile.TemporaryDirectory(prefix="kunix-host-tests-") as work:
         ("vmm_cache", ["buildutils/tests/vmm_cache.c"], []),
         ("kmsg", ["buildutils/tests/kmsg.c"], ["-Ibuildutils/tests/include"]),
         ("disk_cache", ["buildutils/tests/disk_cache.c"], ["-Ibuildutils/tests/disk_include"]),
+        ("gpt", ["buildutils/tests/gpt.c", "kernel/gpt.c"], []),
+        ("nvme_protocol", ["buildutils/tests/nvme_protocol.c"], ["-Ibuildutils/tests/nvme_stubs"]),
         ("pagecache", ["buildutils/tests/pagecache.c", "kernel/pagecache.c"], []),
         ("mman_fill", ["buildutils/tests/mman_fill.c", "kernel/pagecache.c"], []),
         ("battery", ["buildutils/tests/battery.c", "kernel/battery.c"], ["-DBATTERY_NORMALIZE_TEST"]),
@@ -23,5 +25,7 @@ with tempfile.TemporaryDirectory(prefix="kunix-host-tests-") as work:
         subprocess.run(command, cwd=root, check=True)
         env = dict(os.environ, ASAN_OPTIONS="detect_leaks=0")
         subprocess.run([binary], env=env, check=True)
+        if name == "disk_cache":
+            subprocess.run([binary], env=dict(env, KUNIX_HOST_BATCH="1"), check=True)
         if name == "pagecache":
             subprocess.run([binary], env=dict(env, KUNIX_HOST_LARGE_CACHE="1"), check=True)

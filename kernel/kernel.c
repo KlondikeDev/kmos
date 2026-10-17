@@ -17,6 +17,9 @@
 #include <keyboard.h>
 #include <mouse.h>
 #include <disk.h>
+#include <nvme.h>
+#include <gpt.h>
+#include <klibc/string.h>
 #include <console.h>
 #include <panic.h>
 #include <cpuid.h>
@@ -54,6 +57,30 @@ volatile struct limine_framebuffer_request fb_request = {
 };
 
 // Kernel Entry point!
+static volatile struct limine_kernel_file_request boot_file = {
+    .id=LIMINE_KERNEL_FILE_REQUEST,.revision=0
+};
+// -1 means no selector; -2 is an explicit invalid/missing root. Never silently
+// boot a different filesystem after the operator named one.
+static i32 boot_disk(const char* key) {
+    const char* line=boot_file.response && boot_file.response->kernel_file ? boot_file.response->kernel_file->cmdline : NULL;
+    u64 n=strlen(key); i32 chosen=-1;
+    for(const char* p=line;p && *p;) {
+        while(*p==' ')p++;
+        const char* end=p;while(*end && *end!=' ')end++;
+        if((u64)(end-p)>=n && !strncmp(p,key,n)) {
+            if(chosen!=-1 || end-p!=(i64)n+45 || strncmp(p+n,"PARTUUID=",9))return -2;
+            char text[37];
+            for(u32 i=0;i<36;i++)text[i]=p[n+9+i];
+            text[36]=0;
+            u8 uuid[16];if(!gpt_guid_parse(text,uuid))return -2;
+            chosen=disk_find_uuid(uuid);if(chosen<0)return -2;
+        }
+        p=end;
+    }
+    return chosen;
+}
+
 void kernel_main(void) {
     init_serial();
     pmm_init();
@@ -88,6 +115,8 @@ void kernel_main(void) {
     disk_cache_init();
     
     pci_list_devices();
+    nvme_init();
+    disk_scan_partitions();
     bool fat = identify_drive(0xA0) && fat32_init();
     // The root is UFS2: an image the bootloader loaded into memory if there
     // is one (the live image, for machines whose disks Kunix cannot drive
@@ -96,19 +125,35 @@ void kernel_main(void) {
     // directories have a UFS2 disk of their own on the secondary slave
     // (the secondary master is the CD-ROM we booted from).
     void* root = NULL;
-    i32 ram = ramdisk_from_module("root.img");
-    if (ram >= 0) root = ufs2_mount((u8)ram);
-    if (!root && identify_drive(0xB0)) root = ufs2_mount(1);
-    if (root) {
-        vfs_mount_with("/", &ufs2_vfs_ops, root);
-        if (fat) vfs_mount("/fat", &fat32_vfs_ops);
-    } else if (fat) {
-        vfs_mount("/", &fat32_vfs_ops);
-    } else {
-        klog(LOG_ERROR, "no root filesystem: no root.img module, and no ATA disk\n");
+    i32 root_disk=boot_disk("root=");
+    i32 home_disk=boot_disk("home=");
+    if(root_disk>=0 && home_disk>=0 && disk_overlaps((u8)root_disk,(u8)home_disk)) {
+        klog(LOG_ERROR,"boot: root/home devices overlap; refusing selected filesystems\n");
+        root_disk=home_disk=-2;
     }
-    void* home = ata_present(3) ? ufs2_mount(3) : NULL;
-    if (home) vfs_mount_with("/home", &ufs2_vfs_ops, home);
+    i32 ram=ramdisk_from_module("root.img");
+    if(ram>=0) disk_set_install_source(ram);
+    if(root_disk>=0) root=ufs2_mount((u8)root_disk);
+    else if(root_disk==-1) {
+        if(ram>=0) { root=ufs2_mount((u8)ram);if(root)root_disk=ram; }
+        if(!root && identify_drive(0xB0)) { root=ufs2_mount(1);if(root)root_disk=1; }
+    }
+    if(root) {
+        vfs_mount_with("/",&ufs2_vfs_ops,root);disk_set_mounted((u8)root_disk,true);
+        klog(LOG_OKAY,"boot: root disk %u\n",(u32)root_disk);
+        if(fat) { vfs_mount("/fat",&fat32_vfs_ops);disk_set_mounted(0,true); }
+    } else if(root_disk==-1 && fat) {
+        vfs_mount("/",&fat32_vfs_ops);disk_set_mounted(0,true);
+    } else {
+        klog(LOG_ERROR,"no root filesystem%s\n",root_disk==-2?": invalid PARTUUID selector":"");
+    }
+    if(home_disk==-1 && ata_present(3))home_disk=3;
+    if(root && home_disk>=0 && disk_overlaps((u8)root_disk,(u8)home_disk)) {
+        klog(LOG_ERROR,"boot: root/home devices overlap; refusing home\n");home_disk=-2;
+    }
+    void* home=home_disk>=0 ? ufs2_mount((u8)home_disk) : NULL;
+    if(home) { vfs_mount_with("/home",&ufs2_vfs_ops,home);disk_set_mounted((u8)home_disk,true); }
+    else if(home_disk==-2)klog(LOG_WARN,"boot: invalid home PARTUUID selector\n");
     vfs_mount("/dev", &devfs_vfs_ops);
     vfs_mount("/proc", &procfs_vfs_ops);
     vfs_mount("/tmp", &tmpfs_vfs_ops);

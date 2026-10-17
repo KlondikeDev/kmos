@@ -549,7 +549,7 @@ void vfs_shutdown_all(void) {
     for (u32 i = 0; i < mount_count; i++) {
         if (mounts[i].ops->shutdown) mounts[i].ops->shutdown(&mounts[i]);
     }
-    for (u8 i = 0; i < DISK_MAX; i++) if (disk_present(i)) disk_flush(i);
+    for (u8 i = 0; i < DISK_WHOLE_MAX; i++) if (disk_present(i)) disk_flush(i);
 }
 
 i32 vfs_sync(const vnode_t* node) {
@@ -559,7 +559,7 @@ i32 vfs_sync(const vnode_t* node) {
         if (r < 0) return r;
     }
     // Covers filesystems without private metadata buffers, including FAT.
-    for (u8 i = 0; i < DISK_MAX; i++) if (disk_present(i) && !disk_flush(i)) return -EIO;
+    for (u8 i = 0; i < DISK_WHOLE_MAX; i++) if (disk_present(i) && !disk_flush(i)) return -EIO;
     return 0;
 }
 
@@ -568,6 +568,6 @@ i32 vfs_sync_all(void) {
     for (u32 i = 0; i < mount_count; i++) {
         if (mounts[i].ops->sync && mounts[i].ops->sync(&mounts[i]) < 0) result = -EIO;
     }
-    for (u8 i = 0; i < DISK_MAX; i++) if (disk_present(i) && !disk_flush(i)) result = -EIO;
+    for (u8 i = 0; i < DISK_WHOLE_MAX; i++) if (disk_present(i) && !disk_flush(i)) result = -EIO;
     return result;
 }

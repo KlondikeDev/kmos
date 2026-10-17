@@ -2,7 +2,7 @@
 
 # Kunix roadmap and hand-off
 
-This is for whoever picks up the work next, human or agent (Codex, Claude, ...). It covers where Kunix stands on 2026-10-16, how to build and test it, the traps that have already cost time, and the plan, in order, with what "done" means for each step.
+This is for whoever picks up the work next, human or agent (Codex, Claude, ...). It covers where Kunix stands on 2026-10-17, how to build and test it, the traps that have already cost time, and the plan, in order, with what "done" means for each step.
 
 Read this first. Then read `LARGELANGUAGEMODELS.TXT` and `HabilisPlan.txt`.
 
@@ -53,6 +53,7 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 - **Filesystems:**
   - VFS with symlinks and hard links.
   - UFS2 read-write and fsck-clean; it is the root. FAT32 at `/fat`.
+  - NVMe namespaces and GPT slices; installed UFS2 root/home selected by PARTUUID.
   - tmpfs at `/tmp` (hard links, sockets).
   - procfs at `/proc`, devfs at `/dev`.
 - **Terminals:**
@@ -75,14 +76,12 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 | Missing | What it blocks |
 |---|---|
 | Networking | SSH, packages, CDE, Claude Code |
-| A disk/page cache | Performance |
-| Demand paging of executables | Binaries are read whole at exec |
 | Shared libraries | Large software stacks |
 | Threads | `clone(CLONE_THREAD)` returns ENOSYS |
 | epoll, eventfd, timerfd | Modern event loops |
-| NVMe and AHCI drivers | Installing to real disks |
+| AHCI driver | Installing to SATA disks without legacy ATA |
 | USB | External keyboards, mice and sticks |
-| Real ACPI | Power-off uses QEMU's port |
+| Suspend/resume and hardware power validation | Laptop power management beyond battery reporting and S5/reset |
 | SMP | Single core only |
 
 ---
@@ -127,7 +126,23 @@ grep -E " error|warning:" ~/.cache/build.log | grep -v RWX
 
 Host sanitizer tests run with `python3 buildutils/test_host.py`. They exercise
 production block/page cache code, fault filling (including no-cache first writes
-and overlapping ELF BSS), battery normalization, logs and ACPI parsing.
+and overlapping ELF BSS), battery normalization, logs, ACPI parsing, GPT validation
+and NVMe queue/sector translation. UFS growth integrity tests run separately with
+`python3 buildutils/tests/ufs_grow.py` (requires `makefs` and host `fsck_ffs`).
+
+The complete NVMe installer matrix uses disposable sparse files under
+`build/phase3`, with no host devices exposed:
+
+```
+python3 buildutils/install_test.py --block-size 512 --reset
+python3 buildutils/install_test.py --block-size 4096 --reset
+```
+
+These require OVMF's 4 MiB firmware, mtools, `fsck.fat` and host `fsck_ffs`.
+Each run checks raw I/O and permissions, hashes the whole image around plan and
+cancellation checks, installs after typing YES, boots UEFI without the ISO,
+checks root/home persistence across boots, rejects invalid/overlapping PARTUUIDs
+and interrupted-growth markers, then checks all three filesystems.
 
 For a battery fixture, generate an SSDT and pass it to QEMU through the harness:
 
@@ -182,6 +197,9 @@ How the harness works:
 - **Build-time helper programs** need `CC_FOR_BUILD=gcc`.
 - **musl doesn't define `_POSIX_SOURCE` the way glibc does.** Old code that tests for it (xterm) takes wrong branches.
 - **Don't edit a bash script while it's running.** bash reads scripts as it goes.
+- **The build's cleanup moves the top-level kernel into `build/binaries`.** Before
+  invoking image-only build functions, copy that kernel back to the top level;
+  otherwise the live image can be produced without its kernel.
 - **Hardware has no IDE.** Probing a missing IDE controller reads 0xFF. Any ATA wait loop without a check would spin forever on modern hardware.
 - **zsh doesn't word-split unquoted variables.** Run build loops that rely on splitting under `bash -c`.
 - **Don't `pkill -f` patterns** that match your own shell.
@@ -205,7 +223,9 @@ How the harness works:
 | Unix sockets | `kernel/socket.c` |
 | VFS (attributes, permissions, ops table incl. `mmap` for devices) | `fs/vfs.c`, `include/vfs.h` |
 | Filesystems | `fs/ufs2.c`, `fs/fat32.c`, `fs/tmpfs.c` (nodes plus directory entries), `fs/procfs.c`, `fs/devfs.c` |
-| Disk layer: disk numbers 0–3 ATA, 4–7 ramdisks from Limine modules | `drivers/disk.c`, `include/disk.h` |
+| Disk layer: 0–3 ATA, 4–7 boot-module RAM disks, 8–15 NVMe, 16–127 GPT slices | `drivers/disk.c`, `include/disk.h`, `kernel/gpt.c` |
+| Polled NVMe queues and native 512/4096-byte namespaces | `drivers/nvme.c`, `include/nvme.h` |
+| Installer and offline UFS2 growth | `compat/primemeridian/tests/install-kunix.c`, `ufsgrow.c` |
 | Drivers | `drivers/ata.c`, `keyboard.c`, `mouse.c`, `fb.c`, `tty.c`, `pty.c`, `vt.c`, `pci.c`, `pit.c`, `rtc.c`, `serial.c` |
 | Console: shadow buffer as a ring of text rows, flushed at most about 60 times a second; graphics mode | `kernel/console.c` |
 | TSC time | `kernel/time.c` |
@@ -315,6 +335,41 @@ cache failure retry, mapped-file lifetime, private COW, sparse large mappings,
 
 ### Phase 3: NVMe, GPT and installing to the T14 (about 2–3 sessions)
 
+**Implemented and verified in QEMU (2026-10-17); T14 checks pending.**
+Polled NVMe supports native 512-byte and 4 KiB namespaces. GPT checks both
+headers and arrays, recovers from one damaged copy, and rejects conflicting or
+overlapping metadata. Disk slices share their parent's cache. Protected
+root-only `/dev/diskN` devices expose size, native block size and rescan ioctls
+through shared services used by both the native ABI and Prime Meridian.
+
+The live root uses RAM copy-on-write so `/dev/install-source` remains pristine.
+`install-kunix` offers a blue/white Bernard setup, lists unmounted NVMe targets,
+shows its complete plan and requires exact typed `YES` before writing. Enter/F8
+submits; F3/Escape cancels. It creates a 512 MiB FAT32 ESP, a UFS2 root (half the
+remaining space, capped at 32 GiB), and a separate UFS2 home using the rest.
+It copies the root/home seeds, grows them offline with `ufsgrow`, and installs
+Limine at `EFI/BOOT/BOOTX64.EFI` with root/home PARTUUID selectors. There is no
+automatic reboot. `install-kunix /dev/disk8 --plan` performs preflight without
+writes; omit the device argument to choose interactively.
+
+Raw writes and rescans refuse any parent with mounted filesystems. Explicit
+invalid root selectors never fall back to another disk, root/home overlap is
+refused, and interrupted UFS growth leaves a needs-fsck marker that blocks
+mounting. Growth is offline and not crash-atomic. The NVMe driver currently uses
+one polled queue pair, supports up to eight namespaces, and disables a controller
+after a timeout while retaining its DMA buffers; recovery and interrupts remain
+future work. Actual T14 installation and persistence are still the owner's
+hardware checks.
+
+Both native 512-byte and 4 KiB NVMe installation matrices pass, including
+UEFI boot without the ISO, root/home persistence across reboots, unchanged disk
+hashes for plan/cancel, protected mounted targets, ACPI shutdown, invalid and
+overlapping selector refusal, and interrupted-growth refusal. Both ESPs pass
+`fsck.fat`; all four installed UFS2 partitions pass FreeBSD `fsck_ffs`. Host
+sanitizers, FAT/GPT image tests and six UFS growth integrity tests pass. Test
+logs are under `build/phase3/integration-{512,4096}/`. All eight existing suites
+pass (378 checks), including reboot verification and a clean root `fsck_ffs`.
+
 1. **NVMe driver.**
    - PCI class 01:08:02: admin queue, identify, one I/O queue pair, polled completions first, then MSI or legacy IRQ.
    - QEMU has `-device nvme`, so develop there.
@@ -324,7 +379,7 @@ cache failure retry, mapped-file lifetime, private COW, sparse large mappings,
 4. **The installer.** The owner wants an NT-style text installer (blue screen, white text, F-keys).
    - Simplest correct design:
      1. Partition the NVMe as GPT: a 512 MiB EFI system partition (FAT32), a Kunix root (UFS2), and optionally a separate home (UFS2).
-     2. Format the ESP with busybox `mkdosfs`.
+     2. Format the ESP (the installer now writes FAT32 directly, including native 4 KiB sectors).
      3. Copy Limine's `BOOTX64.EFI` and `limine.conf`, and the kernel, onto it.
      4. Write the root by copying the live `root.img` onto the partition, then growing it. Writing a UFS2 `newfs`/`growfs` is a sub-task; FreeBSD's sources are a reference. `ufschown.py` and `ufsdiag.py` show the on-disk structures.
    - The installer is the natural place for the "breeds" choice later; for now, just Bernard.
@@ -454,7 +509,7 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 1. Write our own TCP/IP stack or port lwIP? (Phase 4)
 2. Commit to the "1990s UNIX workstation" niche (Motif/CDE), or stay general?
 3. The fourth breed's name and purpose.
-4. Whether `home` gets its own partition on the T14.
+4. Whether future installer versions should offer a shared root/home layout; the current installer creates a separate home.
 5. When to start hosting packages, and where (GitHub Releases is the easy start).
 
 ## 6. T14 Gen 1 AMD facts (verify with `lspci -nn` from Linux on the laptop)

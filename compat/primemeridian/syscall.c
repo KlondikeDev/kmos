@@ -27,6 +27,7 @@
 #include <file.h>
 #include <vfs.h>
 #include <devfs.h>
+#include <disk_ioctl.h>
 #include <tty.h>
 #include <mman.h>
 #include <memory.h>
@@ -380,7 +381,7 @@ static i64 l_getdents64(u64 fd, u64 buf, u64 count) {
         d->d_off = (i64)f->pos + 1;
         d->d_reclen = (u16)reclen;
         d->d_type = n.type == VN_DIR ? L_DT_DIR : n.type == VN_CHR ? L_DT_CHR :
-                    n.type == VN_FIFO ? L_DT_FIFO : n.type == VN_LNK ? L_DT_LNK :
+                    n.type == VN_BLK ? 6 : n.type == VN_FIFO ? L_DT_FIFO : n.type == VN_LNK ? L_DT_LNK :
                     n.type == VN_SOCK ? L_DT_SOCK : L_DT_REG;
         memcpy(d->d_name, name, len + 1);
         f->pos++;
@@ -407,7 +408,7 @@ static i64 l_rw_vec(u64 fd, u64 iov, u64 n, bool write) {
 static i64 l_pread(u64 fd, u64 buf, u64 len, i64 off, bool write) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type != VN_REG && !devfs_is_fb(f->node)) return -ESPIPE;   // the framebuffer seeks too
+    if (f->node->type != VN_REG && f->node->type != VN_BLK && !devfs_is_fb(f->node)) return -ESPIPE;   // the framebuffer seeks too
     if (off < 0) return -EINVAL;
     if (!uok(buf, len, !write)) return -EFAULT;
     u32 acc = f->flags & O_ACCMODE;
@@ -542,6 +543,12 @@ static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
             return 0;
     }
 
+    if(devfs_is_disk(f->node)) {
+        u32 size=devfs_disk_ioctl_size((u32)req);
+        if(size && !uok(arg,size,true)) return -EFAULT;
+        if(req==KDISK_RESCAN && !(f->flags&O_ACCMODE)) return -EBADF;
+        return devfs_disk_ioctl(f->node,(u32)req,(void*)arg);
+    }
     i64 r;
     if (pm_display_ioctl(f, (u32)req, arg, &r)) return r;   // fb0, the console's KD_*/VT_*
 

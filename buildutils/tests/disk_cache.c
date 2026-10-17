@@ -6,6 +6,8 @@
 #include <assert.h>
 #include <string.h>
 #include <disk.h>
+#include <gpt.h>
+#include <errno.h>
 #include <limine.h>
 #include <klog.h>
 static unsigned char media[2][35 * 512];
@@ -35,12 +37,37 @@ bool ata_write_multi(u8 disk, u32 lba, u32 n, const void* p) {
     return true;
 }
 bool ata_flush(u8 disk) { assert(disk < 2); flushes++; return !fail_flush; }
+void nvme_init(void) {}
+u32 nvme_count(void) { return 0; }
+u64 nvme_sectors(u8 d) { (void)d;return 0; }
+u32 nvme_block_size(u8 d) { (void)d;return 512; }
+bool nvme_read(u8 d,u64 l,u32 n,void* p) { (void)d;(void)l;(void)n;(void)p;return false; }
+bool nvme_write(u8 d,u64 l,u32 n,const void* p) { (void)d;(void)l;(void)n;(void)p;return false; }
+bool nvme_flush(u8 d) { (void)d;return false; }
+i32 gpt_scan(u8 disk,gpt_partition_t* out,u32 cap) {
+ assert(cap);*out=(gpt_partition_t){.parent=disk,.slot=1,.start=1,.count=20,.guid={1}};return 1;
+}
 #include "../../drivers/disk.c"
 int main(void) {
     unsigned char buf[4096], patch[1024];
     memset(media[0], 0x31, sizeof(media[0]));
     memset(media[1], 0x62, sizeof(media[1]));
     disk_cache_init();
+    if(getenv("KUNIX_HOST_BATCH")) {
+        memset(buf,0x5b,sizeof(buf));
+        assert(disk_write(0,0,8,buf) && disk_write(0,8,8,buf));
+        assert(!writes && !flushes);
+        assert(disk_write(0,16,8,buf) && disk_write(0,24,8,buf));
+        assert(writes==2 && flushes==1);
+        fail_flush=1;
+        assert(!disk_write(0,0,8,buf));
+        disk_cache_stats_t batch_stats;disk_cache_stats(&batch_stats);
+        assert(batch_stats.dirty==2);
+        fail_flush=0;
+        assert(disk_write(0,0,8,buf));
+        assert(disk_read(0,24,8,buf) && buf[0]==0x5b);
+        puts("disk cache: bounded eviction batching passed");return 0;
+    }
     /* Removing caching must fail the repeated read and untouched-media checks. */
     assert(disk_read(0, 0, 1, buf));
     assert(disk_read(0, 0, 1, buf));
@@ -123,11 +150,27 @@ int main(void) {
     assert(ramdisk_from_module("root.img") == 4);
     before = reads + writes + flushes;
     assert(disk_write(4, 1, 1, patch));
-    assert(image[512] == 0xa5);
+    assert(image[512] != 0xa5);
+    assert(ramdisk_original_read(4,1,1,buf) && buf[0]==image[512]);
     assert(disk_read(4, 1, 1, buf) && buf[0] == 0xa5);
     assert(!disk_read(4, 2, 1, buf));
     assert(disk_flush(4));
     assert(reads + writes + flushes == before);
+    assert(disk_rescan(0)==1 && disk_sectors(DISK_PART0)==20);
+    assert(disk_overlaps(0,DISK_PART0) && disk_overlaps(DISK_PART0,DISK_PART0));
+    assert(!disk_overlaps(1,DISK_PART0));
+    u32 old_generation=disk_generation(DISK_PART0);
+    memset(patch,0x29,sizeof(patch));
+    assert(disk_write(DISK_PART0,0,1,patch));
+    assert(disk_read(0,1,1,buf) && buf[0]==0x29);
+    memset(patch,0x54,sizeof(patch));
+    assert(disk_write(0,2,1,patch));
+    assert(disk_read(DISK_PART0,1,1,buf) && buf[0]==0x54);
+    assert(!disk_read(DISK_PART0,20,1,buf));
+    disk_set_mounted(DISK_PART0,true);
+    assert(disk_in_use(0) && disk_rescan(0)==-EBUSY);
+    disk_set_mounted(DISK_PART0,false);
+    assert(disk_rescan(0)==1 && disk_generation(DISK_PART0)!=old_generation);
     printf("disk cache: passed (LRU, dirty eviction, retry, sectors, bounds, disks, periodic flush, ramdisk)\n");
     return 0;
 }

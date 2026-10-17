@@ -98,7 +98,7 @@ static void vnode_release(vnode_t* n) {
 // Files whose offset moves as they are read and written: regular files,
 // and the framebuffer (a device, but one you can seek in).
 static bool positioned(const file_t* f) {
-    return f->node->type == VN_REG || devfs_is_fb(f->node);
+    return f->node->type == VN_REG || f->node->type == VN_BLK || devfs_is_fb(f->node);
 }
 
 static i64 vnode_file_read(file_t* f, void* buf, u64 len) {

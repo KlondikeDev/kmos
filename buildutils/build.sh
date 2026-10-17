@@ -16,6 +16,8 @@ build(){
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/pit.c -o pit.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/panic.c -o panic.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/keyboard.c -o keyboard.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/nvme.c -o nvme.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/gpt.c -o gpt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/ata.c -o ata.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/fat32.c -o fat32.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/vfs.c -o vfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
@@ -76,7 +78,7 @@ build(){
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pty.o socket.o pm_socket.o fb.o mouse.o disk.o pm_display.o procfs.o tmpfs.o time.o power.o acpi.o acpi_aml.o pagecache.o battery.o battery_acpi.o uacpi_*.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o nvme.o gpt.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pty.o socket.o pm_socket.o fb.o mouse.o disk.o pm_display.o procfs.o tmpfs.o time.o power.o acpi.o acpi_aml.o pagecache.o battery.o battery_acpi.o uacpi_*.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
@@ -271,6 +273,12 @@ ufs(){
     rm -f ufs.img
     # Room to write in: 128 MiB, and at least 8192 inodes free (makefs would
     # otherwise size the inode table to exactly what is on the image).
+    mkdir -p build/ufsroot/install build/home-template/root
+    chmod 700 build/home-template/root
+    makefs -t ffs -o version=2 -s 16m -f 1024 build/ufsroot/install/home.img build/home-template > /dev/null
+    python3 buildutils/ufschown.py build/ufsroot/install/home.img 0 0
+    cp kunix-kodiak.elf build/ufsroot/install/KUNIX.ELF
+    cp limine/BOOTX64.EFI build/ufsroot/install/BOOTX64.EFI
     makefs -t ffs -o version=2 -s 128m -f 8192 ufs.img build/ufsroot > /dev/null
     python3 buildutils/ufschown.py ufs.img 0 0          # everything is root's
 }

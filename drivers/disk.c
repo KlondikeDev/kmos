@@ -4,13 +4,15 @@
 // Licensed under the Kunix License v1.0 or later
 // See LICENSE for details
 
-// Disks by number (include/disk.h): ATA drives, and ramdisks -- images
-// Limine loaded as modules, which is how Kunix boots a machine whose disks
-// it has no driver for yet (the live image). A ramdisk is writable, but
-// what is written lives only until the machine goes down.
+// Disks by number (include/disk.h): ATA, NVMe, GPT slices and boot-module
+// ramdisks. Slices share their physical parent's cache. A ramdisk keeps
+// private writes only until shutdown, preserving the original install source.
 
 #include <disk.h>
 #include <ata.h>
+#include <nvme.h>
+#include <gpt.h>
+#include <errno.h>
 #include <limine.h>
 #include <memcpy.h>
 #include <klog.h>
@@ -27,9 +29,10 @@ volatile struct limine_module_request module_request = {
 typedef struct {
     u8* base;
     u64 sectors;
+    u8** overlay;                  // pristine boot module plus private 4KiB writes
 } ramdisk_t;
 
-static ramdisk_t ramdisks[DISK_MAX - DISK_RAM0];
+static ramdisk_t ramdisks[DISK_RAM_COUNT];
 static u32 ramdisk_count;
 
 static ramdisk_t* ram(u8 disk) {
@@ -82,7 +85,60 @@ void disk_cache_init(void) {
     next_flush = time_boot_ns() + CACHE_FLUSH_NS;
 }
 
+static struct { bool valid, mounted; u32 generation; gpt_partition_t p; } partitions[DISK_MAX-DISK_PART0];
+static bool mounted_disks[DISK_WHOLE_MAX];
+static u32 generation = 1;
+static i32 install_source = -1;
+void disk_set_install_source(i32 disk) { install_source = disk; }
+i32 disk_install_source(void) { return install_source; }
+u8 disk_parent(u8 disk) {
+    return disk >= DISK_PART0 && disk < DISK_MAX && partitions[disk-DISK_PART0].valid ? partitions[disk-DISK_PART0].p.parent : disk;
+}
+bool disk_overlaps(u8 a,u8 b) {
+    if(disk_parent(a)!=disk_parent(b))return false;
+    u64 sa=a>=DISK_PART0 && a<DISK_MAX && partitions[a-DISK_PART0].valid ? partitions[a-DISK_PART0].p.start:0;
+    u64 sb=b>=DISK_PART0 && b<DISK_MAX && partitions[b-DISK_PART0].valid ? partitions[b-DISK_PART0].p.start:0;
+    u64 na=disk_sectors(a),nb=disk_sectors(b);
+    return na && nb && (sa<=sb ? sb-sa<na : sa-sb<nb);
+}
+u32 disk_generation(u8 disk) {
+    return disk >= DISK_PART0 && disk < DISK_MAX ? partitions[disk-DISK_PART0].generation : 1;
+}
+u32 disk_partition_slot(u8 disk) {
+    return disk >= DISK_PART0 && disk < DISK_MAX && partitions[disk-DISK_PART0].valid ? partitions[disk-DISK_PART0].p.slot : 0;
+}
+bool disk_partition_guid(u8 disk,u8 out[16]) {
+    if (!disk_partition_slot(disk)) return false;
+    memcpy(out,partitions[disk-DISK_PART0].p.guid,16); return true;
+}
+void disk_set_mounted(u8 disk,bool mounted) {
+    if (disk >= DISK_PART0 && disk < DISK_MAX) partitions[disk-DISK_PART0].mounted=mounted;
+    else if (disk < DISK_WHOLE_MAX) mounted_disks[disk]=mounted;
+}
+bool disk_in_use(u8 disk) {
+    u8 parent=disk_parent(disk);
+    if (parent < DISK_WHOLE_MAX && mounted_disks[parent]) return true;
+    for(u32 i=0;i<DISK_MAX-DISK_PART0;i++)
+        if(partitions[i].valid && partitions[i].p.parent==parent && partitions[i].mounted) return true;
+    return false;
+}
+u32 disk_block_size(u8 disk) {
+    disk=disk_parent(disk);
+    return disk>=DISK_NVME0 && disk<DISK_PART0 ? nvme_block_size(disk-DISK_NVME0) : 512;
+}
+static bool backend_read(u8 d,u64 l,u32 n,void* p) {
+    return d < DISK_RAM0 ? ata_read_multi(d,(u32)l,n,p) : nvme_read(d-DISK_NVME0,l,n,p);
+}
+static bool backend_write(u8 d,u64 l,u32 n,const void* p) {
+    return d < DISK_RAM0 ? ata_write_multi(d,(u32)l,n,p) : nvme_write(d-DISK_NVME0,l,n,p);
+}
+static bool backend_flush(u8 d) { return d < DISK_RAM0 ? ata_flush(d) : nvme_flush(d-DISK_NVME0); }
 u64 disk_sectors(u8 disk) {
+    if (disk >= DISK_PART0) return disk<DISK_MAX && partitions[disk-DISK_PART0].valid ? partitions[disk-DISK_PART0].p.count : 0;
+    if (disk >= DISK_NVME0) {
+        u64 sectors=nvme_sectors(disk-DISK_NVME0);
+        return sectors<=0x7fffffffffffffffULL/512 ? sectors : 0;
+    }
     if (disk < DISK_RAM0) return ata_sector_count(disk);
     ramdisk_t* r = ram(disk);
     return r ? r->sectors : 0;
@@ -108,11 +164,24 @@ static void touch(cache_block_t* b) {
 
 static bool writeback(cache_block_t* b) {
     if (!b->dirty) return true;
-    if (!ata_write_multi(b->disk, (u32)b->lba, b->sectors, b->data)) {
+    if (!backend_write(b->disk, b->lba, b->sectors, b->data)) {
         cache_stats.errors++;
         return false;
     }
     cache_stats.writebacks++;
+    return true;
+}
+
+// Amortize a durable eviction over nearby dirty LRU entries. Keep every
+// owner until all writes and the single device FLUSH succeed, so failed
+// write-back can always be retried without losing the only resident copy.
+static bool flush_victims(cache_block_t* victim) {
+    cache_block_t* batch[CACHE_POLL_BLOCKS];u32 n=0;
+    for(cache_block_t* b=victim;b && n<CACHE_POLL_BLOCKS;b=b->newer)
+        if(b->valid && b->dirty && b->disk==victim->disk) batch[n++]=b;
+    for(u32 i=0;i<n;i++) if(!writeback(batch[i]))return false;
+    if(!backend_flush(victim->disk)) { cache_stats.errors++;return false; }
+    for(u32 i=0;i<n;i++)batch[i]->dirty=false;
     return true;
 }
 
@@ -138,11 +207,7 @@ static cache_block_t* get_block(u8 disk, u64 lba, u64 capacity, bool overwrite) 
         newest = b;
     } else {
         b = oldest;
-        if (b->dirty) {
-            if (!writeback(b)) return NULL;
-            if (!ata_flush(b->disk)) { cache_stats.errors++; return NULL; }
-            b->dirty = false;
-        }
+        if (b->dirty && !flush_victims(b)) return NULL;
         if (b->valid) {
             cache_block_t** link = &buckets[hash(b->disk, b->lba)];
             while (*link != b) link = &(*link)->hash_next;
@@ -155,7 +220,7 @@ static cache_block_t* get_block(u8 disk, u64 lba, u64 capacity, bool overwrite) 
     b->disk = disk;
     b->lba = lba;
     b->sectors = capacity - lba < CACHE_SECTORS ? capacity - lba : CACHE_SECTORS;
-    if (!overwrite && !ata_read_multi(disk, (u32)lba, b->sectors, b->data)) {
+    if (!overwrite && !backend_read(disk,lba,b->sectors,b->data)) {
         cache_stats.errors++;
         return NULL;
     }
@@ -170,15 +235,33 @@ static bool transfer(u8 disk, u64 lba, u32 count, void* buf, bool write) {
     if (!capacity || lba > capacity || count > capacity - lba) return false;
     if (!count) return true;
     if (!buf) return false;
+    // Translate before cache lookup, so parent and partition accesses are
+    // coherent even when a partition begins inside a cached 4KiB block.
+    if (disk >= DISK_PART0) {
+        lba += partitions[disk-DISK_PART0].p.start;
+        disk = partitions[disk-DISK_PART0].p.parent;
+        capacity = disk_sectors(disk);
+    }
     ramdisk_t* r = ram(disk);
     if (r) {
-        if (write) memcpy(r->base + lba * 512, buf, (u64)count * 512);
-        else memcpy(buf, r->base + lba * 512, (u64)count * 512);
+        u8* p=buf;
+        while(count) {
+            u64 block=lba/8; u32 in=(u32)(lba%8), n=8-in;
+            if(n>count) n=count;
+            if(write && !r->overlay[block]) {
+                u8* copy=kmalloc(4096); if(!copy) return false;
+                u64 bytes=(r->sectors-block*8)*512; if(bytes>4096) bytes=4096;
+                memcpy(copy,r->base+block*4096,bytes); r->overlay[block]=copy;
+            }
+            u8* data=r->overlay[block] ? r->overlay[block] : r->base+block*4096;
+            if(write) memcpy(data+in*512,p,n*512); else memcpy(p,data+in*512,n*512);
+            lba+=n;count-=n;p+=n*512;
+        }
         return true;
     }
     if (!block_count) {
-        return write ? ata_write_multi(disk, (u32)lba, count, buf)
-                     : ata_read_multi(disk, (u32)lba, count, buf);
+        return write ? backend_write(disk,lba,count,buf)
+                     : backend_read(disk,lba,count,buf);
     }
     u8* p = buf;
     while (count) {
@@ -218,13 +301,14 @@ bool disk_write(u8 disk, u64 lba, u32 count, const void* buf) {
 bool disk_flush(u8 disk) {
     u64 flags = irq_save();
     bool ok = disk_present(disk);
-    if (ok && disk < DISK_RAM0) {
+    disk=disk_parent(disk);
+    if (ok && !ram(disk)) {
         for (u32 i = 0; i < used_blocks; i++) {
             cache_block_t* b = &blocks[i];
             if (b->valid && b->disk == disk) ok = writeback(b) && ok;
         }
         // Even after a write error, flush the writes that did reach hardware.
-        if (!ata_flush(disk)) { cache_stats.errors++; ok = false; }
+        if (!backend_flush(disk)) { cache_stats.errors++; ok = false; }
         if (ok) for (u32 i = 0; i < used_blocks; i++)
             if (blocks[i].disk == disk) blocks[i].dirty = false;
     }
@@ -240,7 +324,8 @@ void disk_cache_poll(void) {
     // the next five-second pass retries it without a tight failing-I/O loop.
     bool pending = false;
     u32 written = 0;
-    for (u8 disk = 0; disk < DISK_RAM0; disk++) {
+    for (u8 disk = 0; disk < DISK_WHOLE_MAX; disk++) {
+        if (disk>=DISK_RAM0 && disk<DISK_NVME0) continue;
         cache_block_t* batch[CACHE_POLL_BLOCKS];
         u32 n = 0;
         bool ok = true;
@@ -252,7 +337,7 @@ void disk_cache_poll(void) {
             ok = writeback(b) && ok;
         }
         if (n) {
-            if (!ata_flush(disk)) { cache_stats.errors++; ok = false; }
+            if (!backend_flush(disk)) { cache_stats.errors++; ok = false; }
             if (ok) for (u32 i = 0; i < n; i++) batch[i]->dirty = false;
             else pending = false;
         }
@@ -278,16 +363,65 @@ static bool ends_with(const char* s, const char* tail) {
 
 i32 ramdisk_from_module(const char* name) {
     struct limine_module_response* resp = module_request.response;
-    if (!resp || ramdisk_count == DISK_MAX - DISK_RAM0) return -1;
+    if (!resp || ramdisk_count == DISK_RAM_COUNT) return -1;
     for (u64 i = 0; i < resp->module_count; i++) {
         struct limine_file* f = resp->modules[i];
         if (!f->path || !ends_with(f->path, name)) continue;
         ramdisk_t* r = &ramdisks[ramdisk_count];
         r->base = (u8*)f->address;
         r->sectors = f->size / 512;
+        if (!r->sectors) return -1;
+        u64 blocks=(r->sectors+7)/8;
+        r->overlay=kmalloc(blocks*sizeof(u8*));
+        if(!r->overlay) return -1;
+        for(u64 b=0;b<blocks;b++) r->overlay[b]=NULL;
         klog(LOG_OKAY, "disk: %s in memory as disk %u (%u MiB)\n", f->path,
              (u32)(DISK_RAM0 + ramdisk_count), (u32)(f->size >> 20));
         return (i32)(DISK_RAM0 + ramdisk_count++);
     }
     return -1;
+}
+
+bool ramdisk_original_read(u8 disk,u64 lba,u32 count,void* out) {
+    ramdisk_t* r=ram(disk);
+    if(!r || lba>r->sectors || count>r->sectors-lba || (count && !out)) return false;
+    if(count) memcpy(out,r->base+lba*512,(u64)count*512);
+    return true;
+}
+i32 disk_rescan(u8 disk) {
+    if(disk>=DISK_WHOLE_MAX || ram(disk) || !disk_present(disk)) return -EINVAL;
+    if(disk_in_use(disk)) return -EBUSY;
+    if(!disk_flush(disk)) return -EIO;
+    for(u32 i=0;i<DISK_MAX-DISK_PART0;i++) if(partitions[i].valid && partitions[i].p.parent==disk) {
+        partitions[i].valid=false;partitions[i].generation=++generation;
+    }
+    gpt_partition_t* found=kmalloc(GPT_MAX_PARTITIONS*sizeof(*found));
+    if(!found) return -ENOMEM;
+    i32 n=gpt_scan(disk,found,GPT_MAX_PARTITIONS);
+    if(n<0) { kfree(found); return n; }
+    u32 available=0;
+    for(u32 i=0;i<DISK_MAX-DISK_PART0;i++) if(!partitions[i].valid || partitions[i].p.parent==disk) available++;
+    if((u32)n>available) { kfree(found); return -ENOSPC; }
+    for(u32 i=0;i<DISK_MAX-DISK_PART0;i++) if(partitions[i].valid && partitions[i].p.parent==disk) partitions[i].valid=false;
+    u32 j=0;
+    for(u32 i=0;j<(u32)n && i<DISK_MAX-DISK_PART0;i++) if(!partitions[i].valid) {
+        partitions[i].p=found[j++]; partitions[i].valid=true; partitions[i].mounted=false;
+        partitions[i].generation=++generation;
+    }
+    kfree(found); return n;
+}
+void disk_scan_partitions(void) {
+    for(u8 d=0;d<DISK_WHOLE_MAX;d++) if(!ram(d) && disk_present(d)) disk_rescan(d);
+}
+static bool same_guid(const u8* a,const u8* b) {
+    for(u32 i=0;i<16;i++) if(a[i]!=b[i]) return false;
+    return true;
+}
+i32 disk_find_uuid(const u8 guid[16]) {
+    i32 found=-1;
+    for(u32 i=0;i<DISK_MAX-DISK_PART0;i++) if(partitions[i].valid && same_guid(partitions[i].p.guid,guid)) {
+        if(found>=0) return -1; // duplicate UUIDs are ambiguous, never choose one
+        found=(i32)(DISK_PART0+i);
+    }
+    return found;
 }

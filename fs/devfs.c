@@ -30,10 +30,15 @@
 #include <klibc/string.h>
 #include <fb.h>
 #include <mouse.h>
+#include <disk.h>
+#include <disk_ioctl.h>
+#include <memcpy.h>
 
 enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_FD,
        DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_CONSOLE, DEV_PTMX, DEV_PTS,
        DEV_FB0, DEV_INPUT, DEV_TTY0, DEV_TTY1, DEV_COUNT };
+#define DEV_DISK_BASE 0x4000
+#define DEV_INSTALL_SOURCE 0x5000
 #define DEV_MICE 0x3000              // input/mice
 
 // fd/N nodes: DEV_FD_BASE + N. Opening them (or stdin/stdout/stderr) is
@@ -64,6 +69,13 @@ static void make_node(u64 id, vnode_t* out) {
     out->aux = 0;
     out->size = id == DEV_FB0 ? fb_info()->size : 0;
     out->mtime = rtc_now();                // devices are always "now"
+    if (id==DEV_INSTALL_SOURCE || (id>=DEV_DISK_BASE && id<DEV_DISK_BASE+DISK_MAX)) {
+        i32 d=id==DEV_INSTALL_SOURCE ? disk_install_source() : (i32)(id-DEV_DISK_BASE);
+        out->type=VN_BLK; out->size=d>=0 ? disk_sectors((u8)d)*512 : 0;
+        out->mode=0600;
+        out->aux=(1ULL<<63)|((u64)(id==DEV_INSTALL_SOURCE ? 0 : disk_generation((u8)d))<<16)|id;
+        return;
+    }
     out->type = (id == DEV_ROOT || id == DEV_FD || id == DEV_PTS || id == DEV_INPUT) ? VN_DIR : VN_CHR;
 }
 
@@ -101,6 +113,12 @@ static i32 devfs_lookup(const vnode_t* dir, const char* name, vnode_t* out) {
         return 0;
     }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
+    if (!strcmp(name,"install-source") && disk_install_source()>=0) {
+        make_node(DEV_INSTALL_SOURCE,out); return 0;
+    }
+    if (!strncmp(name,"disk",4) && number(name+4,&n) && n<DISK_MAX && disk_present((u8)n)) {
+        make_node(DEV_DISK_BASE+n,out); return 0;
+    }
     for (u64 id = DEV_TTY; id < DEV_COUNT; id++) {
         if (!strcmp(name, dev_names[id])) {
             make_node(id, out);
@@ -129,10 +147,16 @@ static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t*
     }
     if (dir->id != DEV_ROOT) return -ENOTDIR;
     u64 id = DEV_TTY + index;
-    if (id >= DEV_COUNT) return 0;
-    strcpy(name_out, dev_names[id]);
-    make_node(id, out);
-    return 1;
+    if (id < DEV_COUNT) { strcpy(name_out,dev_names[id]); make_node(id,out); return 1; }
+    index-=DEV_COUNT-DEV_TTY;
+    if(disk_install_source()>=0) {
+        if(!index) { strcpy(name_out,"install-source");make_node(DEV_INSTALL_SOURCE,out);return 1; }
+        index--;
+    }
+    for(u32 d=0;d<DISK_MAX;d++) if(disk_present((u8)d) && !index--) {
+        ksnprintf(name_out,VFS_NAME_MAX,"disk%u",d);make_node(DEV_DISK_BASE+d,out);return 1;
+    }
+    return 0;
 }
 
 // The terminal a node stands for. /dev/tty is the caller's controlling
@@ -160,6 +184,66 @@ static bool is_devfs(const vnode_t* node) {
     return node->mnt && node->mnt->ops == &devfs_vfs_ops;
 }
 
+bool devfs_is_disk(const vnode_t* n) {
+    // Pty masters, pipes and sockets have no vnode, but still take ioctls.
+    return n && is_devfs(n) && (n->id==DEV_INSTALL_SOURCE || (n->id>=DEV_DISK_BASE && n->id<DEV_DISK_BASE+DISK_MAX));
+}
+static i32 raw_disk(const vnode_t* n) {
+    if(!devfs_is_disk(n)) return -1;
+    i32 d=n->id==DEV_INSTALL_SOURCE ? disk_install_source() : (i32)(n->id-DEV_DISK_BASE);
+    if(d<0 || !disk_present((u8)d)) return -1;
+    u64 key=(1ULL<<63)|((u64)(n->id==DEV_INSTALL_SOURCE ? 0 : disk_generation((u8)d))<<16)|n->id;
+    return key==n->aux ? d : -1;
+}
+static i64 raw_transfer(vnode_t* node,u64 off,void* buf,u64 len,bool write) {
+    if(proc_current()->euid) return -EACCES;
+    i32 d=raw_disk(node); if(d<0) return -ENXIO;
+    bool original=node->id==DEV_INSTALL_SOURCE;
+    if(write && original) return -EROFS;
+    if(write && disk_in_use((u8)d)) return -EBUSY;
+    u64 size=disk_sectors((u8)d)*512;
+    if(off>=size) return write && len ? -ENOSPC : 0;
+    if(len>size-off) { if(write) return -ENOSPC; len=size-off; }
+    u64 done=0; u8 sector[512];
+    while(done<len) {
+        u64 at=off+done; u32 in=at%512;
+        u64 n=len-done;
+        if(!in && n>=512) {
+            u32 count=n/512>1024?1024:(u32)(n/512);
+            bool ok=write ? disk_write((u8)d,at/512,count,(u8*)buf+done) :
+                original ? ramdisk_original_read((u8)d,at/512,count,(u8*)buf+done) : disk_read((u8)d,at/512,count,(u8*)buf+done);
+            if(!ok) return done?(i64)done:-EIO;
+            done+=(u64)count*512;continue;
+        }
+        if(n>512-in)n=512-in;
+        if(!(original ? ramdisk_original_read((u8)d,at/512,1,sector) : disk_read((u8)d,at/512,1,sector))) return done?(i64)done:-EIO;
+        if(write) { memcpy(sector+in,(u8*)buf+done,n); if(!disk_write((u8)d,at/512,1,sector)) return done?(i64)done:-EIO; }
+        else memcpy((u8*)buf+done,sector+in,n);
+        done+=n;
+    }
+    return done;
+}
+u32 devfs_disk_ioctl_size(u32 req) {
+    return req==KDISK_INFO?sizeof(struct kdisk_info):req==KDISK_BLKGETSIZE64?8:req==KDISK_BLKSSZGET?4:0;
+}
+i64 devfs_disk_ioctl(vnode_t* node,u32 req,void* arg) {
+    if(proc_current()->euid) return -EACCES;
+    i32 d=raw_disk(node);if(d<0)return -ENXIO;
+    if(req==KDISK_INFO) {
+        struct kdisk_info info={0}; info.sectors=disk_sectors((u8)d);info.block_size=disk_block_size((u8)d);
+        info.parent=disk_parent((u8)d);info.slot=disk_partition_slot((u8)d);
+        info.flags=(!info.slot?KDISK_WHOLE:0)|(disk_in_use((u8)d)?KDISK_MOUNTED:0)|
+            (info.parent>=DISK_NVME0?KDISK_NVME:0)|
+            (info.parent>=DISK_RAM0 && info.parent<DISK_NVME0?KDISK_RAM:0)|
+            (node->id==DEV_INSTALL_SOURCE?KDISK_READONLY:0);
+        disk_partition_guid((u8)d,info.guid);memcpy(arg,&info,sizeof(info));return 0;
+    }
+    if(req==KDISK_BLKGETSIZE64) { *(u64*)arg=disk_sectors((u8)d)*512;return 0; }
+    if(req==KDISK_BLKSSZGET) { *(u32*)arg=disk_block_size((u8)d);return 0; }
+    if(req==KDISK_RESCAN && node->id!=DEV_INSTALL_SOURCE) return disk_rescan((u8)d);
+    return -ENOTTY;
+}
+
 bool devfs_is_fb(const vnode_t* node) {
     return is_devfs(node) && node->id == DEV_FB0;
 }
@@ -175,7 +259,7 @@ i32 devfs_pts_number(const vnode_t* node) {
 }
 
 static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
-    (void)off;
+    if(devfs_is_disk(node)) return raw_transfer(node,off,buf,len,false);
     tty_t* t = devfs_tty(node);
     if (t) return tty_read(t, buf, len, false);
     switch (node->id) {
@@ -191,7 +275,7 @@ static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
 }
 
 static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
-    (void)off;
+    if(devfs_is_disk(node)) return raw_transfer(node,off,(void*)buf,len,true);
     tty_t* t = devfs_tty(node);
     if (t) return tty_write(t, buf, len, false);
     switch (node->id) {
@@ -211,7 +295,13 @@ static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
 // A pts is opened: it must exist and be unlocked. (The last close is
 // release(), below.)
 static i32 devfs_open(vnode_t* node, u32 flags) {
-    (void)flags;
+    if(devfs_is_disk(node)) {
+        if(proc_current()->euid) return -EACCES;
+        i32 d=raw_disk(node); if(d<0)return -ENXIO;
+        if((flags&3) && node->id==DEV_INSTALL_SOURCE) return -EROFS;
+        if((flags&3) && disk_in_use((u8)d)) return -EBUSY;
+        return 0;
+    }
     i32 n = devfs_pts_number(node);
     if (n < 0) return 0;
     if (!pty_slave((u32)n)) return -EIO;
