@@ -39,6 +39,30 @@ class SourceBundle(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('static PIE', result.stderr)
 
+    def test_source_refresh_refuses_an_unmanaged_directory(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = Path(work) / 'notes'
+            out.mkdir()
+            (out / 'keep.txt').write_text('user files')
+            result = subprocess.run(['python3', str(ROOT / 'buildutils/selfhost.py'), 'source', str(out)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('unmanaged', result.stderr)
+            self.assertEqual((out / 'keep.txt').read_text(), 'user files')
+
+    def test_refresh_discards_old_build_outputs_and_removed_sources(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = Path(work) / 'snapshot'
+            command = ['python3', str(ROOT / 'buildutils/selfhost.py'), 'source', str(out)]
+            subprocess.run(command, check=True, capture_output=True)
+            (out / 'build/obsolete.o').write_bytes(b'old generated object')
+            (out / 'kernel/deleted.c').write_text('removed source fixture\n')
+            subprocess.run(command, check=True, capture_output=True)
+            self.assertFalse((out / 'build/obsolete.o').exists())
+            self.assertFalse((out / 'kernel/deleted.c').exists())
+            subprocess.run(['sha256sum', '-c', 'SOURCE-SHA256SUMS'], cwd=out,
+                           check=True, capture_output=True)
+
     def test_bundle_has_sources_and_freestanding_build_recipe(self):
         with tempfile.TemporaryDirectory() as work:
             out = Path(work) / 'source'

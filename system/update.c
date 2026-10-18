@@ -99,8 +99,10 @@ static int uf_ownership(UpdateFat* f){
     if(dc==f->root||attr!=16||bytes||(c!=expected&&!(expected==f->root&&c==0)))goto done;
     continue;
    }
-   if(attr&8){if(dc!=f->root||c||bytes)goto done;continue;}
+   // A reserved slot name must be a directory even if its attributes would
+   // otherwise make this entry an ignorable volume label.
    if(dc==f->root&&(!memcmp(e,"KUPDATEA   ",11)||!memcmp(e,"KUPDATEB   ",11))&&attr!=16)goto done;
+   if(attr&8){if(dc!=f->root||c||bytes)goto done;continue;}
    if((!memcmp(e,"KERNEL  ELF",11)||!memcmp(e,"ROOT    IMG",11)||
        (dc==f->root&&(!memcmp(e,"LIMINE~1CON",11)||!memcmp(e,"KUNIX   ELF",11))))&&(attr&16))goto done;
    if(attr&16){
@@ -190,10 +192,19 @@ static int uf_activate(UpdateFat* f,unsigned slot){
  at+=snprintf(conf+at,sizeof(conf)-at,"/Kunix original installation (data retained)\n    protocol: limine\n    kernel_path: boot():/KUNIX.ELF\n    kernel_cmdline: root=PARTUUID=%s home=PARTUUID=%s\n",root,home);
  if(at>=sizeof(conf))return -1;
  unsigned char* entry=uf_conf_entry(f);if(!entry)return -1;
+ // Expand the old valid menu before publishing a longer replacement. If
+ // growing its directory entry fails, the firmware still sees the original
+ // menu, including its original boot option, at either the old or new size.
+ if(uget32(entry+28)!=sizeof(conf)){
+  unsigned char grown[4096];memcpy(grown,f->rootdir,sizeof grown);
+  uset32(grown+(entry-f->rootdir)+28,sizeof(conf));
+  if(UPDATE_IO(f->fd,old,sizeof(conf),uf_at(f,uf_cluster(entry)),1)||fsync(f->fd)||
+     UPDATE_IO(f->fd,grown,sizeof grown,uf_at(f,2),1)||fsync(f->fd))return -1;
+  memcpy(f->rootdir,grown,sizeof grown);
+ }
  // Config fits one 4KiB cluster. Payload and FAT were flushed before this.
  // FAT32 is not journaled: a torn selection write may require USB recovery.
  if(UPDATE_IO(f->fd,conf,sizeof(conf),uf_at(f,uf_cluster(entry)),1)||fsync(f->fd))return -1;
- if(uget32(entry+28)!=sizeof(conf)){uset32(entry+28,sizeof(conf));if(UPDATE_IO(f->fd,f->rootdir,4096,uf_at(f,2),1)||fsync(f->fd))return -1;}
  return 0;
 }
 static int uf_copy(UpdateFat* f,uint32_t dir,const char name[11],int source,uint64_t from,uint32_t n,const unsigned char expected[32],int writing){

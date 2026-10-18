@@ -90,18 +90,30 @@ static int load_profile(struct kwifi_join *p){
     p->passphrase[p->passphrase_length]=0;return 0;
 }
 static int exists(const char *name){char path[512];struct stat st;state_path(path,sizeof(path),name);return !lstat(path,&st);}
-static void remove_state(const char *name){char path[512];state_path(path,sizeof(path),name);unlink(path);sync();}
+static int remove_state(const char *name){
+    char path[512];state_path(path,sizeof(path),name);
+    if(unlink(path)&&errno!=ENOENT)return -1;
+    sync();return 0;
+}
 static unsigned retry_delay(unsigned failures){return failures>=6?60:1u<<failures;}
 static void stop(int sig){(void)sig;stopping=1;if(server_pid>0)kill(server_pid,SIGTERM);}
 static void pause_seconds(unsigned seconds){while(seconds--&&!stopping)sleep(1);}
 static int automatic_wifi;
 static int wifi_job(unsigned request,struct kwifi_join *profile,struct kwifi_result *result){
     int fd=open("/dev/wifi0",O_RDWR);if(fd<0)return -1;
+submit:
+    ;
     int job=-1;
     /* A manual command first pauses recovery, then waits for an already
        running automatic job to release the driver's single operation slot. */
     for(unsigned busy=0;busy<1200 && !stopping;busy++){
         if(automatic_wifi && exists("wifi-paused")){errno=ECANCELED;break;}
+        if(automatic_wifi && request==KWIFI_JOIN){
+            struct kwifi_join latest={0};
+            if(load_profile(&latest)){erase(&latest,sizeof(latest));break;}
+            *profile=latest;erase(&latest,sizeof(latest));
+            if(exists("wifi-paused")){errno=ECANCELED;break;}
+        }
         job=ioctl(fd,request,request==KWIFI_JOIN?profile:NULL);
         if(job>=0||errno!=EBUSY)break;
         usleep(100000);
@@ -112,9 +124,18 @@ static int wifi_job(unsigned request,struct kwifi_join *profile,struct kwifi_res
         if(ioctl(fd,KWIFI_RESULT,result)<0){close(fd);return -1;}
         if(!result->complete)usleep(100000);
     }while(!result->complete && !stopping && ++attempts<1200);
-    close(fd);
-    if(!result->complete||result->error){errno=result->error?-result->error:ETIMEDOUT;return -1;}
-    return 0;
+    if(!result->complete||result->error){close(fd);errno=result->error?-result->error:ETIMEDOUT;return -1;}
+    if(automatic_wifi && request==KWIFI_JOIN && !exists("wifi-paused")){
+        /* A manual join can finish after our pause check but before our ioctl.
+           Reconcile after completion so its saved profile wins that race. */
+        struct kwifi_join latest={0};
+        if(load_profile(&latest)){erase(&latest,sizeof(latest));close(fd);return -1;}
+        int changed=memcmp(profile,&latest,sizeof(latest));
+        if(changed)*profile=latest;
+        erase(&latest,sizeof(latest));
+        if(changed)goto submit;
+    }
+    close(fd);return 0;
 }
 static int wifi_link(void){
     FILE *f=fopen("/proc/wifi","r");if(!f)return 0;
@@ -154,7 +175,7 @@ static int wifi_command(int argc,char **argv){
     if(state_ready()){perror("wifi: secure writable home disk required");return 1;}
     if(argc==1&&(!strcmp(argv[0],"disconnect")||!strcmp(argv[0],"forget"))){
         if(atomic_save("wifi-paused","",0)){perror("wifi pause");return 1;}
-        if(!strcmp(argv[0],"forget"))remove_state("wifi");
+        if(!strcmp(argv[0],"forget")&&remove_state("wifi")){perror("wifi forget");return 1;}
         if(wifi_job(KWIFI_DISCONNECT,NULL,&result)){perror("wifi disconnect");return 1;}
         puts("Wi-Fi disconnected; automatic reconnection paused. Use wifi reconnect or wifi join.");return 0;
     }
@@ -170,7 +191,8 @@ static int wifi_command(int argc,char **argv){
     if(!rc)rc=save_profile(&p);
     erase(&p,sizeof(p));
     if(rc){perror("wifi join/save (automatic reconnection remains paused)");return 1;}
-    remove_state("wifi-paused");puts("Wi-Fi associated; profile saved. DHCP will configure the address.");return 0;
+    if(remove_state("wifi-paused")){perror("wifi: profile saved but automatic reconnection remains paused");return 1;}
+    puts("Wi-Fi associated; profile saved. DHCP will configure the address.");return 0;
 }
 static int wifi_daemon(void){
     automatic_wifi=1;
@@ -214,13 +236,20 @@ static int host_key(void){
     fd=open(tmp,O_RDONLY|O_NOFOLLOW);struct stat st;
     if(fd<0)return -1;
     int bad=fstat(fd,&st)||!protected_stat(&st,0)||fsync(fd);close(fd);
-    if(bad||rename(tmp,key)){unlink(tmp);return -1;}sync();return 0;
+    if(bad){unlink(tmp);return -1;}
+    /* Publish without replacing an identity created by another enable/manager
+       while key generation was in progress. rename() would overwrite it. */
+    int published=link(tmp,key),publish_error=errno;
+    if(unlink(tmp))return -1;
+    if(published&&publish_error!=EEXIST){errno=publish_error;return -1;}
+    fd=protected_open("ssh_host_ed25519_key");if(fd<0)return -1;
+    close(fd);sync();return 0;
 }
 static int ssh_enabled(void);
 static int ssh_command(int argc,char **argv){
     if(state_ready()){perror("sshctl: secure writable home disk required");return 1;}
     if(argc==1&&!strcmp(argv[0],"status")){puts(ssh_enabled()?"SSH enabled (Habilis supervises the listener).":"SSH disabled.");return 0;}
-    if(argc==1&&!strcmp(argv[0],"disable")){remove_state("ssh-enabled");puts("SSH disabled; listener stops within two seconds.");return 0;}
+    if(argc==1&&!strcmp(argv[0],"disable")){if(remove_state("ssh-enabled")){perror("sshctl disable");return 1;}puts("SSH disabled; listener stops within two seconds.");return 0;}
     if(argc==1&&!strcmp(argv[0],"enable")){
         if(access("/bin/dropbear",X_OK)||access("/bin/dropbearkey",X_OK)){fputs("sshctl: install Dropbear tools first\n",stderr);return 1;}
         if(!ssh_auth_ready()){fputs("sshctl: set a root password with passwd, or install /home/root/.ssh/authorized_keys first\n",stderr);return 1;}

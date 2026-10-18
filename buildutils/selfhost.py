@@ -14,7 +14,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def source(destination):
+def _write_source(destination):
     destination.mkdir(parents=True, exist_ok=True)
     # Generated objects and host image files never enter the source bundle.
     for name in ('arch', 'boot', 'compat', 'drivers', 'fs', 'habilis', 'include', 'kernel', 'lib', 'user', 'vendor', 'network', 'system', 'etc', 'limine'):
@@ -53,6 +53,24 @@ def source(destination):
         if path.is_file() and path.name != 'SOURCE-SHA256SUMS':
             manifest.append(hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + str(path.relative_to(destination)))
     (destination / 'SOURCE-SHA256SUMS').write_text('\n'.join(manifest) + '\n')
+
+
+def source(destination):
+    # A snapshot refresh replaces generated files as well as source files.
+    # Build its replacement first so a failed copy cannot destroy a usable kit.
+    if destination.is_symlink():
+        raise RuntimeError('refusing unmanaged source destination symlink: ' + str(destination))
+    if destination.exists() and any(destination.iterdir()):
+        marker = destination / 'SOURCE-PROVENANCE'
+        if not marker.is_file() or marker.is_symlink():
+            raise RuntimeError('refusing to replace unmanaged source directory: ' + str(destination))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.kunix-source-', dir=destination.parent) as work:
+        snapshot = Path(work) / 'snapshot'
+        _write_source(snapshot)
+        if destination.exists():
+            shutil.rmtree(destination)
+        snapshot.rename(destination)
 
 
 def stage(destination, toolchain):

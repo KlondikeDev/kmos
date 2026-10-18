@@ -189,6 +189,54 @@ static void test_fork_exec(void) {
     waitpid(pid, &st, 0);
     CHECK("sh -c exec runs programs", WIFEXITED(st) && WEXITSTATUS(st) == 0);
 
+    pipe(fds);
+    pid = fork();
+    if (pid == 0) {
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[0]); close(fds[1]);
+        char* args[] = { "sh", "-c", "exec /bin/sh.elf -c 'echo $$'", NULL };
+        execve("/bin/sh.elf", args, environ);
+        _exit(126);
+    }
+    close(fds[1]); memset(buf, 0, sizeof(buf)); got = 0;
+    while ((n = read(fds[0], buf + got, sizeof(buf) - 1 - (size_t)got)) > 0) got += n;
+    close(fds[0]); waitpid(pid, &st, 0);
+    char expected_pid[32]; snprintf(expected_pid, sizeof(expected_pid), "%d\n", pid);
+    CHECK("sh exec preserves PID", WIFEXITED(st) && WEXITSTATUS(st) == 0 && !strcmp(buf, expected_pid));
+
+    pid = fork();
+    if (pid == 0) {
+        char* args[] = { "sh", "-c", "exec /bin/false.elf; true", NULL };
+        execve("/bin/sh.elf", args, environ); _exit(126);
+    }
+    waitpid(pid, &st, 0);
+    CHECK("sh exec stops the shell command list", WIFEXITED(st) && WEXITSTATUS(st) == 1);
+
+    pid = fork();
+    if (pid == 0) {
+        close(STDERR_FILENO);
+        char* args[] = { "sh", "-c", "exec /bin/does-not-exist", NULL };
+        execve("/bin/sh.elf", args, environ); _exit(126);
+    }
+    waitpid(pid, &st, 0);
+    CHECK("sh exec retains ENOENT status with closed stderr", WIFEXITED(st) && WEXITSTATUS(st) == 127);
+
+    const char* redirect_path = "/tmp/ktest-exec-redirect";
+    unlink(redirect_path);
+    pid = fork();
+    if (pid == 0) {
+        char* args[] = { "sh", "-c", "exec > /tmp/ktest-exec-redirect; echo persistent", NULL };
+        execve("/bin/sh.elf", args, environ); _exit(126);
+    }
+    waitpid(pid, &st, 0);
+    int redirected = open(redirect_path, O_RDONLY);
+    memset(buf, 0, sizeof(buf));
+    n = redirected >= 0 ? read(redirected, buf, sizeof(buf)-1) : -1;
+    if (redirected >= 0) close(redirected);
+    CHECK("sh exec without command keeps redirections", WIFEXITED(st) && !WEXITSTATUS(st) && n == 11 && !strcmp(buf, "persistent\n"));
+    unlink(redirect_path);
+
+
     pid = fork();
     if (pid == 0) {
         char* argv[] = { "false", NULL };

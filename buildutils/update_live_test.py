@@ -25,19 +25,31 @@ def digest_range(image, start, length):
     return digest.digest()
 
 
+def extract_live_payload(iso, name, destination):
+    """Read the booted artifact, not ufs.img (which other VM tests modify)."""
+    subprocess.run(['xorriso', '-osirrox', 'on', '-indev', str(iso),
+                    '-extract', '/boot/' + name, str(destination)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return destination
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image',type=Path,required=True,help='existing seeded disposable NVMe fixture; copied before use')
     parser.add_argument('--block-size',type=int,choices=(512,4096),default=512)
     parser.add_argument('--iso',type=Path,default=ROOT/'build/binaries/kunix-live.iso')
-    parser.add_argument('--root-image',type=Path,default=ROOT/'ufs.img')
-    parser.add_argument('--kernel',type=Path,default=ROOT/'build/binaries/kunix-kodiak.elf')
+    parser.add_argument('--root-image',type=Path,help='expected root override; default extracts it from the ISO')
+    parser.add_argument('--kernel',type=Path,help='expected kernel override; default extracts it from the ISO')
     args=parser.parse_args()
     # Limit source selection to prior integration fixtures, never a host device.
     base=ROOT/'build/phase5';base.mkdir(exist_ok=True,parents=True)
     if not args.image.is_file() or not args.image.resolve().is_relative_to(base.resolve()):
         parser.error('--image must be a disposable integration fixture under build/phase5')
     work=Path(tempfile.mkdtemp(prefix=f'live-update-{args.block_size}-',dir=base))
+    if args.root_image is None:
+        args.root_image=extract_live_payload(args.iso,'root.img',work/'expected-root.img')
+    if args.kernel is None:
+        args.kernel=extract_live_payload(args.iso,'kunix-kodiak.elf',work/'expected-kernel.elf')
     image=work/'nvme.img'
     subprocess.run(['cp','--sparse=always',str(args.image),str(image)],check=True)
     block=args.block_size

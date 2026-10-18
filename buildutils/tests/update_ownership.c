@@ -7,7 +7,7 @@
 #undef main
 #include <assert.h>
 int main(void){
- for(unsigned block=512;block<=4096;block*=8)for(unsigned scenario=0;scenario<10;scenario++){
+ for(unsigned block=512;block<=4096;block*=8)for(unsigned scenario=0;scenario<11;scenario++){
   FILE* image=tmpfile(),*kernel=tmpfile(),*loader=tmpfile();assert(image&&kernel&&loader);
   int fd=fileno(image);assert(!ftruncate(fd,512*MiB));unsigned char data[4096]={0x7f,'E','L','F'};
   assert(fwrite(data,1,sizeof data,kernel)==sizeof data);assert(!fflush(kernel));
@@ -27,6 +27,8 @@ int main(void){
   if(scenario==7){unsigned char* target=uf_find(f.rootdir,"KUNIX   ELF");uset16(target+20,0xffff);uset16(target+26,0xffff);}
   if(scenario==8)f.rootdir[97]='x';
   if(scenario==9){unsigned char* empty=uf_empty(f.rootdir);assert(empty);memcpy(empty,uf_find(f.rootdir,"KUPDATEA   "),32);empty[0]='k';}
+  /* A volume-label attribute must not bypass the update directory type check. */
+  if(scenario==10)uf_entry(uf_find(f.rootdir,"KUPDATEA   "),"KUPDATEA   ",8,0,0);
   assert(!UPDATE_IO(fd,f.rootdir,4096,uf_at(&f,2),1));size_t n=(size_t)f.fatsz*block;
   assert(!UPDATE_IO(fd,f.fat,n,32ULL*block,1)&&!UPDATE_IO(fd,f.fat,n,(32ULL+f.fatsz)*block,1));uf_close(&f);
   int accepted=uf_open(&f,fd,512*MiB,block)==0;

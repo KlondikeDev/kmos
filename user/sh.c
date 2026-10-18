@@ -355,10 +355,13 @@ static int run_special_builtin(command_t* c) {
     // without forking, so it lives here and not with the plain builtins.
     if (strcmp(n, "exec") == 0) {
         if (c->argc < 2) return 0;      // redirections (if any) are already applied
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
         execvp(c->argv[1], &c->argv[1]);
+        int error = errno;      // diagnostics can fail too (for example fd 2 closed)
         dprintf(STDERR_FILENO, "ksh: %s: %s\n", c->argv[1],
-                errno == ENOENT ? "command not found" : strerror(errno));
-        exit(errno == ENOENT ? 127 : 126);
+                error == ENOENT ? "command not found" : strerror(error));
+        exit(error == ENOENT ? 127 : 126);
     }
     return -1;
 }
@@ -391,9 +394,10 @@ static int run_plain_builtin(command_t* c) {
     if (strcmp(n, "exec") == 0) {
         if (c->argc < 2) return 0;
         execvp(c->argv[1], &c->argv[1]);
+        int error = errno;
         dprintf(STDERR_FILENO, "ksh: %s: %s\n", c->argv[1],
-                errno == ENOENT ? "command not found" : strerror(errno));
-        return errno == ENOENT ? 127 : 126;
+                error == ENOENT ? "command not found" : strerror(error));
+        return error == ENOENT ? 127 : 126;
     }
     return -1;
 }
@@ -451,16 +455,20 @@ static void child_exec(command_t* c, pid_t pgid, int in_fd, int out_fd) {
 }
 
 static int run_pipeline(command_t* cmds, int ncmds, int background, const char* text) {
-    // A lone special builtin runs in the shell, with redirects applied to
-    // saved copies of the shell's own fds.
+    // A lone special builtin runs in the shell. exec keeps its redirections
+    // on this process, including when there is no replacement command.
     if (ncmds == 1 && cmds[0].argc > 0) {
         command_t* c = &cmds[0];
         const char* n = c->argv[0];
         int special = strcmp(n, "cd") == 0 || strcmp(n, "export") == 0 ||
                       strcmp(n, "unset") == 0 || strcmp(n, "exit") == 0 ||
                       strcmp(n, "jobs") == 0 || strcmp(n, "wait") == 0 ||
-                      strcmp(n, "fg") == 0 || strcmp(n, "bg") == 0;
-        if (special && !background) return run_special_builtin(c);
+                      strcmp(n, "fg") == 0 || strcmp(n, "bg") == 0 ||
+                      strcmp(n, "exec") == 0;
+        if (special && !background) {
+            if (!strcmp(n, "exec") && apply_redirects(c) < 0) return 1;
+            return run_special_builtin(c);
+        }
     }
 
     pid_t pids[MAX_CMDS];

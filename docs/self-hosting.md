@@ -47,6 +47,14 @@ This uses the static makefs and Limine installer in the kit, makes a new 128 MiB
 UFS2 root with the newly compiled programs, and writes
 `build/selfhost-image/kunix-selfhost.iso`. It retains the installed bootstrap
 shell, BusyBox and X applications. It does not rebuild those upstream projects.
+Every newly compiled native program is installed as `/bin/name.elf`. Its plain
+command name is refreshed too, except where that name belongs to BusyBox or a
+distinct ported application. Old native seed aliases are omitted, so removed
+native sources cannot reappear from the running root. The userland build also
+clears its generated native, Prime Meridian and Habilis output directories.
+Building from `/home` is supported even when the running root is a different
+filesystem; the image keeps a single BusyBox inode for all of its applets.
+Each image build recreates its generated root staging directory.
 
 The kernel is `build/binaries/kunix-kodiak.elf`; native user programs are in
 `build/user/*.elf`, Habilis in `build/habilis/habilis`, and Prime Meridian test
@@ -55,7 +63,10 @@ outputs on `/home` so normal root replacement does not discard the work.
 The source manifest is verified **before** compilation; generated build files
 subsequently change. The build ID is frozen when the bundle is created and
 records the source revision and working tree status. Its manifest records the
-actual bundled files, including local changes.
+actual bundled files, including local changes. Regenerating a managed source
+snapshot replaces its previous source and build outputs, so removed files do
+not enter the new manifest. Keep edits in the main checkout before regenerating
+a snapshot; an unrelated nonempty output directory is rejected.
 
 The kernel commands are extracted from the regular `build.sh` functions when
 creating the bundle. They use the same source list and linker script. The
@@ -69,12 +80,12 @@ RAM root:
 ```sh
 buildutils/selfhost-image.sh
 python3 buildutils/test.py --iso build/selfhost/live.iso --no-ata \
-    --mem 1536M --timeout 1800 --command selfhost-test \
+    --mem 2560M --timeout 3600 --command selfhost-test \
     --log build/selfhost/guest.log
 ```
 
 Build the ordinary system first so `build/ufsroot` and the kernel exist. This
-optional ISO has a 512 MiB root and does not replace the normal root, disks,
+optional ISO has a 768 MiB root and does not replace the normal root, disks,
 installer image or update slots. `selfhost-test` compiles and executes a musl
 program, then builds the complete kernel and native/Prime Meridian userland.
 The development ISO's files disappear when its VM stops; use the persistent
@@ -108,16 +119,17 @@ host tests passed. A real compiler regression test verifies the kernel uses
 `__stack_chk_guard` instead of Linux TLS. Static makefs produced UFS2 and ISO9660
 images with verified filesystem signatures.
 
-A guest compiled, assembled, linked and executed a musl C program. It then
-compiled many actual kernel sources. That run was deliberately stopped after
-finding that the hosted compiler selected a TLS kernel canary. The wrappers now
-force `-mstack-protector-guard=global`; a complete guest rerun and boot check are
-still pending. `build/selfhost/guest.log` records the interrupted run, not a
-successful full build. The earlier host-built kernel with the old canary did
-not boot. **Regenerate any existing `selfhost.tar.gz` before using it:** the
-old generated archive predates this fix.
+The retained Oct 17 logs contain a completed guest compile and image export
+(`guest-full.log`: 5 passed, 0 failed), followed by successful ktest, pmtest,
+pmsmoke, permtest, fbtest, xtest and vmtest runs on the exported image. The
+Oct 18 audit found that native `.elf` programs in that image could still come
+from the bootstrap seed. Image assembly now installs the current native
+outputs and refreshes their aliases while preserving BusyBox applets. Real
+makefs/ISO fixture tests cover those file contents, repeat builds, and a seed
+on another filesystem. A complete guest cycle with these assembly corrections
+has not been rerun; the older logs establish the earlier cycle only.
 
-To resume the mandatory end-to-end verification on the development machine:
+To repeat the end-to-end verification on the development machine:
 
 ```sh
 # Toolchain bootstrap already completed; this is an offline repeat if needed:
@@ -125,6 +137,8 @@ SELFHOST_CACHE=/tmp/kunix-selfhost-cache buildutils/selfhost-toolchain.sh
 python3 buildutils/tests/selfhost_bundle.py
 python3 buildutils/tests/selfhost_kernel_flags.py
 python3 buildutils/tests/selfhost_makefs.py
+python3 buildutils/tests/selfhost_image.py
+python3 buildutils/tests/selfhost_userland.py
 python3 buildutils/selfhost.py kit build/selfhost/selfhost.tar.gz
 buildutils/selfhost-image.sh
 python3 buildutils/selfhost_test.py --iso build/selfhost/live.iso
@@ -137,8 +151,8 @@ guest's digest, then boots the result through the runtime suites. Its log is
 `build/selfhost/guest-full.log`; its live log is
 `build/selfhost/serial-full.log`. Successful export produces
 `build/selfhost/kunix-guest-built.iso`. This TCG run can take tens of minutes.
-No full guest compilation or exported image boot success is claimed at this
-checkpoint. All generated binaries, archives and images are excluded from git.
+The full cycle logs above predate the Oct 18 assembly fixes. All generated
+binaries, archives and images are excluded from git.
 
 This product includes software developed for the NetBSD Project by Wasabi
 Systems, Inc. The makefs source notices and BSD queue header notice are retained

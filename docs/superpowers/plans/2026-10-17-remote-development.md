@@ -25,4 +25,35 @@
 - [x] Self-hosting: pinned static hosted compiler/binutils and make, source kit on home, guest kernel/native userland builds, boot the resulting kernel. Verified end to end: `selfhost_test.py` builds kernel+userland+ISO in QEMU, exports with SHA256 match, and passes ktest/pmtest/pmsmoke/permtest/fbtest/xtest/vmtest on the guest-built ISO. Two assembly bugs fixed along the way: guest /tmp too small for staging (workspace moved to /var/tmp, dev root grown to 768m) and unflushed NVMe export (dd conv=fsync, exact byte count reporting).
 - [x] Update bundle and EFI writer: exact format/checksums; validate source image and Bernard ESP; allocate inactive payloads without touching existing file chains; verify readback before boot selection; retain previous and original entries; rollback command. Verified: `update_test.py` at 512/4096 bytes plus `update_live_test.py` (`--from-live` without network).
 - [x] Integration: build images, host sanitizers, network/SSH tests, disposable NVMe update/reboot/data-preservation tests all pass; stock `--all` regression run in progress at handoff.
-- [ ] Document actual completion and hardware checks; update the roadmap with the owner's confirmed AX200 internet result.
+- [x] Document actual completion and hardware checks; update the roadmap with the owner's confirmed AX200 internet result.
+
+
+## 2026-10-18 bug audit
+
+Reproduced and fixed shell exec running in a child instead of replacing the
+shell, continuing the command list, losing ENOENT after a diagnostic error,
+and discarding commandless exec redirections. The four added guest checks
+failed before the fix; `ktest` now passes 115 checks.
+
+Fixed first-enrollment config growth losing the original menu after a clean
+write failure, and reserved EFI slot names bypassing validation as volume
+labels. Failure-injection/ownership regressions cover both sector sizes.
+
+Fixed concurrent SSH identity replacement, state removal reporting success on
+failure, and automatic Wi-Fi recovery restoring a superseded profile. The
+host regressions exercise these races and failed operations.
+
+Fixed self-host images keeping old native programs, repeated staging retaining
+removed files, cross-filesystem seed copies failing on persistent home, and
+source refreshes keeping stale source/build artifacts. Real makefs/ISO fixtures
+check compiled payload freshness and source snapshot tests check replacement.
+
+The live-update harness now extracts its expected payloads from the booted ISO:
+`ufs.img` is mutable during the ordinary filesystem suites and was producing a
+false corruption failure. An immutable ISO input regression covers this.
+
+Verification: host sanitizer suite, all eight guest suites (clean UFS fsck),
+two-boot SSH service checks, and live enrollment/reboot with unchanged original
+root/home hashes passed. The complete guest self-host compile/export cycle was
+not repeated for these image assembly changes; its focused fixtures passed.
+Physical AX200 reboot/recovery checks still require the T14.

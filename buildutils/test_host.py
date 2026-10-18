@@ -1,6 +1,7 @@
 # This file has been generated in whole or in part by a Large Language Model
 """Run sanitizer checks for logging, ACPI, block/page caches and VM faults."""
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -44,11 +45,25 @@ subprocess.run(["sh", "buildutils/tests/inet-host/run.sh"],cwd=root,check=True)
 
 # Persistent settings and fixed-ESP update invariants use ordinary host libc.
 with tempfile.TemporaryDirectory(prefix="kunix-remote-tests-") as work:
-    for name in ("network_settings", "update_fat", "update_ownership", "update_interrupt", "update_live"):
+    for name in ("network_settings", "network_regressions", "update_fat", "update_ownership", "update_interrupt", "update_live"):
         binary = str(Path(work) / name)
         subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror",
                         "-fsanitize=address,undefined", "buildutils/tests/" + name + ".c",
                         "-o", binary], cwd=root, check=True)
-        subprocess.run([binary], env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"), check=True)
+        modes = ("key-race", "disable", "wifi-race") if name == "network_regressions" else (None,)
+        for mode in modes:
+            subprocess.run([binary, *([mode] if mode else [])],
+                           env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"), check=True)
 for name in ("update_bundle.py", "selfhost_bundle.py"):
     subprocess.run(["python3", "buildutils/tests/" + name], cwd=root, check=True)
+
+if shutil.which("xorriso"):
+    subprocess.run(["python3", "buildutils/tests/update_live_inputs.py"], cwd=root, check=True)
+else:
+    print("SKIP live ISO input regression: xorriso is not installed")
+selfhost_tools = root / "build/selfhost/toolchain/bin"
+if all((selfhost_tools / name).is_file() for name in ("gcc", "make", "makefs", "limine")) and (root / "build/binaries/kunix-kodiak.elf").is_file():
+    subprocess.run(["python3", "buildutils/tests/selfhost_image.py"], cwd=root, check=True)
+    subprocess.run(["python3", "buildutils/tests/selfhost_userland.py"], cwd=root, check=True)
+else:
+    print("SKIP self-host image fixtures: build the optional self-host tools first")

@@ -14,6 +14,9 @@ kernel)
     echo 'SELFHOST KERNEL PASS'
     ;;
 userland)
+    # These directories contain only generated programs and objects. A removed
+    # source must not leave an executable for the image glob to reinstall.
+    rm -rf build/user build/pm build/habilis
     mkdir -p build/user build/pm build/habilis
     flags='-std=gnu99 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -Iuser'
     x86_64-elf-as user/crt0.s -o build/user/crt0.o
