@@ -47,7 +47,7 @@ int main(void) {
     // Round-trip decrypt.
     wifi_aes_decrypt(rk, block);
     assert(!memcmp(block, "\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff", 16));
-    // RFC 3610 test vector 1: CCM encrypt/decrypt round-trip plus MIC.
+    // Independent OpenSSL CCM fixtures using the CCMP nonce/AAD layout.
     u8 ccm_key[16] = { 0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7,0xc8,0xc9,0xca,0xcb,0xcc,0xcd,0xce,0xcf };
     u8 pn[6] = { 0x00,0x00,0x00,0x00,0x00,0x01 };
     u8 a2[6] = { 0x00,0x11,0x22,0x33,0x44,0x55 };
@@ -56,6 +56,9 @@ int main(void) {
     u8 protected[64]; u32 protected_length = 0;
     assert(wifi_ccmp_encrypt(ccm_key, pn, a2, aad, sizeof(aad), message, 16, protected, &protected_length));
     assert(protected_length == 24);
+    // OpenSSL EVP_aes_128_ccm independent output for the exact CCMP nonce,
+    // 22-byte AAD and payload above (ciphertext followed by 8-byte MIC).
+    assert(hex_equal(protected,"a4f69b82fcd6893659f80d94e568ecfec5c7e00331f13fcc",24));
     u8 plain[64]; u32 plain_length = 0;
     assert(wifi_ccmp_decrypt(ccm_key, pn, a2, aad, sizeof(aad), protected, protected_length, plain, &plain_length));
     assert(plain_length == 16 && !memcmp(plain, message, 16));
@@ -66,9 +69,22 @@ int main(void) {
     // Tampered MIC fails too.
     protected[23] ^= 0x80;
     assert(!wifi_ccmp_decrypt(ccm_key, pn, a2, aad, sizeof(aad), protected, protected_length, plain, &plain_length));
+    assert(plain_length==0);
+    for (u32 i=0;i<16;i++) assert(plain[i]==0);
     // Wrong key fails.
     u8 wrong[16]; memcpy(wrong, ccm_key, 16); wrong[0] ^= 1;
     assert(!wifi_ccmp_decrypt(wrong, pn, a2, aad, sizeof(aad), protected, protected_length, plain, &plain_length));
+    // QoS TID 7 must affect both nonce and authenticated header.
+    u8 qos_aad[24]={0}; qos_aad[22]=7;
+    assert(wifi_ccmp_encrypt(ccm_key,pn,a2,qos_aad,sizeof(qos_aad),message,16,protected,&protected_length));
+    assert(hex_equal(protected,"4901be6a6b89c465580727fd7b329f5dbdc32b3869a1a76b",24));
+    assert(wifi_ccmp_decrypt(ccm_key,pn,a2,qos_aad,sizeof(qos_aad),protected,24,plain,&plain_length));
+    assert(plain_length==16 && !memcmp(plain,message,16));
+    qos_aad[22]=6;
+    assert(!wifi_ccmp_decrypt(ccm_key,pn,a2,qos_aad,sizeof(qos_aad),protected,24,plain,&plain_length));
+    assert(!plain_length);
+    assert(!wifi_ccmp_encrypt(ccm_key,pn,a2,NULL,22,message,16,protected,&protected_length));
+    assert(!protected_length);
     puts("wifi SHA-1, HMAC, PBKDF2, AES and CCMP vectors: PASS");
     return 0;
 }

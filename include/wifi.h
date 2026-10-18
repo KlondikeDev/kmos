@@ -50,7 +50,11 @@ typedef struct {
     u8 ssid[WIFI_SSID_MAX];
     u32 ssid_length;
     u16 sequence;
+    bool wpa2;
+    u8 rates[16];
+    u8 rates_length;
     u16 aid;
+    u16 last_status; // status of the last auth/assoc response (diagnostics)
     u16 last_tx_length;
     u8 last_tx[WIFI_FRAME_MAX];
 } wifi_sta_t;
@@ -58,6 +62,10 @@ void wifi_sta_init(wifi_sta_t* sta, const u8 local[WIFI_ADDR_LEN]);
 // Configure the target network. False on a bad SSID length or state.
 bool wifi_sta_join(wifi_sta_t* sta, const u8 bssid[WIFI_ADDR_LEN],
                    const void* ssid, u32 ssid_length);
+// Configure before association: WPA2-PSK CCMP RSN IE and Privacy bit.
+void wifi_sta_set_wpa2(wifi_sta_t* sta, bool enabled);
+// Copy supported AP rates from scan IEs, including basic-rate markings.
+bool wifi_sta_set_rates(wifi_sta_t* sta, const u8* rates, u32 length);
 // Parse a raw frame; false when shorter than a header or an invalid version.
 bool wifi_parse(const void* frame, u32 length, wifi_frame_t* out);
 // Build the next transmit frame for the current state (auth, then assoc).
@@ -66,7 +74,7 @@ u32 wifi_next_tx(wifi_sta_t* sta);
 // Consume a received frame; advances the state machine. Returns true when
 // the frame belonged to the current exchange (even on rejection).
 bool wifi_receive(wifi_sta_t* sta, const void* frame, u32 length);
-// Convert an associated data frame to an Ethernet frame for the IP stack.
+// Convert an associated plaintext data frame (decrypt CCMP first) to Ethernet.
 // Returns the Ethernet length, 0 when not a data frame for us.
 u32 wifi_to_ethernet(const wifi_sta_t* sta, const void* frame, u32 length,
                      void* ethernet, u32 capacity);

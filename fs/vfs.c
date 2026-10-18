@@ -420,6 +420,7 @@ i32 vfs_rename(const char* oldpath, const char* newpath) {
 }
 
 i32 vfs_truncate(vnode_t* node, u64 size) {
+    if(!node)return -EINVAL;
     if (node->type == VN_DIR) return -EISDIR;
     if (node->type != VN_REG) return 0;                  // devices ignore it
     if (!node->mnt->ops->truncate) return -EROFS;
@@ -497,6 +498,7 @@ i64 vfs_readlink(const char* path, char* buf, u64 len) {
 }
 
 i32 vfs_setattr(vnode_t* node, u32 mask, const vattr_t* a_in) {
+    if(!node)return -95; // EOPNOTSUPP: sockets have no filesystem attributes.
     vattr_t a = *a_in;
     process_t* p = proc_current();
     u32 mode, uid, gid;

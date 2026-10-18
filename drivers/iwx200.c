@@ -201,6 +201,42 @@ static void command_write(pci_device_t* dev, u16 command) {
          ((u32)dev->device << 11) | ((u32)dev->function << 8));
     outw(PCI_CONFIG_DATA, command);
 }
+// Enable Memory Space and Bus Master on every PCI-PCI bridge whose bus range
+// contains the card, as Linux pci_enable_bridge() does. Firmware often
+// leaves bus mastering off on root ports of slots it never used (WiFi); the
+// card's MMIO then works but every DMA it issues is rejected upstream.
+static void bridges_enable(u8 target_bus) {
+    card.status.bridges = 0;
+    for (u32 bus = 0; bus < 256; bus++)
+        for (u32 dev = 0; dev < 32; dev++)
+            for (u32 fn = 0; fn < 8; fn++) {
+                u32 id = pci_read_config((u8)bus, (u8)dev, (u8)fn, 0);
+                if ((id & 0xffff) == 0xffff || !(id & 0xffff)) { if (!fn) break; continue; }
+                u32 header = (pci_read_config((u8)bus, (u8)dev, (u8)fn, 0x0c) >> 16) & 0xff;
+                if ((header & 0x7f) == 1) {
+                    u32 buses = pci_read_config((u8)bus, (u8)dev, (u8)fn, 0x18);
+                    u8 secondary = (u8)(buses >> 8), subordinate = (u8)(buses >> 16);
+                    if (secondary <= target_bus && target_bus <= subordinate) {
+                        u16 command = (u16)pci_read_config((u8)bus, (u8)dev, (u8)fn, 4);
+                        if (secondary == target_bus) {
+                            card.status.bridge_bdf = (bus << 8) | (dev << 3) | fn;
+                            card.status.bridge_command = command;
+                        }
+                        pci_device_t bridge = {.bus = (u8)bus, .device = (u8)dev, .function = (u8)fn};
+                        command_write(&bridge, command | 0x6u);
+                        card.status.bridges++;
+                    }
+                }
+                if (!fn && !(header & 0x80)) break;
+            }
+}
+// Clear the PCI retry-timeout byte (config 0x41), as OpenBSD iwx_attach
+// does, so PCI Tx retries do not interfere with C3 CPU state.
+static void retry_timeout_clear(pci_device_t* dev) {
+    outl(PCI_CONFIG_ADDRESS, 0x80000040u | ((u32)dev->bus << 16) |
+         ((u32)dev->device << 11) | ((u32)dev->function << 8));
+    outb(PCI_CONFIG_DATA + 1, 0);
+}
 // True when the masked bits equal the wanted value before the deadline.
 static bool poll(u32 offset, u32 mask, u32 want, u64 nanoseconds) {
     u64 start = time_counter_ns();
@@ -381,6 +417,13 @@ bool iwx200_parse_fw(const void* image, u64 size, iwx200_fw_t* out) {
         } else if (type == 23 && length == 4) {
             out->phy_config = (u32)p[offset] | ((u32)p[offset+1] << 8) |
                               ((u32)p[offset+2] << 16) | ((u32)p[offset+3] << 24);
+        } else if ((type == 54 || type == 55) && length >= 4) {
+            // UMAC/LMAC debug addresses; the first dword is the SRAM address
+            // of that core's error log. Top two bits are cache control.
+            u32 address = ((u32)p[offset] | ((u32)p[offset+1] << 8) |
+                           ((u32)p[offset+2] << 16) | ((u32)p[offset+3] << 24)) & 0x3fffffffu;
+            if (type == 55) out->lmac_error_table = address;
+            else out->umac_error_table = address;
         } else if (type == IWX_TLV_CMD_VERSIONS) {
             if (length % 4 || length / 4 > 256) return false;
             out->command_version_count = length / 4;
@@ -461,7 +504,9 @@ static bool load_firmware(void) {
     fence();
     card.status.stage = IWX200_FW_LOAD;
     // All DMA targets are owned, zeroed, and described before bus mastering.
-    command_write(&card.pci, (card.pci_command | 0x406u) & ~1u);
+    // INTx stays enabled: OpenBSD clears INTERRUPT_DISABLE when MSI(-X) is
+    // unused ("hardware bug workaround"). We poll, but the card needs it.
+    command_write(&card.pci, (card.pci_command | 0x006u) & ~0x401u);
     reg_write(IWX_CSR_CTXT_INFO_BA, (u32)ctxt_phys);
     reg_write(IWX_CSR_CTXT_INFO_BA + 4, (u32)(ctxt_phys >> 32));
     if (!nic_lock()) return false;
@@ -473,6 +518,38 @@ static bool load_firmware(void) {
     return true;
 }
 static u32 rx_poll(const volatile u8** payload_out);
+// Read dwords of device SRAM through the targeted-memory window. The window
+// is held only for the read. Returns false when MAC access cannot be granted.
+static bool sram_read(u32 address, u32* out, u32 dwords) {
+    if (!nic_lock()) return false;
+    reg_write(IWX_HBUS_TARG_RADDR, address);
+    for (u32 i = 0; i < dwords; i++) out[i] = reg_read(IWX_HBUS_TARG_MEM_RDAT);
+    reg_write(IWX_CSR_GP_CNTRL, reg_read(IWX_CSR_GP_CNTRL) & ~IWX_GP_MAC_ACCESS_REQ);
+    return true;
+}
+// Snapshot the firmware's own error logs after a HW/SW error. The firmware
+// is dead at this point, so the logs are the only record of why. Offsets
+// follow the OpenBSD iwx_error_event_table and iwx_umac_error_event_table
+// layouts (valid, error_id, ...; LMAC log_pc is dword 20).
+#define IWX_SRAM_MIN_BASE 0x400000u
+static void capture_error_log(void) {
+    u32 table[24];
+    card.status.error_log_read = false;
+    card.status.lmac_valid = card.status.lmac_error_id = 0;
+    card.status.lmac_log_pc = card.status.umac_error_id = 0;
+    if (card.fw.lmac_error_table >= IWX_SRAM_MIN_BASE &&
+        sram_read(card.fw.lmac_error_table, table, 24)) {
+        card.status.lmac_valid = table[0];
+        card.status.lmac_error_id = table[1];
+        card.status.lmac_log_pc = table[20];
+        card.status.error_log_read = true;
+    }
+    if (card.fw.umac_error_table >= IWX_SRAM_MIN_BASE &&
+        sram_read(card.fw.umac_error_table, table, 2)) {
+        card.status.umac_error_id = table[1];
+        card.status.error_log_read = true;
+    }
+}
 static bool service_interrupts(void) {
     u32 cause = reg_read(IWX_CSR_INT);
     card.status.csr_interrupt = cause;
@@ -482,9 +559,14 @@ static bool service_interrupts(void) {
         // Latch the flow-handler status next to the cause: on real
         // hardware this names the DMA engine that raised HW_ERR.
         card.status.csr_fh_status = reg_read(IWX_CSR_FH_INT_STATUS);
+        if (cause != ~0u && (cause & (IWX_INT_SW_ERR | IWX_INT_HW_ERR))) capture_error_log();
         return false;
     }
-    if ((cause & IWX_INT_ALIVE) && !card.rx_started) {
+    u32 msix_hw = reg_read(IWX_CSR_MSIX_HW_INT_CAUSES);
+    if (msix_hw != ~0u && msix_hw) reg_write(IWX_CSR_MSIX_HW_INT_CAUSES, msix_hw);
+    bool alive_seen = (cause & IWX_INT_ALIVE) || (msix_hw != ~0u && (msix_hw & 1u)) ||
+                      (card.rx_status && (*card.rx_status & 0xfff));
+    if (alive_seen && !card.rx_started) {
         // Buffers were described in transport_alloc; just open the queue.
         reg_write(IWX_CSR_RX_WPTR, 8);
         card.rx_started = true;
@@ -550,7 +632,9 @@ bool iwx200_init(void) {
     u64 bar = low & ~15u;
     if (type == 2) bar |= (u64)pci_read_config(dev->bus, dev->device, dev->function, 0x14) << 32;
     if (!bar || (bar & (MMIO_SIZE - 1)) || bar > ~0ULL - MMIO_SIZE) return init_failure(-22);
-    command_write(dev, (card.pci_command | 0x402u) & ~5u);
+    command_write(dev, (card.pci_command | 0x002u) & ~0x405u);
+    retry_timeout_clear(dev);
+    bridges_enable(dev->bus);
     card.regs = (volatile u8*)MMIO_BASE;
     for (u32 off = 0; off < MMIO_SIZE; off += 4096)
         if (!vmm_map(MMIO_BASE + off, bar + off, 0x1b)) {
@@ -569,6 +653,11 @@ bool iwx200_init(void) {
     while (time_counter_ns() - start < 5000000ULL) __asm__ volatile("pause" ::: "memory");
     card.status.stage = IWX200_CLOCK;
     if (!apm_init()) return init_failure(-110);
+    // 22000-family parts default to MSI-X cause routing; without MSI-X we
+    // must select MSI/legacy mode or causes never reach CSR_INT.
+    if (!nic_lock()) return init_failure(-110);
+    prph_write(IWX_UREG_CHICK, IWX_UREG_CHICK_MSI_ENABLE);
+    reg_write(IWX_CSR_GP_CNTRL, reg_read(IWX_CSR_GP_CNTRL) & ~IWX_GP_MAC_ACCESS_REQ);
     u32 hw = reg_read(IWX_CSR_HW_REV), phy = card.fw.phy_config;
     u32 cfg = reg_read(IWX_CSR_HW_IF_CONFIG);
     cfg &= ~0x0000ff0fu;
@@ -612,6 +701,9 @@ void iwx200_mac(u8 out[6]) { if (out) copy(out, card.mac, 6); }
 // was already probed or the image is malformed.
 bool iwx200_stage_fw(const void* image, u64 size) {
     if (card.attempted) return false;
+    u32 sum = 2166136261u;
+    for (u64 i = 0; i < size; i++) sum = (sum ^ ((const u8*)image)[i]) * 16777619u;
+    card.status.firmware_sum = sum; card.status.firmware_size = (u32)size;
     if (!iwx200_parse_fw(image, size, &card.fw)) {
         card.status.stage = IWX200_FIRMWARE_INVALID; card.status.error = -22; return false;
     }
@@ -837,7 +929,7 @@ i32 iwx200_command(u32 group, u32 opcode, u32 version,
             }
             if (rindex == index && queue == IWX_CMD_QUEUE &&
                 ((code == opcode && (rflags & ~IWX_CMD_FAILED) == group) || (code == 2 && rflags == 0))) {
-                if ((rflags & IWX_CMD_FAILED) || (code == 2 && rflags == 0)) result = -5; // EIO
+                if ((rflags & IWX_CMD_FAILED) || (code == 2 && rflags == 0)) result = -71; // EPROTO: rejected, card still alive
                 else if (!response && !capacity) result = 0;
                 else if (payload_length > capacity) result = -90;
                 else {
@@ -856,6 +948,8 @@ i32 iwx200_command(u32 group, u32 opcode, u32 version,
     card.command_busy = false;
     irq_restore(flags);
     if (result < 0) {
+        card.status.cmd_fail_id = (group << 8) | opcode;
+        card.status.cmd_fail_result = result;
         card.status.error = result;
         if (result == -110 || result == -5) init_failure(result);
     }
@@ -922,6 +1016,9 @@ i32 iwx200_run_init(void) {
     return 0;
 }
 void iwx200_nvm_mac(u8 out[6]) { if (out) copy(out, nvm_mac, 6); }
+bool iwx200_has_capability(u32 bit) {
+    return bit < 256 && (card.fw.capabilities[bit / 32] >> (bit % 32) & 1);
+}
 i32 iwx200_cmd_version(u8 group, u8 opcode) {
     if (!group) group = IWX_GRP_LONG;
     for (u32 i = 0; i < card.fw.command_version_count; i++) {
@@ -1019,10 +1116,21 @@ i32 iwx200_data_queue_enable(u8 station_id, u8 tid) {
     copy(cmd + 16, &card.data[slot].ring_phys, 8);
     i32 n = iwx200_command(0, 0x1d, 0, cmd, sizeof(cmd), response, sizeof(response));
     if (n < 0) return n;
-    if (n != 8 || response[2] || response[3]) return -5;
+    card.status.queue_response_length = (u32)n;
+    card.status.queue_response = (u32)response[0] | (u32)response[1] << 8 | (u32)response[2] << 16 | (u32)response[3] << 24;
+    card.status.queue_response_hi = (u32)response[4] | (u32)response[5] << 8 | (u32)response[6] << 16 | (u32)response[7] << 24;
+    // queue_reject: 1 length, 2 failure flags, 3 qid range, 4 qid already in use
+    card.status.queue_reject = 0;
+    if (n != 8) { card.status.queue_reject = 1; return -5; }
+    // response[2..3] is a firmware-internal flags word. Neither OpenBSD
+    // (iwx_enable_txq) nor iwlwifi (iwl_pcie_txq_alloc_response) treats it
+    // as an error; only the queue number and write pointer matter.
     u32 qid = (u32)response[0] | ((u32)response[1] << 8);
-    u32 pointer = (u32)response[4] | ((u32)response[5] << 8);
-    if (!qid || qid >= 32 || pointer >= IWX_TX_RING_COUNT || data_slot(qid) >= 0) return -5;
+    // Firmware reports a free-running write pointer; iwlwifi masks it to the
+    // ring size (iwl_pcie_txq_alloc_response), so do the same.
+    u32 pointer = ((u32)response[4] | ((u32)response[5] << 8)) & (IWX_TX_RING_COUNT - 1);
+    if (!qid || qid >= 32) { card.status.queue_reject = 3; return -5; }
+    if (data_slot(qid) >= 0) { card.status.queue_reject = 4; return -5; }
     card.data[slot].active = true; card.data[slot].qid = qid;
     card.data[slot].station = station_id; card.data[slot].tid = tid;
     card.data[slot].head = card.data[slot].tail = pointer;
@@ -1036,7 +1144,7 @@ i32 iwx200_data_queue_disable(u8 qid) {
     cmd[0] = card.data[slot].station; cmd[1] = card.data[slot].tid;
     i32 n = iwx200_command(0, 0x1d, 0, cmd, sizeof(cmd), response, sizeof(response));
     if (n < 0) return n;
-    if (n != 8 || response[2] || response[3]) return -5;
+    if (n != 8) return -5;
     card.data[slot].active = false;
     card.data[slot].pending = 0;
     return 0;

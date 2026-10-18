@@ -51,6 +51,10 @@
 // Indirect peripheral access through the HBUS window.
 #define IWX_HBUS_TARG_ADDR 0x400
 #define IWX_HBUS_TARG_RADDR 0x40c
+#define IWX_HBUS_TARG_MEM_RDAT 0x41c
+#define IWX_UREG_CHICK 0xa05c00u
+#define IWX_UREG_CHICK_MSI_ENABLE (1u << 24)
+#define IWX_CSR_MSIX_HW_INT_CAUSES 0x2808u
 #define IWX_HBUS_TARG_WADDR 0x410
 #define IWX_HBUS_TARG_WRPTR 0x460
 #define IWX_HBUS_PRPH_RADDR 0x448
@@ -165,6 +169,8 @@ typedef struct {
     u32 regular_count;
     u32 api;
     u32 phy_config;
+    // SRAM addresses of the firmware error logs (DEBUG_ADDRS TLVs).
+    u32 lmac_error_table, umac_error_table;
     u32 capabilities[8];
     u8 alive_version;
     u8 nvm_version;
@@ -209,6 +215,20 @@ typedef struct {
     u32 csr_fh_status;
     // RF-kill switch state sampled at probe: 1 means the radio is enabled.
     bool rfkill_clear;
+    // Firmware error log, read from SRAM after a HW/SW error interrupt.
+    // error_log_read is false when the table pointer was absent or the
+    // window lock failed; the other fields are then zero.
+    bool error_log_read;
+    u32 lmac_valid, lmac_error_id, lmac_log_pc, umac_error_id;
+    // Upstream bridge diagnostics: bridges enabled, and the parent bridge's
+    // bus/dev/fn and PCI command register as firmware left it.
+    u32 bridges, bridge_bdf, bridge_command;
+    // FNV-1a of the loaded firmware image and its size.
+    u32 firmware_sum, firmware_size;
+    // Last failed firmware command ((group << 8) | opcode) and its result,
+    // and the raw TX-queue-config response for the data queue.
+    u32 cmd_fail_id; i32 cmd_fail_result;
+    u32 queue_response_length, queue_response, queue_response_hi, queue_reject;
 } iwx200_status_t;
 void iwx200_status(iwx200_status_t* out);
 // Disconnect the station and tear down its firmware contexts and queues.
@@ -225,6 +245,8 @@ i32 iwx200_scan(iwx_scan_result* out, u32 capacity);
 
 // TLV-reported firmware ABI versions; -1 when the command is absent.
 i32 iwx200_cmd_version(u8 group, u8 opcode);
+// True if the loaded firmware advertises IWX_UCODE_TLV_CAPA_<bit>.
+bool iwx200_has_capability(u32 bit);
 i32 iwx200_notif_version(u8 group, u8 opcode);
 typedef void (*iwx200_notification_fn)(u8 group, u8 opcode, const u8* payload, u32 length);
 void iwx200_set_notification_handler(iwx200_notification_fn callback);

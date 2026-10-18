@@ -33,10 +33,11 @@
 #include <disk.h>
 #include <disk_ioctl.h>
 #include <memcpy.h>
+#include <random.h>
 
 enum { DEV_ROOT = 1, DEV_TTY, DEV_NULL, DEV_ZERO, DEV_SERIAL, DEV_FD,
        DEV_STDIN, DEV_STDOUT, DEV_STDERR, DEV_CONSOLE, DEV_PTMX, DEV_PTS,
-       DEV_FB0, DEV_INPUT, DEV_TTY0, DEV_TTY1, DEV_COUNT };
+       DEV_FB0, DEV_INPUT, DEV_TTY0, DEV_TTY1, DEV_RANDOM, DEV_URANDOM, DEV_WIFI, DEV_COUNT };
 #define DEV_DISK_BASE 0x4000
 #define DEV_INSTALL_SOURCE 0x5000
 #define DEV_MICE 0x3000              // input/mice
@@ -62,12 +63,17 @@ static const char* const dev_names[DEV_COUNT] = {
     [DEV_INPUT] = "input",
     [DEV_TTY0] = "tty0",
     [DEV_TTY1] = "tty1",
+    [DEV_RANDOM] = "random",
+    [DEV_URANDOM] = "urandom",
+    [DEV_WIFI] = "wifi0",
 };
 
 static void make_node(u64 id, vnode_t* out) {
     out->id = id;
     out->aux = 0;
     out->size = id == DEV_FB0 ? fb_info()->size : 0;
+    if (id == DEV_RANDOM || id == DEV_URANDOM) out->mode = 0444;
+    if (id == DEV_WIFI) out->mode = 0600;
     out->mtime = rtc_now();                // devices are always "now"
     if (id==DEV_INSTALL_SOURCE || (id>=DEV_DISK_BASE && id<DEV_DISK_BASE+DISK_MAX)) {
         i32 d=id==DEV_INSTALL_SOURCE ? disk_install_source() : (i32)(id-DEV_DISK_BASE);
@@ -162,7 +168,7 @@ static i32 devfs_readdir(const vnode_t* dir, u32 index, char* name_out, vnode_t*
 // The terminal a node stands for. /dev/tty is the caller's controlling
 // terminal (or the console, for the kernel and its first children).
 tty_t* devfs_tty(const vnode_t* node) {
-    if (!node->mnt || node->mnt->ops != &devfs_vfs_ops) return NULL;
+    if (!node || !node->mnt || node->mnt->ops != &devfs_vfs_ops) return NULL;
     if (node->id == DEV_CONSOLE || node->id == DEV_TTY0 || node->id == DEV_TTY1) return &tty_console;
     if (node->id == DEV_TTY) {
         tty_t* c = proc_current()->ctty;
@@ -177,11 +183,11 @@ bool devfs_is_tty(const vnode_t* node) {
 }
 
 bool devfs_is_ptmx(const vnode_t* node) {
-    return node->mnt && node->mnt->ops == &devfs_vfs_ops && node->id == DEV_PTMX;
+    return node && node->mnt && node->mnt->ops == &devfs_vfs_ops && node->id == DEV_PTMX;
 }
 
 static bool is_devfs(const vnode_t* node) {
-    return node->mnt && node->mnt->ops == &devfs_vfs_ops;
+    return node && node->mnt && node->mnt->ops == &devfs_vfs_ops;
 }
 
 bool devfs_is_disk(const vnode_t* n) {
@@ -244,6 +250,8 @@ i64 devfs_disk_ioctl(vnode_t* node,u32 req,void* arg) {
     return -ENOTTY;
 }
 
+bool devfs_is_wifi(const vnode_t* node) { return is_devfs(node) && node->id == DEV_WIFI; }
+
 bool devfs_is_fb(const vnode_t* node) {
     return is_devfs(node) && node->id == DEV_FB0;
 }
@@ -253,7 +261,7 @@ bool devfs_is_mouse(const vnode_t* node) {
 }
 
 i32 devfs_pts_number(const vnode_t* node) {
-    if (!node->mnt || node->mnt->ops != &devfs_vfs_ops) return -1;
+    if (!node || !node->mnt || node->mnt->ops != &devfs_vfs_ops) return -1;
     if (node->id >= DEV_PTS_BASE && node->id < DEV_PTS_BASE + PTY_MAX) return (i32)(node->id - DEV_PTS_BASE);
     return -1;
 }
@@ -263,6 +271,8 @@ static i64 devfs_read(vnode_t* node, u64 off, void* buf, u64 len) {
     tty_t* t = devfs_tty(node);
     if (t) return tty_read(t, buf, len, false);
     switch (node->id) {
+        case DEV_RANDOM:
+        case DEV_URANDOM: return random_read(buf, len);
         case DEV_NULL:
         case DEV_SERIAL: return 0;
         case DEV_ZERO:
@@ -279,6 +289,8 @@ static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
     tty_t* t = devfs_tty(node);
     if (t) return tty_write(t, buf, len, false);
     switch (node->id) {
+        case DEV_RANDOM:
+        case DEV_URANDOM: return -EACCES;
         case DEV_NULL:
         case DEV_ZERO: return (i64)len;
         case DEV_FB0:  return fb_write(off, buf, len);
@@ -295,6 +307,7 @@ static i64 devfs_write(vnode_t* node, u64 off, const void* buf, u64 len) {
 // A pts is opened: it must exist and be unlocked. (The last close is
 // release(), below.)
 static i32 devfs_open(vnode_t* node, u32 flags) {
+    if ((node->id == DEV_RANDOM || node->id == DEV_URANDOM) && (flags & 3)) return -EACCES;
     if(devfs_is_disk(node)) {
         if(proc_current()->euid) return -EACCES;
         i32 d=raw_disk(node); if(d<0)return -ENXIO;

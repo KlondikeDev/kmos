@@ -79,6 +79,17 @@ typedef int           pid_t;
 #define SYS_MPROTECT    45
 #define SYS_SYNC        46
 #define SYS_FSYNC       47
+#define SYS_SOCKET 48
+#define SYS_BIND 49
+#define SYS_CONNECT 50
+#define SYS_LISTEN 51
+#define SYS_ACCEPT 52
+#define SYS_SEND 53
+#define SYS_RECV 54
+#define SYS_SHUTDOWN 55
+#define SYS_SOCKNAME 56
+#define SYS_SOCKOPT 57
+#define SYS_NETINFO 58
 
 long syscall3(long n, long a, long b, long c);
 long syscall6(long n, long a, long b, long c, long d, long e, long f);

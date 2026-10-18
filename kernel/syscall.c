@@ -13,6 +13,9 @@
 // so once checked, a user pointer can be used directly.
 
 #include <types.h>
+#include <wifi_control.h>
+#include <wifi_ioctl.h>
+#include <build.h>
 #include <syscall.h>
 #include <usermode.h>
 #include <elf.h>
@@ -28,6 +31,8 @@
 #include <rtc.h>
 #include <memory.h>
 #include <disk.h>
+#include <inet.h>
+#include <socket.h>
 #include <memcpy.h>
 #include <memset.h>
 #include <klog.h>
@@ -110,7 +115,7 @@ i64 sys_open(u64 path, u64 flags, u64 mode) {
 i64 sys_lseek(u64 fd, i64 off, u64 whence) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type == VN_FIFO || (f->node->type == VN_CHR && !devfs_is_fb(f->node))) return -ESPIPE;
+    if (!f->node || f->node->type == VN_SOCK || f->node->type == VN_FIFO || (f->node->type == VN_CHR && !devfs_is_fb(f->node))) return -ESPIPE;
     i64 base;
     switch (whence) {
         case SEEK_SET: base = 0; break;
@@ -149,6 +154,11 @@ static i64 sys_fstat(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!user_range_ok(out, sizeof(kstat_t), true)) return -EFAULT;
+    if(!f->node){
+        if(!file_is_inet(f)&&!file_is_socket(f))return -ENOSYS;
+        kstat_t st;memset(&st,0,sizeof(st));st.st_mode=S_IFSOCK|0777;st.st_nlink=1;
+        memcpy((void*)out,&st,sizeof(st));return 0;
+    }
     vfs_getattr(f->node);
     fill_stat(f->node, (kstat_t*)out);
     return 0;
@@ -204,7 +214,7 @@ i64 sys_pipe(u64 out) {
 static i64 sys_readdir(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type != VN_DIR || !f->path) return -ENOTDIR;
+    if (!f->node || f->node->type != VN_DIR || !f->path) return -ENOTDIR;
     if (!user_range_ok(out, sizeof(kdirent_t), true)) return -EFAULT;
 
     kdirent_t d;
@@ -261,6 +271,11 @@ i64 sys_getcwd(u64 buf, u64 len) {
 static i64 sys_ioctl(u64 fd, u64 req, u64 arg) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
+    if(devfs_is_wifi(f->node)) {
+        u32 size=wifi_control_size((u32)req);
+        if(size && !user_range_ok(arg,size,req==KWIFI_RESULT))return -EFAULT;
+        return wifi_control_ioctl((u32)req,(void*)arg);
+    }
     if(devfs_is_disk(f->node)) {
         u32 size=devfs_disk_ioctl_size((u32)req);
         if(size && !user_range_ok(arg,size,true)) return -EFAULT;
@@ -432,8 +447,8 @@ static i64 sys_uname(u64 out) {
     kutsname_t u;
     memset(&u, 0, sizeof(u));
     copy_str(u.sysname, "Kunix", sizeof(u.sysname));
-    copy_str(u.release, "0.03-kodiak", sizeof(u.release));
-    copy_str(u.version, "Kunix Millennium Operating System", sizeof(u.version));
+    copy_str(u.release, KUNIX_RELEASE, sizeof(u.release));
+    copy_str(u.version, KUNIX_BUILD_DESCRIPTION, sizeof(u.version));
     copy_str(u.machine, "x86_64", sizeof(u.machine));
     memcpy((void*)out, &u, sizeof(u));
     return 0;
@@ -460,6 +475,8 @@ i64 sys_rename(u64 oldpath, u64 newpath) {
     if (r < 0) return r;
     return vfs_rename(from, to);
 }
+
+bool net_native_call(u64,u64,u64,u64,u64,u64,u64,i64*);
 
 // ---- dispatch ----
 
@@ -527,13 +544,14 @@ void syscall_dispatch(registers_t* regs) {
         case SYS_SYNC:        r = vfs_sync_all(); break;
         case SYS_FSYNC: {
             file_t* f = fd_get(me(), (i32)a);
-            r = f ? vfs_sync(f->node) : -EBADF;
+            r = !f ? -EBADF : !f->node ? -EINVAL : vfs_sync(f->node);
             break;
         }
         default:
-            r = -ENOSYS;
+            if(!net_native_call(regs->rax,a,b,c,regs->r10,regs->r8,regs->r9,&r))r=-ENOSYS;
             break;
     }
     regs->rax = (u64)r;
     disk_cache_poll();
+    net_poll();
 }

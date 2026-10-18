@@ -1,6 +1,6 @@
 // This file has been generated in whole or in part by a Large Language Model
 // WPA2 software crypto: SHA-1, HMAC-SHA-1, PBKDF2-SHA1, AES-128 and
-// CCM/CCMP. No allocation, no secrets left on the stack beyond the call.
+// CCM/CCMP. No allocation.
 // Tested against RFC 3174, RFC 2202, RFC 6070, FIPS-197 and RFC 3610
 // vectors in buildutils/tests/wifi_crypto.c.
 #pragma once
@@ -20,9 +20,12 @@ void wifi_aes_encrypt(const u32 round_keys[44], u8 block[16]);
 void wifi_aes_decrypt(const u32 round_keys[44], u8 block[16]);
 // CCMP: protect (encrypt + MIC) or unprotect one MPDU payload. The nonce
 // follows 802.11-2016 12.5.3.3.3 from the packet number, A2 and priority.
-// aad_length is 22 or 28 (with QoS). Returns false on MIC failure (decrypt)
+// AAD is the masked MAC header: 22 bytes, +6 for Address4, +2 for QoS.
+// pn contains PN0..PN5 (little endian wire octets). QoS nonce priority is
+// read from the last two AAD bytes. Returns false on MIC failure (decrypt)
 // or bad lengths. The MIC (8 bytes) is appended on encrypt, verified and
-// stripped on decrypt; *length updated in place.
+// stripped on decrypt; *length is zero on failure. Failed authentication
+// clears the decrypted output; callers must discard it.
 bool wifi_ccmp_encrypt(const u8 key[16], const u8 pn[6], const u8 a2[6],
                        const void* aad, u32 aad_length,
                        const void* plaintext, u32 plain_length,

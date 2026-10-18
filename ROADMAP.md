@@ -29,7 +29,7 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 - **Inferno** (planned) is a BSD ABI.
 - **Habilis** is a kernel-agnostic init system.
 
-**The end goal is a desktop OS.** A possible first niche is a "1990s UNIX workstation done properly": X, Motif or CDE, a small system you can understand top to bottom. The owner hasn't committed to that niche yet.
+**The desktop target is Trinity Desktop Environment (TDE), chosen by the owner on 2026-10-17.** Port it through Prime Meridian first, retaining Kunix's own native ABI. Start with TQt and a small application, then the window manager (twin), panel, Konqueror and Konsole. Shared-library loading and usable pthread support are prerequisites. Motif/CDE remain optional experiments rather than the desktop milestone.
 
 **First real hardware target: a Lenovo ThinkPad T14 Gen 1 (AMD Ryzen 5 PRO 4650U, 16 GB, 256 GB NVMe).** Windows on it may be wiped. The live USB image boots it and "worked great" (2026-10-16). The development machine is a different computer.
 
@@ -42,6 +42,20 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 - A **Kunix analyzer** that shows how much of an installed system is Kunix, Linux or other.
 - Eventually NVIDIA drivers.
 - A package manager named **`arf`** with **`.pkg`** files.
+
+### Release policy
+
+Kunix follows a **rolling release** model: one continuously updated OS, without numbered OS releases. Images identify themselves as `rolling` with a UTC build timestamp, source revision and dirty marker. `SOURCE_DATE_EPOCH` can fix the timestamp for reproducible builds. Record the build ID when reporting failures.
+
+ABI, filesystem, firmware and package formats retain whatever version fields their compatibility contracts require. Prime Meridian still reports its Linux compatibility release; that is independent of the Kunix release model. Existing Kodiak artifact names remain valid. An automatic update mechanism is not implemented; transactional updates and recovery remain future work for arf.
+
+### AX200 bring-up in progress
+
+The T14 has a discrete Intel AX200. The original `wifitest` only established firmware packaging and interface queries; passing it did not establish association or data transfer. A hardware audit found premature probing before root mount, firmware queue layout errors, and WPA/CCMP interoperability defects. Corrections are being integrated and have not yet been validated on the physical card.
+
+The new `/proc/wifi` (`wifi status`) reports the failing bootstrap stage and errno. Read the complete retained boot log with `cat /proc/kmsg > /tmp/boot.log`, then `more /tmp/boot.log`; filter with `grep -iE 'iwx|wifi|wlan' /tmp/boot.log`. `dmesg -s 65536` also requests the full current log capacity. Messages about ACPI VGA firmware notifications are unrelated to the Wi-Fi driver.
+
+The control commands are `wifi scan`, `wifi join "SSID"` (prompts without echo), `wifi join "SSID" --open`, and `wifi disconnect`, run as root. Operations are serviced by PID 0; the device control ABI is Kunix's and works through either syscall personality. No credentials are saved. The first station implementation uses legacy rates and passive scanning; WPA2-PSK with CCMP and open networks are supported candidates. WPA3, enterprise authentication, hidden-SSID probing, roaming and seamless pairwise-key renewal are not implemented. A fresh pairwise rekey disconnects and wipes keys; reconnect explicitly. Association, DHCP, DNS and sustained traffic still need physical validation; unsupported operations return an error.
 
 ### What works today
 
@@ -68,6 +82,7 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
   - `/dev/fb0` with Linux fbdev ioctls and mmap.
   - The PS/2 keyboard (raw and keycode modes) and `/dev/input/mice` (PS/2 mouse).
   - KD/VT ioctls; the console hands the screen to X and takes it back.
+- **IPv4 networking:** lwIP 2.2.1, QEMU e1000, loopback, DHCP/DNS, TCP/UDP sockets through the native Kunix and Linux ABIs. Host and QEMU traffic tests pass; the AX200 candidate still needs physical verification.
 - **X11:** xorg-server 1.19.7 Xfbdev, twm and xterm, all static against musl. `startx` works on QEMU and on the T14.
 - **Live image:** `build/binaries/kunix-live.iso` boots any BIOS/UEFI PC with the root filesystem in memory.
 
@@ -75,7 +90,7 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 
 | Missing | What it blocks |
 |---|---|
-| Networking | SSH, packages, CDE, Claude Code |
+| T14 network validation and SSH terminal fix | AX200 scanning/association/traffic on hardware; usable SSH sessions |
 | Shared libraries | Large software stacks |
 | Threads | `clone(CLONE_THREAD)` returns ENOSYS |
 | epoll, eventfd, timerfd | Modern event loops |
@@ -358,8 +373,8 @@ refused, and interrupted UFS growth leaves a needs-fsck marker that blocks
 mounting. Growth is offline and not crash-atomic. The NVMe driver currently uses
 one polled queue pair, supports up to eight namespaces, and disables a controller
 after a timeout while retaining its DMA buffers; recovery and interrupts remain
-future work. Actual T14 installation and persistence are still the owner's
-hardware checks.
+future work. The owner confirmed that installation works on the T14 (2026-10-17).
+Persistence across subsequent reboots remains a separate hardware check.
 
 Both native 512-byte and 4 KiB NVMe installation matrices pass, including
 UEFI boot without the ISO, root/home persistence across reboots, unchanged disk
@@ -389,7 +404,7 @@ pass (378 checks), including reboot verification and a clean root `fsck_ffs`.
 
 ### Phase 4: networking (about 3–4 sessions; the biggest single item)
 
-**Decision for the owner:** write our own TCP/IP stack (fits the "Poodle"/pure-Kunix idea; 2–3 sessions) or port lwIP (BSD-licensed; about 1–1.5 sessions). Ask before starting.
+**Chosen approach:** port lwIP first, as authorized by the owner; a separate native stack can be considered later. lwIP 2.2.1, e1000, IPv4 sockets and DHCP/DNS are integrated in the working tree and pass host/QEMU traffic tests. AX200 firmware/station support and its `wifi` controls are now an unverified hardware candidate. SSH authenticates but the current terminal setup regression is being investigated. See the bring-up notes and `docs/wifi-testing.md`.
 
 1. **e1000 driver** (QEMU's `build.sh` already attaches `-device e1000`; PCI 8086:100e), for development.
 2. **The stack:**
@@ -419,7 +434,19 @@ Build Kunix from inside Kunix through Prime Meridian.
 
 **Done when:** Kunix can build its kernel, userland and bootable image from source, and the resulting image boots and passes the test suites when tested from the development machine.
 
-### Phase 6: desktop (each item about 0.5–1 session unless noted)
+### Phase 6: desktop — Trinity target
+
+The owner explicitly selected **Trinity**. The existing static X11/twm/xterm stack is the bootstrap desktop. TDE's dependency chain includes TQt, its interface and D-Bus bindings, tdelibs and tdebase. Follow the [upstream build guide](https://wiki.trinitydesktop.org/How_to_Build_TDE_Core_Modules), checking current dependencies when implementation starts.
+
+1. Keep Xfbdev, fonts, keyboard/mouse, X sockets and ptys working on the T14.
+2. Bring forward the shared-library and thread prerequisites from Phase 8 as needed for TDE. This changes dependency order, without moving USB into the current networking work.
+3. Cross-build the C++ runtime, TQt and dependencies; run a small TQt application on Kunix before building the full environment.
+4. Port tdelibs and tdebase; first usable session: twin, panel, Konqueror, Konsole, login/logout and persistent user settings.
+5. Integrate Kunix power/battery, networking and storage services. A visible desktop alone does not establish working hardware settings or multimedia.
+6. Add optional applications incrementally. Reuse the proven Linux ABI first; native ports can follow independently.
+
+The older lightweight desktop stepping stones below are optional, not required detours before TDE:
+
 
 1. **JWM** (plain C, Xlib only): a taskbar, menu and tray. Add it to `x11.sh` and make it the default in `startx`.
 2. **XDM** (needs libXdmcp): a graphical login as a Habilis service replacing the console `login`.
@@ -434,7 +461,7 @@ Build Kunix from inside Kunix through Prime Meridian.
    - a C++ compiler for musl (build musl-cross-make's gcc/g++)
    - realistically, shared libraries (Phase 8.3); revisit CDE after that support lands
    - probably glibc-isms fixed
-7. **Wi-Fi** (much later; the T14 has Realtek or Intel Wi-Fi). Hard: firmware loading, 802.11, WPA.
+7. **Wi-Fi** is part of the current networking phase; the T14 has Intel AX200. See the bring-up notes above.
 
 **xorg-server 1.19.7 notes (already handled in `x11.sh`; keep in mind):**
 - Xfbdev takes input only from `-keybd keyboard -mouse mouse,,protocol=ps/2`.
@@ -507,7 +534,7 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 ## 5. Open decisions (ask the owner)
 
 1. Write our own TCP/IP stack or port lwIP? (Phase 4)
-2. Commit to the "1990s UNIX workstation" niche (Motif/CDE), or stay general?
+2. Trinity is the selected desktop target; decide the initial bundled applications after the core session works.
 3. The fourth breed's name and purpose.
 4. Whether future installer versions should offer a shared root/home layout; the current installer creates a separate home.
 5. When to start hosting packages, and where (GitHub Releases is the easy start).

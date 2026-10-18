@@ -24,3 +24,5 @@ i32 devfs_pts_number(const vnode_t* node);      // /dev/pts/N: N; otherwise -1
 bool devfs_is_disk(const vnode_t* node);
 u32 devfs_disk_ioctl_size(u32 req);
 i64 devfs_disk_ioctl(vnode_t* node,u32 req,void* arg);
+
+bool devfs_is_wifi(const vnode_t* node);

@@ -35,6 +35,7 @@
 #include <pagecache.h>
 #include <inet.h>
 #include <iwx200.h>
+#include <iwx200_station.h>
 
 void cpuid_vendor(char* vendor);
 void cpuid_brand(char* brand);
@@ -262,16 +263,26 @@ static u64 gen_global(u64 id, char* b) {
             static const char* stages[]={"unprobed","absent","firmware-missing",
                 "firmware-invalid","pci-bar","prepare","persistence","reset",
                 "clock","mac-access","rfkill","dma","firmware-load","alive","nvm","ready"};
-            iwx200_status_t st;iwx200_status(&st);
+            iwx200_status_t st;iwx200_status(&st);iwx_station_diag_t jd;iwx_station_diag(&jd);
             const char* stage=(u32)st.stage<sizeof(stages)/sizeof(*stages)?stages[st.stage]:"unknown";
             return ksnprintf(b,GEN_MAX,
                 "device: Intel AX200\nstage: %s\nerror: %d\npresent: %u\n"
                 "firmware-staged: %u\nfirmware-alive: %u\nnvm-ready: %u\n"
                 "firmware-api: %u\nlink: %u\ninterrupt: 0x%x\ngp-control: 0x%x\n"
-                "fh-status: 0x%x\nrfkill-clear: %u\n",
+                "fh-status: 0x%x\nrfkill-clear: %u\n"
+                "error-log: %u\nlmac-valid: %u\nlmac-error-id: 0x%x\nlmac-log-pc: 0x%x\n"
+                "umac-error-id: 0x%x\nbridges: %u\nbridge: %02x:%02x.%u\nbridge-command-was: 0x%x\n"
+                "firmware-size: %u\nfirmware-fnv: 0x%08x\n"
+                "join-fail-line: %u\njoin-fail-extra: 0x%x\njoin-fail-error: %d\njoin-wifi-state: %u\njoin-link: %u\njoin-last-status: %u\n"
+                "cmd-fail-id: 0x%x\ncmd-fail-result: %d\nqueue-response: %u 0x%08x 0x%08x\nqueue-reject: %u\n",
                 stage,st.error,st.present,st.firmware_staged,st.firmware_alive,
                 st.nvm_ready,st.firmware_api,iwx200_link(),st.csr_interrupt,st.csr_gp,
-                st.csr_fh_status,st.rfkill_clear);
+                st.csr_fh_status,st.rfkill_clear,
+                st.error_log_read,st.lmac_valid,st.lmac_error_id,st.lmac_log_pc,st.umac_error_id,
+                st.bridges,st.bridge_bdf>>8,(st.bridge_bdf>>3)&31,st.bridge_bdf&7,st.bridge_command,
+                st.firmware_size,st.firmware_sum,
+                jd.line,jd.extra,jd.error,jd.wifi_state,jd.link,jd.last_status,
+                st.cmd_fail_id,st.cmd_fail_result,st.queue_response_length,st.queue_response,st.queue_response_hi,st.queue_reject);
         }
         case P_NETINFO: {
             net_info_t info;net_info(&info);char name[16];net_ifname(name);u8* ip=(u8*)&info.address;u8* dns=(u8*)&info.dns;

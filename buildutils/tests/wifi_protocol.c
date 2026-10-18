@@ -22,12 +22,15 @@ int main(void) {
     assert(!wifi_parse(junk, sizeof(junk), &parsed)); // too short
     u8 bad_version[24] = {0}; bad_version[0] = 3;
     assert(!wifi_parse(bad_version, sizeof(bad_version), &parsed)); // version 3
+    bad_version[0]=1;
+    assert(!wifi_parse(bad_version,sizeof(bad_version),&parsed));
     wifi_sta_t sta;
     wifi_sta_init(&sta, local);
     assert(sta.state == WIFI_IDLE);
     assert(!wifi_sta_join(&sta, bssid, NULL, 0)); // empty SSID
     assert(!wifi_sta_join(&sta, bssid, "x", 33)); // too long
     assert(wifi_sta_join(&sta, bssid, "kunix-test", 10));
+    wifi_sta_set_wpa2(&sta,true);
     // First transmit: open-system auth, sequence 1.
     u32 length = wifi_next_tx(&sta);
     assert(length == 24 + 6 && sta.state == WIFI_AUTH_SENT);
@@ -57,6 +60,10 @@ int main(void) {
     assert(sta.last_tx[0] == (WIFI_MGMT_ASSOC_REQ << 4));
     assert(sta.last_tx[28] == WIFI_IE_SSID && sta.last_tx[29] == 10);
     assert(!memcmp(sta.last_tx + 30, "kunix-test", 10));
+    static const u8 expected_rsn[] = {48,20,1,0,0,15,172,4,1,0,0,15,172,4,1,0,0,15,172,2,0,0};
+    assert(sta.last_tx[24]&0x10); // Privacy capability
+    assert(length>=sizeof(expected_rsn));
+    assert(!memcmp(sta.last_tx+length-sizeof(expected_rsn),expected_rsn,sizeof(expected_rsn)));
     // Association reply with AID 0x0c21 (already below 0x4000, kept whole).
     u8 assoc_ok[6] = { 0, 0, 0, 0, 0x21, 0x0c };
     n = reply(frame, WIFI_MGMT_ASSOC_RESP, assoc_ok, sizeof(assoc_ok));
@@ -86,6 +93,20 @@ int main(void) {
     assert(!memcmp(ethernet, local, 6) && !memcmp(ethernet + 6, other, 6));
     assert(ethernet[12] == 0x08 && ethernet[13] == 0x00);
     assert(!memcmp(ethernet + 14, "ping", 4));
+    // DHCP/group traffic can be addressed to broadcast or multicast.
+    memset(data+4,0xff,6);
+    assert(wifi_to_ethernet(&sta,data,36,ethernet,sizeof(ethernet))==18);
+    memcpy(data+4,local,6);
+    // QoS data skips its two byte QoS control, checks transmitter BSSID.
+    memmove(data+26,data+24,12); data[24]=data[25]=0; data[0]=0x88;
+    assert(wifi_to_ethernet(&sta,data,38,ethernet,sizeof(ethernet))==18);
+    memcpy(data+10,other,6);
+    assert(wifi_to_ethernet(&sta,data,38,ethernet,sizeof(ethernet))==0);
+    memcpy(data+10,bssid,6);
+    data[24]=0x80; // A-MSDU must be deaggregated by a separate path
+    assert(wifi_to_ethernet(&sta,data,38,ethernet,sizeof(ethernet))==0);
+    data[24]=0;
+    memmove(data+24,data+26,12); data[0]=0x08;
     // Unassociated stations convert nothing.
     wifi_sta_t idle;
     wifi_sta_init(&idle, local);

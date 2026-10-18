@@ -7,84 +7,101 @@ info(){ printf "\e[1;34m[INFO]\e[0m %s\n" "$*"; }
 build(){
 
     info "Building Kunix..."
+    mkdir -p build/generated
+    python3 buildutils/build-id.py > build/generated/kunix_build.h || return 1
 
     x86_64-elf-as boot/entry.s -o boot.o
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/serial.c -o serial.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/io.c -o io.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/itoa.c -o itoa.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/idt.c -o idt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/pit.c -o pit.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/panic.c -o panic.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/keyboard.c -o keyboard.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/nvme.c -o nvme.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/gpt.c -o gpt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/ata.c -o ata.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/fat32.c -o fat32.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/vfs.c -o vfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/ufs2.c -o ufs2.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/pci.c -o pci.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/console.c -o console.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/shell.c -o shell.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/memcpy.c -o memcpy.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/string.c -o string.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c arch/x86/cpuid.c -o cpuid.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c arch/x86/cpuinit.c -o cpuinit.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/klog.c -o klog.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/security.c -o security.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/memset.c -o memset.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/memory.c -o memory.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/gdt.c -o gdt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/usermode.c -o usermode.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/elf.c -o elf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/proc.c -o proc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/file.c -o file.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/signal.c -o signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/syscall.c -o syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/tty.c -o tty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/rtc.c -o rtc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/mman.c -o mman.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/vt.c -o vt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/pty.c -o pty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/socket.c -o socket.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/iwx200.c -o iwx200.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/wifi.c -o wifi.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/wifi_sha1.c -o wifi_sha1.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/wifi_aes.c -o wifi_aes.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/wifi_wpa.c -o wifi_wpa.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/random.c -o random.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/socket.c -o pm_socket.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/fb.c -o fb.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/mouse.c -o mouse.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c drivers/disk.c -o disk.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/display.c -o pm_display.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/procfs.c -o procfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/tmpfs.c -o tmpfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/time.c -o time.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/power.c -o power.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/acpi.c -o acpi.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/pagecache.c -o pagecache.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/battery.c -o battery.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -Ivendor/uacpi/include -DUACPI_OVERRIDE_TYPES -DUACPI_USE_BUILTIN_STRING -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2 -fno-builtin -c kernel/battery_acpi.c -o battery_acpi.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -Ivendor/uacpi/include -DUACPI_OVERRIDE_TYPES -DUACPI_USE_BUILTIN_STRING -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2 -fno-builtin -c kernel/uacpi_host.c -o uacpi_host.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/serial.c -o serial.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c lib/io.c -o io.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c lib/itoa.c -o itoa.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/idt.c -o idt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/pit.c -o pit.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/panic.c -o panic.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/keyboard.c -o keyboard.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/e1000.c -o e1000.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/inet.c -o inet.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/net_syscall.c -o net_syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/net_config.c -o net_config.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/random.c -o random.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c compat/primemeridian/inet.c -o pm_inet.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/iwx200.c -o iwx200.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/iwx200_station.c -o iwx200_station.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi.c -o wifi.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi_control.c -o wifi_control.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi_sha1.c -o wifi_sha1.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi_aes.c -o wifi_aes.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi_wpa.c -o wifi_wpa.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    # Keep the upstream stack isolated from syscall and driver interfaces.
+    for source in init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp dns; do
+        x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c "vendor/lwip/src/core/$source.c" -o "lwip_$source.o" -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    done
+    for source in acd dhcp etharp icmp ip4 ip4_addr ip4_frag; do
+        x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c "vendor/lwip/src/core/ipv4/$source.c" -o "lwip_$source.o" -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    done
+    x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c vendor/lwip/src/netif/ethernet.c -o lwip_ethernet.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/nvme.c -o nvme.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/gpt.c -o gpt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/ata.c -o ata.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c fs/fat32.c -o fat32.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c fs/vfs.c -o vfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c fs/ufs2.c -o ufs2.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/pci.c -o pci.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/console.c -o console.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/shell.c -o shell.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c lib/memcpy.c -o memcpy.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c lib/string.c -o string.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c arch/x86/cpuid.c -o cpuid.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c arch/x86/cpuinit.c -o cpuinit.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/klog.c -o klog.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/security.c -o security.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c lib/memset.c -o memset.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/memory.c -o memory.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/gdt.c -o gdt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/usermode.c -o usermode.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/elf.c -o elf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/proc.c -o proc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/file.c -o file.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/signal.c -o signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/syscall.c -o syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/tty.c -o tty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/rtc.c -o rtc.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/mman.c -o mman.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/vt.c -o vt.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/pty.c -o pty.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/socket.c -o socket.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c compat/primemeridian/socket.c -o pm_socket.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/fb.c -o fb.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/mouse.c -o mouse.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c drivers/disk.c -o disk.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c compat/primemeridian/display.c -o pm_display.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c fs/procfs.c -o procfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c fs/tmpfs.c -o tmpfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/time.c -o time.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/power.c -o power.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/acpi.c -o acpi.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/pagecache.c -o pagecache.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/battery.c -o battery.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -Ivendor/uacpi/include -DUACPI_OVERRIDE_TYPES -DUACPI_USE_BUILTIN_STRING -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2 -fno-builtin -c kernel/battery_acpi.c -o battery_acpi.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -Ivendor/uacpi/include -DUACPI_OVERRIDE_TYPES -DUACPI_USE_BUILTIN_STRING -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2 -fno-builtin -c kernel/uacpi_host.c -o uacpi_host.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     for src in vendor/uacpi/source/*.c; do
         name=$(basename "$src" .c)
-        x86_64-elf-gcc -Iinclude -Iinclude/klibc -Ivendor/uacpi/include -DUACPI_OVERRIDE_TYPES -DUACPI_USE_BUILTIN_STRING -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2 -fno-builtin -c "$src" -o "uacpi_$name.o" -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+        x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -Ivendor/uacpi/include -DUACPI_OVERRIDE_TYPES -DUACPI_USE_BUILTIN_STRING -DUACPI_DEFAULT_LOOP_TIMEOUT_SECONDS=2 -fno-builtin -c "$src" -o "uacpi_$name.o" -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     done
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/acpi_aml.c -o acpi_aml.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c lib/ksnprintf.c -o ksnprintf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/syscall.c -o pm_syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c compat/primemeridian/signal.c -o pm_signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c fs/devfs.c -o devfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/acpi_aml.c -o acpi_aml.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c lib/ksnprintf.c -o ksnprintf.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c compat/primemeridian/syscall.c -o pm_syscall.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c compat/primemeridian/signal.c -o pm_signal.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c fs/devfs.c -o devfs.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-as arch/x86/usermode.s -o usermode_asm.o
     x86_64-elf-as compat/primemeridian/entry.s -o pm_entry.o
     x86_64-elf-as arch/x86/switch.s -o switch.o
     x86_64-elf-as arch/x86/interrupts.s -o interrupts.o
-    x86_64-elf-gcc -Iinclude -Iinclude/klibc -c kernel/kernel.c -o kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
+    x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/kernel.c -o kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
 }
 
 link(){
     info "Linking binaries..."
-    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o nvme.o gpt.o iwx200.o wifi.o wifi_sha1.o wifi_aes.o wifi_wpa.o random.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pty.o socket.o pm_socket.o fb.o mouse.o disk.o pm_display.o procfs.o tmpfs.o time.o power.o acpi.o acpi_aml.o pagecache.o battery.o battery_acpi.o uacpi_*.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
+    x86_64-elf-gcc -T buildutils/linker.ld -o kunix-kodiak.elf -ffreestanding -O2 -nostdlib boot.o kernel.o console.o io.o idt.o interrupts.o serial.o pit.o itoa.o panic.o keyboard.o memcpy.o cpuid.o cpuinit.o string.o klog.o pci.o shell.o security.o memset.o memory.o ata.o nvme.o gpt.o e1000.o iwx200.o iwx200_station.o wifi.o wifi_control.o wifi_sha1.o wifi_aes.o wifi_wpa.o inet.o net_syscall.o net_config.o random.o pm_inet.o lwip_*.o fat32.o gdt.o usermode.o usermode_asm.o elf.o proc.o switch.o vfs.o ufs2.o file.o signal.o syscall.o tty.o devfs.o rtc.o mman.o vt.o pty.o socket.o pm_socket.o fb.o mouse.o disk.o pm_display.o procfs.o tmpfs.o time.o power.o acpi.o acpi_aml.o pagecache.o battery.o battery_acpi.o uacpi_*.o ksnprintf.o pm_syscall.o pm_signal.o pm_entry.o -lgcc
     cp kunix-kodiak.elf kunix-kodiak.bin
 }
 
@@ -249,6 +266,25 @@ ufs(){
         name=$(basename "$elf" .elf)
         [ -e "build/ufsroot/bin/$name" ] || cp "$elf" "build/ufsroot/bin/$name"
     done
+    # Optional static SSH tools; the build never enables a listener.
+    for tool in dropbear dbclient dropbearkey; do
+        if [ -x "build/phase4-toolchain/bin/$tool" ]; then
+            cp "build/phase4-toolchain/bin/$tool" "build/ufsroot/bin/$tool"
+        elif [ -x "$HOME/opt/primemeridian/bin/$tool" ]; then
+            cp "$HOME/opt/primemeridian/bin/$tool" "build/ufsroot/bin/$tool"
+        fi
+    done
+    mkdir -p build/ufsroot/usr/share/licenses/lwip
+    cp vendor/lwip/COPYING build/ufsroot/usr/share/licenses/lwip/COPYING
+    # AX200 firmware blob plus Intel's redistribution license. The kernel
+    # loads the blob from /lib/firmware after the root is mounted.
+    mkdir -p build/ufsroot/lib/firmware build/ufsroot/usr/share/licenses/iwlwifi
+    cp vendor/firmware/iwlwifi/iwlwifi-cc-a0-71.ucode build/ufsroot/lib/firmware/
+    cp vendor/firmware/iwlwifi/LICENCE.iwlwifi_firmware build/ufsroot/usr/share/licenses/iwlwifi/
+    if [ -d build/phase4-toolchain/share/licenses/dropbear ]; then
+        mkdir -p build/ufsroot/usr/share/licenses/dropbear
+        cp build/phase4-toolchain/share/licenses/dropbear/* build/ufsroot/usr/share/licenses/dropbear/
+    fi
     cp -r etc/. build/ufsroot/etc/
     # Habilis is /sbin/init (the kernel's first choice) and /sbin/habilis.
     if [ -x build/habilis/habilis ]; then
@@ -305,7 +341,7 @@ home(){
 
 qemu(){
     info "Loading in QEMU..."
-    qemu-system-x86_64 \
+    qemu-system-x86_64 -cpu max \
         -cdrom build/binaries/kunix-kodiak.iso \
         -boot d \
         -serial stdio \

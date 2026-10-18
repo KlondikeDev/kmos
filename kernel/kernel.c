@@ -5,7 +5,7 @@
 #define KUNIX_BUILD_DATE __DATE__
 #define KUNIX_BUILD_TIME __TIME__
 #define KUNIX_NAME     "kunix"
-#define KUNIX_VERSION  "0.02"
+#include <build.h>
 #define KUNIX_CODENAME "kodiak"
 #define KUNIX_ARCH     "x86_64"
 
@@ -18,6 +18,8 @@
 #include <mouse.h>
 #include <disk.h>
 #include <nvme.h>
+#include <inet.h>
+void net_config_poll(void);
 void iwx200_late_init(void);
 #include <gpt.h>
 #include <klibc/string.h>
@@ -118,6 +120,7 @@ void kernel_main(void) {
     pci_list_devices();
     nvme_init();
     disk_scan_partitions();
+    net_init();
     bool fat = identify_drive(0xA0) && fat32_init();
     // The root is UFS2: an image the bootloader loaded into memory if there
     // is one (the live image, for machines whose disks Kunix cannot drive
@@ -162,6 +165,7 @@ void kernel_main(void) {
     // Wireless after the root is mounted: the AX200 firmware blob loads
     // from /lib/firmware. Absent card or blob: silent, loopback only.
     iwx200_late_init();
+    net_poll();
 
     // Give the kernel task stdin/stdout/stderr on the terminal. Every
     // process inherits descriptors from its parent, so this is where the
@@ -181,7 +185,7 @@ void kernel_main(void) {
 
     terminal_printf(CYAN, BLACK, "Usable RAM: %uMB\n\n", get_usable_ram() / 1024 / 1024);
 
-    terminal_printf(SILVER, BLACK, "kunix-kodiak v0.02 - Insane Membrane\n\n");
+    terminal_printf(SILVER, BLACK, "Kunix rolling (%s)\n\n", KUNIX_BUILD_ID);
     terminal_printf(SILVER, BLACK, "Copyright (C) 2025, 2026\nJoseph Jones - Released under the terms of the Kunix License v1.0 or later.\n\n");
     terminal_printf(SILVER, BLACK, "For more information on how to use Kunix, see the wiki:\nhttps://wiki.kunix.org\n");
     keyboard_init();
@@ -230,6 +234,8 @@ void kernel_main(void) {
 		__asm__ volatile ("hlt");
 		disk_cache_poll();
 		battery_poll();
+		net_poll();
+		net_config_poll();
 		sched_maintenance_done();
 		sched_reap_orphans();
 		if (sched_user_procs()) continue;     // keyboard input is theirs

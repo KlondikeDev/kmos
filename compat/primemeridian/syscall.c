@@ -19,6 +19,9 @@
 // port so missing pieces show up while bringing up new programs.
 
 #include <types.h>
+#include <wifi_control.h>
+#include <wifi_ioctl.h>
+#include <build.h>
 #include <primemeridian.h>
 #include <ksys.h>
 #include <proc.h>
@@ -28,6 +31,10 @@
 #include <vfs.h>
 #include <devfs.h>
 #include <disk_ioctl.h>
+#include <inet.h>
+#include <socket.h>
+#include <random.h>
+bool pm_inet_ioctl(file_t*,u32,u64,i64*);
 #include <tty.h>
 #include <mman.h>
 #include <memory.h>
@@ -79,7 +86,7 @@ static i32 path_at(i64 dirfd, u64 upath, char* out) {
     }
     file_t* f = fd_get(me(), (i32)dirfd);
     if (!f) return -EBADF;
-    if (!f->path || f->node->type != VN_DIR) return -ENOTDIR;
+    if (!f->path || !f->node || f->node->type != VN_DIR) return -ENOTDIR;
     u64 a = strlen(f->path), b = strlen(rel);
     if (a + 1 + b + 1 > VFS_PATH_MAX) return -ENAMETOOLONG;
     memcpy(out, f->path, a);
@@ -153,6 +160,12 @@ static i64 l_fstat(u64 fd, u64 out) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
     if (!uok(out, sizeof(l_stat_t), true)) return -EFAULT;
+    if(!f->node){
+        if(!file_is_inet(f)&&!file_is_socket(f))return -ENOSYS;
+        l_stat_t st;memset(&st,0,sizeof(st));st.st_mode=S_IFSOCK|0777;
+        st.st_nlink=1;st.st_ino=1;st.st_blksize=4096;
+        memcpy((void*)out,&st,sizeof(st));return 0;
+    }
     vfs_getattr(f->node);
     to_lstat(f->node, (l_stat_t*)out);
     return 0;
@@ -173,12 +186,13 @@ static i64 l_statfs_fill(const vnode_t* n, u64 out) {
     if (!uok(out, sizeof(l_statfs_t), true)) return -EFAULT;
     l_statfs_t s;
     memset(&s, 0, sizeof(s));
-    const char* type = n->mnt && n->mnt->ops ? n->mnt->ops->type : "";
+    const char* type = n && n->mnt && n->mnt->ops ? n->mnt->ops->type : "";
     if (!strcmp(type, "fat32")) s.f_type = 0x4d44;          // MSDOS_SUPER_MAGIC
     else if (!strcmp(type, "ufs2")) s.f_type = 0x19540119;  // UFS2_MAGIC
     else if (!strcmp(type, "tmpfs")) s.f_type = 0x01021994; // TMPFS_MAGIC
     else if (!strcmp(type, "proc")) s.f_type = 0x9fa0;      // PROC_SUPER_MAGIC
     else s.f_type = 0x1373;                                 // DEVFS
+    if(!n){s.f_type=0x534f434b;s.f_bsize=s.f_frsize=4096;s.f_namelen=255;memcpy((void*)out,&s,sizeof(s));return 0;}
     vfs_statfs_t v;
     vfs_statfs(n, &v);
     s.f_bsize = s.f_frsize = (i64)v.bsize;
@@ -349,7 +363,7 @@ static i64 l_mkdirat(i64 dirfd, u64 path, u64 mode) {
 static i64 l_getdents64(u64 fd, u64 buf, u64 count) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type != VN_DIR || !f->path) return -ENOTDIR;
+    if (!f->node || f->node->type != VN_DIR || !f->path) return -ENOTDIR;
     if (!uok(buf, count, true)) return -EFAULT;
 
     // Positions 0 and 1 are "." and "..", as Linux lists them; the
@@ -408,7 +422,7 @@ static i64 l_rw_vec(u64 fd, u64 iov, u64 n, bool write) {
 static i64 l_pread(u64 fd, u64 buf, u64 len, i64 off, bool write) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type != VN_REG && f->node->type != VN_BLK && !devfs_is_fb(f->node)) return -ESPIPE;   // the framebuffer seeks too
+    if (!f->node || (f->node->type != VN_REG && f->node->type != VN_BLK && !devfs_is_fb(f->node))) return -ESPIPE;   // the framebuffer seeks too
     if (off < 0) return -EINVAL;
     if (!uok(buf, len, !write)) return -EFAULT;
     u32 acc = f->flags & O_ACCMODE;
@@ -424,7 +438,7 @@ static i64 l_sendfile(u64 out_fd, u64 in_fd, u64 uoff, u64 count) {
     if (!in || !out) return -EBADF;
     if (uoff && !uok(uoff, 8, true)) return -EFAULT;
     i64 off = uoff ? *(i64*)uoff : -1;
-    if (uoff && (off < 0 || in->node->type != VN_REG)) return off < 0 ? -EINVAL : -ESPIPE;
+    if (uoff && (off < 0 || !in->node || in->node->type != VN_REG)) return off < 0 ? -EINVAL : -ESPIPE;
     if (count > 0x7FFFF000) count = 0x7FFFF000;
     u8* buf = kmalloc(4096);
     if (!buf) return -ENOMEM;
@@ -517,7 +531,7 @@ static i64 l_truncate(u64 path, i64 len) {
 static i64 l_fchdir(u64 fd) {
     file_t* f = fd_get(me(), (i32)fd);
     if (!f) return -EBADF;
-    if (f->node->type != VN_DIR || !f->path) return -ENOTDIR;
+    if (!f->node || f->node->type != VN_DIR || !f->path) return -ENOTDIR;
     return vfs_chdir(f->path);
 }
 
@@ -533,6 +547,9 @@ static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
     file_t* f = fd_get(p, (i32)fd);
     if (!f) return -EBADF;
 
+    i64 network_result;
+    if(pm_inet_ioctl(f,(u32)req,arg,&network_result))return network_result;
+
     switch (req) {                                     // any descriptor
         case L_FIOCLEX:  p->fd_cloexec |= 1u << fd; return 0;
         case L_FIONCLEX: p->fd_cloexec &= ~(1u << fd); return 0;
@@ -543,6 +560,11 @@ static i64 l_ioctl(u64 fd, u64 req, u64 arg) {
             return 0;
     }
 
+    if(devfs_is_wifi(f->node)) {
+        u32 size=wifi_control_size((u32)req);
+        if(size && !uok(arg,size,req==KWIFI_RESULT))return -EFAULT;
+        return wifi_control_ioctl((u32)req,(void*)arg);
+    }
     if(devfs_is_disk(f->node)) {
         u32 size=devfs_disk_ioctl_size((u32)req);
         if(size && !uok(arg,size,true)) return -EFAULT;
@@ -1055,7 +1077,7 @@ static i64 l_uname(u64 out) {
     put_field(u->sysname, "Linux");
     put_field(u->nodename, kernel_hostname);
     put_field(u->release, "6.1.0-primemeridian");
-    put_field(u->version, "Kunix Millennium Operating System (Prime Meridian)");
+    put_field(u->version, KUNIX_BUILD_DESCRIPTION);
     put_field(u->machine, "x86_64");
     put_field(u->domainname, "(none)");
     return 0;
@@ -1197,14 +1219,13 @@ static i64 l_futex(u64 uaddr, u64 op, u64 val, u64 utimeout) {
     }
 }
 
-static i64 l_getrandom(u64 buf, u64 len) {
-    if (!uok(buf, len, true)) return -EFAULT;
-    u8* out = (u8*)buf;
-    for (u64 i = 0; i < len; i += 8) {
-        u64 r = weak_random();
-        for (u64 j = 0; j < 8 && i + j < len; j++) out[i + j] = (u8)(r >> (j * 8));
-    }
-    return (i64)len;
+static i64 l_getrandom(u64 buf, u64 len, u64 flags) {
+    if(flags & ~3ULL)return -EINVAL;
+    // Hardware is currently the only credited entropy source. Never present
+    // the AT_RANDOM timing generator as cryptographic getrandom output.
+    u64 count=len>256?256:len;
+    if (!uok(buf,count,true))return -EFAULT;
+    return random_read((void*)buf,count);
 }
 
 static i64 l_brk(u64 addr) {
@@ -1310,6 +1331,7 @@ static i64 l_sigaltstack(u64 uss, u64 uold) {
 }
 
 void pm_sigreturn(registers_t* regs);
+bool pm_inet_call(u64,u64,u64,u64,u64,u64,u64,i64*);
 bool pm_socket_call(u64 nr, u64 a, u64 b, u64 c, u64 d, u64 e, u64 f, i64* r);
 
 // ---------------------------------------------------------------------------
@@ -1541,7 +1563,7 @@ static void pm_dispatch(registers_t* regs) {
         case LNX_arch_prctl:  r = l_arch_prctl(a, b); break;
         case LNX_futex:       r = l_futex(a, b, c, d); break;
         case LNX_set_robust_list: r = 0; break;
-        case LNX_getrandom:   r = l_getrandom(a, b); break;
+        case LNX_getrandom:   r = l_getrandom(a, b, c); break;
         case LNX_sched_yield: schedule(); r = 0; break;
         case LNX_sched_getaffinity:
             if (b < 8 || !uok(c, 8, true)) { r = -EINVAL; break; }
@@ -1573,6 +1595,7 @@ static void pm_dispatch(registers_t* regs) {
             return;
 
         default:
+            if (pm_inet_call(nr,a,b,c,d,e,f,&r))break;
             if (pm_socket_call(nr, a, b, c, d, e, f, &r)) break;
             log_unknown(nr);
             r = -ENOSYS;
@@ -1585,6 +1608,7 @@ static void pm_dispatch(registers_t* regs) {
 void pm_syscall(registers_t* regs) {
     pm_dispatch(regs);
     disk_cache_poll();
+    net_poll();
     signal_deliver_from(regs, true);
     // A call that swapped in a temporary signal mask (sigsuspend, ppoll,
     // pselect6) is over: put the caller's back, unless a handler frame

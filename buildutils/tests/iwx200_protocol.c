@@ -31,6 +31,8 @@ static void iwx_test_write(u32 off,u32 value) {
 }
 void outl(u16 p,u32 v) { assert(p==PCI_CONFIG_ADDRESS); (void)v; }
 void outw(u16 p,u16 v) { assert(p==PCI_CONFIG_DATA); pci_command=v; }
+static u8 retry_timeout=0xff;
+void outb(u16 p,u8 v) { assert(p==PCI_CONFIG_DATA+1); retry_timeout=v; }
 pci_device_t pci_scan_for_device(u16 v,u16 d) { return present ? (pci_device_t){.vendor_id=v,.device_id=d} : (pci_device_t){0}; }
 u32 pci_read_config(u8 b,u8 d,u8 f,u8 off) { (void)b;(void)d;(void)f;return off==0x10?pci_bar_low:off==0x14?pci_bar_high:0; }
 void* pmm_alloc(void) { if(arena_used+4096>sizeof(arena))return NULL;void*p=arena+arena_used;arena_used+=4096;memset(p,0,4096);return p; }
@@ -101,8 +103,10 @@ int main(void) {
     u8*blob=malloc(2*1024*1024);assert(blob);size_t blob_size=fread(blob,1,2*1024*1024,file);fclose(file);
     iwx200_fw_t packaged;assert(iwx200_parse_fw(blob,blob_size,&packaged));
     assert(blob_size==1322288&&packaged.api==71&&packaged.regular_count==47);
+    assert(packaged.lmac_error_table==5125760&&packaged.umac_error_table==8913188); // DEBUG_ADDRS TLVs 55/54
     assert(packaged.alive_version==6&&packaged.nvm_version==4&&packaged.phy_config==0x00330018);
     assert(packaged.capabilities[0]==0x9def037f&&!(packaged.capabilities[0]&(1u<<12)));
+    assert((packaged.capabilities[1]>>16&1)&&!(packaged.capabilities[1]>>8&1)); // ULTRA_HB_CHANNELS, no CDB
     free(blob);
     u8 image[256];u32 n=build_image(image);iwx200_fw_t fw;
     assert(iwx200_parse_fw(image,n,&fw));assert(fw.api==71&&fw.alive_version==6&&fw.nvm_version==4&&fw.regular_count==3);
@@ -115,7 +119,7 @@ int main(void) {
     assert(!iwx200_init());assert(!card.alive);assert(card.status.stage==IWX200_ALIVE);assert(!(pci_command&4));
     reset();assert(iwx200_stage_fw(image,n));bad_alive=true;assert(!iwx200_init());assert(!(pci_command&4));
     reset();assert(iwx200_stage_fw(image,n));pci_bar_high=1;
-    assert(iwx200_init());assert(mapped_first==0x1f0004000ULL);assert((pci_command&6)==6);
+    assert(iwx200_init());assert(mapped_first==0x1f0004000ULL);assert((pci_command&6)==6);assert(!(pci_command&0x400));assert(retry_timeout==0);
     assert(registers[IWX_CSR_LTR_LONG_VAL/4]==0x82fa82fa);
     assert(prph_address==0x03003440);assert(prph_write_address==0x03005c44);
     const ctxt_t*context=(const ctxt_t*)card.ctxt_phys;assert(context->size==448);assert(context->rx_free!=context->rx_used);assert(context->lmac_image[0]&&context->umac_image[0]);

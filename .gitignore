@@ -9,3 +9,4 @@
 .claude/
 ufs.img
 home.img
+__pycache__/

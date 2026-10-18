@@ -44,6 +44,7 @@ static void test_basics(void) {
     CHECK("running in ring 3", getcpl() == 3);
     struct utsname u;
     CHECK("uname", uname(&u) == 0 && strcmp(u.sysname, "Kunix") == 0);
+    CHECK("rolling release identity", !strcmp(u.release,"rolling") && !strncmp(u.version,"Kunix rolling ",14));
     errno = 0;
     CHECK("EBADF on a closed fd", read(77, NULL, 0) < 0 && errno == EBADF);
     CHECK("EFAULT on a kernel pointer",

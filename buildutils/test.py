@@ -79,6 +79,10 @@ def main():
     ap.add_argument("--command", default="ktest", help="what to type at the shell")
     ap.add_argument("--log", help="also save the whole serial log here")
     ap.add_argument("--iso", help="boot a different ISO (for display mode and live image checks)")
+    ap.add_argument("--cpu", default="max", help="QEMU CPU (max exposes hardware entropy)")
+    ap.add_argument("--network", action="store_true", help="attach e1000 with QEMU user networking")
+    ap.add_argument("--hostfwd", action="append", default=[], help="QEMU localhost forwarding rule")
+    ap.add_argument("--serial-live", help="write guest serial to this file while the VM runs")
     ap.add_argument("--machine", default="pc", help="QEMU machine type (default pc)")
     ap.add_argument("--firmware", help="boot with this firmware ROM, e.g. OVMF_CODE_4M.fd")
     ap.add_argument("--firmware-vars", help="variable-store template for split OVMF firmware (copied per VM)")
@@ -103,7 +107,9 @@ def main():
             ap.error("--nvme accepts regular VM image files only")
 
     def boot(command):
-        extra = ["--machine", args.machine]
+        extra = ["--machine", args.machine,"--cpu",args.cpu]
+        if args.network: extra += ["--network"]
+        for forward in args.hostfwd: extra += ["--hostfwd",forward]
         if args.iso: extra += ["--iso", args.iso]
         if args.firmware: extra += ["--firmware", args.firmware]
         if args.firmware_vars: extra += ["--firmware-vars", args.firmware_vars]
@@ -140,7 +146,11 @@ def main():
     # Every VM gets a private 128 MiB home disk. Retaining it after each
     # suite fills /tmp during repeated runs; --log preserves diagnostics.
     atexit.register(shutil.rmtree, work, ignore_errors=True)
-    serial = os.path.join(work, "serial.log")
+    serial = os.path.abspath(args.serial_live) if args.serial_live else os.path.join(work,"serial.log")
+    if args.serial_live:
+        if os.path.lexists(serial) and not stat.S_ISREG(os.stat(serial).st_mode):
+            ap.error("--serial-live must name a regular output file")
+        with open(serial,"w"): pass
     monitor = os.path.join(work, "monitor.sock")
     drives = [] if args.no_ata else ["-drive", f"file={root}/disk.img,format=raw,if=ide,index=0"]
     if not args.no_ata and os.path.exists(os.path.join(root, "ufs.img")):
@@ -152,7 +162,18 @@ def main():
         shutil.copyfile(os.path.join(root, "home.img"), home)
         drives += ["-drive", f"file={home},format=raw,if=ide,index=3"]
 
-    extra = ["-machine", args.machine]
+    extra = ["-machine",args.machine,"-cpu",args.cpu]
+    if args.network:
+        network="user,id=kunixnet"
+        for forward in args.hostfwd:
+            if not forward.startswith(("tcp:127.0.0.1:","udp:127.0.0.1:")):
+                ap.error("--hostfwd must bind 127.0.0.1")
+            network+=",hostfwd="+forward
+        extra += ["-netdev",network,"-device","e1000,netdev=kunixnet"]
+    elif args.hostfwd:
+        ap.error("--hostfwd requires --network")
+    else:
+        extra += ["-nic","none"]
     for i,path in enumerate(args.nvme):
         drives += ["-drive", f"file={os.path.abspath(path)},format=raw,if=none,id=nvme{i}",
                    "-device",f"nvme,drive=nvme{i},serial=KUNIXTEST{i},logical_block_size={args.nvme_block_size},physical_block_size={args.nvme_block_size}"]
@@ -231,6 +252,8 @@ def main():
         install_confirmed = False
         while time.time() < deadline and qemu.poll() is None:
             out = log()
+            if "KERNEL PANIC!" in out:
+                break
             # Guest PIT ticks can be lost during polled disk I/O with IRQs
             # disabled. Compare X startup using host wall time instead.
             if args.command == "xtest":

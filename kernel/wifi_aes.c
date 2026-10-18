@@ -153,8 +153,9 @@ void wifi_aes_decrypt(const u32 round_keys[44], u8 block[16]) {
     for (u32 i = 0; i < 16; i++) block[i] = state[i];
 }
 // --- CCM (RFC 3610) with M=8, L=2 for CCMP ---
-static void ccm_nonce(u8 nonce[13], const u8 pn[6], const u8 a2[6]) {
-    nonce[0] = 0; // priority field: data frames use priority 0
+static void ccm_nonce(u8 nonce[13], const u8 pn[6], const u8 a2[6],
+                       const u8* aad, u32 aad_length) {
+    nonce[0] = (aad_length==24 || aad_length==30) ? aad[aad_length-2]&15 : 0;
     for (u32 i = 0; i < 6; i++) nonce[1 + i] = a2[i];
     for (u32 i = 0; i < 6; i++) nonce[7 + i] = pn[5 - i];
 }
@@ -167,11 +168,12 @@ bool wifi_ccmp_encrypt(const u8 key[16], const u8 pn[6], const u8 a2[6],
                        const void* aad, u32 aad_length,
                        const void* plaintext, u32 plain_length,
                        void* output, u32* length) {
-    if (!key || !pn || !a2 || !output || !length) return false;
-    if (aad_length != 22 && aad_length != 28) return false;
-    if (plain_length > 2296) return false;
+    if (length) *length=0;
+    if (!key || !pn || !a2 || !aad || !output || !length) return false;
+    if (aad_length!=22 && aad_length!=24 && aad_length!=28 && aad_length!=30) return false;
+    if (plain_length > 2296 || (!plaintext && plain_length)) return false;
     u32 rk[44]; wifi_aes_expand(key, rk);
-    u8 nonce[13]; ccm_nonce(nonce, pn, a2);
+    u8 nonce[13]; ccm_nonce(nonce,pn,a2,aad,aad_length);
     // B0: flags(0x59) || nonce || length
     u8 b0[16] = { 0x59 };
     for (u32 i = 0; i < 13; i++) b0[1 + i] = nonce[i];
@@ -179,20 +181,16 @@ bool wifi_ccmp_encrypt(const u8 key[16], const u8 pn[6], const u8 a2[6],
     u8 x[16];
     for (u32 i = 0; i < 16; i++) x[i] = b0[i];
     wifi_aes_encrypt(rk, x);
-    // AAD length block: 0x00 0x00 || aad_length BE, then AAD padded.
-    u8 alen[16] = { 0, 0, (u8)(aad_length >> 8), (u8)aad_length };
-    for (u32 i = 0; i < 16; i++) x[i] ^= alen[i];
-    wifi_aes_encrypt(rk, x);
-    const u8* ad = aad;
-    u32 remaining = aad_length;
-    while (remaining) {
-        u8 block[16] = {0};
-        u32 take = remaining < 16 ? remaining : 16;
-        for (u32 i = 0; i < take; i++) block[i] = ad[i];
-        for (u32 i = 0; i < 16; i++) x[i] ^= block[i];
-        wifi_aes_encrypt(rk, x);
-        ad += take; remaining -= take;
+    // RFC3610: 2-byte BE AAD length immediately followed by AAD,
+    // zero padded at the end. CCMP AAD is at most 30 bytes (two blocks).
+    u8 encoded_aad[32]={0};
+    encoded_aad[0]=(u8)(aad_length>>8); encoded_aad[1]=(u8)aad_length;
+    for (u32 i=0;i<aad_length;i++) encoded_aad[i+2]=((const u8*)aad)[i];
+    for (u32 offset=0;offset<32;offset+=16) {
+        for (u32 i=0;i<16;i++) x[i]^=encoded_aad[offset+i];
+        wifi_aes_encrypt(rk,x);
     }
+    u32 remaining;
     // Payload blocks into CBC-MAC.
     const u8* pt = plaintext;
     remaining = plain_length;
@@ -228,12 +226,13 @@ bool wifi_ccmp_decrypt(const u8 key[16], const u8 pn[6], const u8 a2[6],
                        const void* aad, u32 aad_length,
                        const void* protected, u32 protected_length,
                        void* output, u32* length) {
-    if (!key || !pn || !a2 || !output || !length) return false;
-    if (aad_length != 22 && aad_length != 28) return false;
-    if (protected_length < 8 || protected_length - 8 > 2296) return false;
+    if (length) *length=0;
+    if (!key || !pn || !a2 || !aad || !output || !length) return false;
+    if (aad_length!=22 && aad_length!=24 && aad_length!=28 && aad_length!=30) return false;
+    if (!protected || protected_length < 8 || protected_length - 8 > 2296) return false;
     u32 plain_length = protected_length - 8;
     u32 rk[44]; wifi_aes_expand(key, rk);
-    u8 nonce[13]; ccm_nonce(nonce, pn, a2);
+    u8 nonce[13]; ccm_nonce(nonce,pn,a2,aad,aad_length);
     // Decrypt first (CTR), then verify the MIC (CBC-MAC).
     const u8* ct = protected;
     u8* pt = output;
@@ -255,19 +254,14 @@ bool wifi_ccmp_decrypt(const u8 key[16], const u8 pn[6], const u8 a2[6],
     u8 x[16];
     for (u32 i = 0; i < 16; i++) x[i] = b0[i];
     wifi_aes_encrypt(rk, x);
-    u8 alen[16] = { 0, 0, (u8)(aad_length >> 8), (u8)aad_length };
-    for (u32 i = 0; i < 16; i++) x[i] ^= alen[i];
-    wifi_aes_encrypt(rk, x);
-    const u8* ad = aad;
-    u32 remaining = aad_length;
-    while (remaining) {
-        u8 block[16] = {0};
-        u32 take = remaining < 16 ? remaining : 16;
-        for (u32 i = 0; i < take; i++) block[i] = ad[i];
-        for (u32 i = 0; i < 16; i++) x[i] ^= block[i];
-        wifi_aes_encrypt(rk, x);
-        ad += take; remaining -= take;
+    u8 encoded_aad[32]={0};
+    encoded_aad[0]=(u8)(aad_length>>8); encoded_aad[1]=(u8)aad_length;
+    for (u32 i=0;i<aad_length;i++) encoded_aad[i+2]=((const u8*)aad)[i];
+    for (u32 offset=0;offset<32;offset+=16) {
+        for (u32 i=0;i<16;i++) x[i]^=encoded_aad[offset+i];
+        wifi_aes_encrypt(rk,x);
     }
+    u32 remaining;
     remaining = plain_length;
     u32 offset = 0;
     while (remaining) {
@@ -281,7 +275,11 @@ bool wifi_ccmp_decrypt(const u8 key[16], const u8 pn[6], const u8 a2[6],
     u8 s0[16]; ctr_block(s0, nonce, 0); wifi_aes_encrypt(rk, s0);
     u8 diff = 0;
     for (u32 i = 0; i < 8; i++) diff |= (u8)((x[i] ^ s0[i]) ^ ct[plain_length + i]);
-    if (diff) return false;
+    if (diff) {
+        volatile u8* rejected=output;
+        for (u32 i=0;i<plain_length;i++) rejected[i]=0;
+        return false;
+    }
     *length = plain_length;
     return true;
 }

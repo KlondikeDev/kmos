@@ -12,11 +12,19 @@ with tempfile.TemporaryDirectory(prefix="kunix-host-tests-") as work:
         ("vmm_cache", ["buildutils/tests/vmm_cache.c"], []),
         ("kmsg", ["buildutils/tests/kmsg.c"], ["-Ibuildutils/tests/include"]),
         ("disk_cache", ["buildutils/tests/disk_cache.c"], ["-Ibuildutils/tests/disk_include"]),
+        ("e1000_protocol", ["buildutils/tests/e1000_protocol.c"], ["-Ibuildutils/tests/e1000_stubs"]),
+        ("iwx200_protocol", ["buildutils/tests/iwx200_protocol.c"], ["-Ibuildutils/tests/iwx200_stubs"]),
+        ("random_protocol", ["buildutils/tests/random_protocol.c"], ["-Ibuildutils/tests/random_stubs"]),
+        ("random_cpu", ["buildutils/tests/random_cpu.c", "kernel/random.c"], ["-Ibuildutils/tests/random_cpu_stubs"]),
+        ("inet_linux_abi", ["buildutils/tests/inet_linux_abi.c"], []),
+        ("iwx_station_flow", ["buildutils/tests/iwx_station_flow.c", "kernel/wifi.c", "kernel/wifi_wpa.c", "kernel/wifi_sha1.c", "kernel/wifi_aes.c"], ["-D_GNU_SOURCE"]),
+        ("iwx_station_protocol", ["buildutils/tests/iwx_station_protocol.c", "drivers/iwx200_station.c"], []),
+        ("wifi_control", ["buildutils/tests/wifi_control.c", "kernel/wifi_control.c"], ["-Ibuildutils/tests/wifi_control_stubs"]),
+        ("wifi_protocol", ["buildutils/tests/wifi_protocol.c", "kernel/wifi.c"], []),
         ("gpt", ["buildutils/tests/gpt.c", "kernel/gpt.c"], []),
         ("nvme_protocol", ["buildutils/tests/nvme_protocol.c"], ["-Ibuildutils/tests/nvme_stubs"]),
-        ("iwx200_protocol", ["buildutils/tests/iwx200_protocol.c"], ["-Ibuildutils/tests/iwx200_stubs"]),
-        ("wifi_protocol", ["buildutils/tests/wifi_protocol.c", "kernel/wifi.c"], []),
-        ("pagecache", ["buildutils/tests/pagecache.c", "kernel/pagecache.c"], []),
+        ("wifi_crypto", ["buildutils/tests/wifi_crypto.c", "kernel/wifi_sha1.c", "kernel/wifi_aes.c"], []),
+        ("wifi_handshake", ["buildutils/tests/wifi_handshake.c", "kernel/wifi_wpa.c", "kernel/wifi_sha1.c", "kernel/wifi_aes.c"], []),        ("pagecache", ["buildutils/tests/pagecache.c", "kernel/pagecache.c"], []),
         ("mman_fill", ["buildutils/tests/mman_fill.c", "kernel/pagecache.c"], []),
         ("battery", ["buildutils/tests/battery.c", "kernel/battery.c"], ["-DBATTERY_NORMALIZE_TEST"]),
     ]:
@@ -31,3 +39,5 @@ with tempfile.TemporaryDirectory(prefix="kunix-host-tests-") as work:
             subprocess.run([binary], env=dict(env, KUNIX_HOST_BATCH="1"), check=True)
         if name == "pagecache":
             subprocess.run([binary], env=dict(env, KUNIX_HOST_LARGE_CACHE="1"), check=True)
+
+subprocess.run(["sh", "buildutils/tests/inet-host/run.sh"],cwd=root,check=True)

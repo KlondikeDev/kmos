@@ -78,6 +78,7 @@ static void sleep_quietly(long ms) {
 static void test_basics(void) {
     struct utsname u;
     CHECK("uname says Linux", uname(&u) == 0 && strcmp(u.sysname, "Linux") == 0);
+    CHECK("compatibility release and rolling build", !strcmp(u.release,"6.1.0-primemeridian") && !strncmp(u.version,"Kunix rolling ",14));
     CHECK("getpid/getppid", getpid() > 0 && getppid() >= 0);
     CHECK("thread-local storage (FS base)", tls_value == 5 && (tls_value = 7) == 7 && tls_value == 7);
     errno = 0;
@@ -463,7 +464,9 @@ static void test_sockets(void) {
     close(srv);
 
     errno = 0;
-    CHECK("no networking yet: AF_INET is EAFNOSUPPORT", socket(AF_INET, SOCK_STREAM, 0) < 0 && errno == EAFNOSUPPORT);
+    int internet = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK("IPv4 sockets use shared network services", internet >= 0);
+    if(internet >= 0)close(internet);
 }
 
 static void test_time(void) {

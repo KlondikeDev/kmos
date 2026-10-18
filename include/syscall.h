@@ -69,7 +69,18 @@
 #define SYS_MPROTECT    45   // (addr, len, prot)
 #define SYS_SYNC        46   // () -> 0 or -errno
 #define SYS_FSYNC       47   // (fd) -> 0 or -errno
-#define SYS_COUNT       48
+#define SYS_SOCKET 48
+#define SYS_BIND 49
+#define SYS_CONNECT 50
+#define SYS_LISTEN 51
+#define SYS_ACCEPT 52
+#define SYS_SEND 53
+#define SYS_RECV 54
+#define SYS_SHUTDOWN 55
+#define SYS_SOCKNAME 56
+#define SYS_SOCKOPT 57
+#define SYS_NETINFO 58
+#define SYS_COUNT       59
 
 // ioctl requests on the terminal.
 #define TIOCGMODE 1          // -> TTY_MODE_* bits

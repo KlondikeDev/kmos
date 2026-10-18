@@ -347,7 +347,8 @@ void sched_sleep(u32 n) {
 void sched_tick(void) {
     // Give deferred work a turn even when a user program never makes a
     // syscall. Only schedule the kernel task here: never perform I/O in IRQs.
-    if (ticks % 250 == 0) maintenance_active = true;
+    // Poll network traffic even when user code never yields.
+    if (ticks % 5 == 0) maintenance_active = true;
     current->cpu_ticks++;
     for (int i = 1; i < MAX_PROCS; i++) {
         process_t* p = &procs[i];

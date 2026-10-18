@@ -11,6 +11,7 @@
 #   buildutils/pm-toolchain.sh musl      # musl libc + the musl-gcc wrapper
 #   buildutils/pm-toolchain.sh ncurses   # terminfo/termcap, for zsh
 #   buildutils/pm-toolchain.sh zsh
+#   buildutils/pm-toolchain.sh dropbear  # SSH server/client/key tool (no autostart)
 #   buildutils/pm-toolchain.sh busybox
 #   buildutils/pm-toolchain.sh all
 #
@@ -22,7 +23,7 @@ set -euo pipefail
 
 PM_PREFIX=${PM_PREFIX:-$HOME/opt/primemeridian}
 SRC=$PM_PREFIX/src
-MUSL=$PM_PREFIX/musl
+MUSL=${PM_MUSL_PREFIX:-$PM_PREFIX/musl}
 OUT=$PM_PREFIX/bin
 JOBS=$(nproc)
 
@@ -30,6 +31,7 @@ MUSL_VER=1.2.5
 NCURSES_VER=6.5
 ZSH_VER=5.9.2
 BUSYBOX_VER=1.36.1
+DROPBEAR_VER=2026.94
 
 mkdir -p "$SRC" "$OUT"
 
@@ -38,6 +40,9 @@ fetch() {   # url
     if [ ! -f "$file" ]; then
         curl -fL --retry 3 -o "$file.part" "$1" || { rm -f "$file.part"; return 1; }
         mv "$file.part" "$file"
+    fi
+    if [ -n "${2:-}" ]; then
+        printf '%s  %s\n' "$2" "$file" | sha256sum -c -
     fi
     # Fresh every time: unpacked over an old build, make finds yesterday's
     # generated files up to date (ncurses' built-in terminals, say).
@@ -108,11 +113,38 @@ build_busybox() {
     strip -o "$OUT/busybox" busybox
 }
 
+build_dropbear() {
+    fetch https://matt.ucc.asn.au/dropbear/releases/dropbear-$DROPBEAR_VER.tar.bz2 e098034a843699200c8c977a991fff73159735bf795d5f72ef672c41a6b1ae81
+    cd "$SRC/dropbear-$DROPBEAR_VER"
+    # Keep public-key/password authentication and PTYs. Kunix does not supply
+    # login accounting files; linking bundled crypto avoids host dependencies.
+    CC="$(CC_MUSL)" ./configure --host=x86_64-linux-musl --prefix=/ \
+        --enable-static --enable-bundled-libtom --disable-zlib --disable-syslog \
+        --disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp \
+        --disable-wtmpx --disable-loginfunc --disable-pututline --disable-pututxline
+    make -j"$JOBS" PROGRAMS="dropbear dbclient dropbearkey"
+    for binary in dropbear dbclient dropbearkey; do
+        strip -o "$OUT/$binary" "$binary"
+    done
+    mkdir -p "$PM_PREFIX/share/licenses/dropbear"
+    cp LICENSE "$PM_PREFIX/share/licenses/dropbear/LICENSE"
+    {
+        echo 'This file has been generated in whole or in part by a Large Language Model'
+        echo "Dropbear $DROPBEAR_VER"
+        echo "Source: https://matt.ucc.asn.au/dropbear/releases/dropbear-$DROPBEAR_VER.tar.bz2"
+        echo "Observed archive SHA256 (provenance, not an upstream signature):"
+        sha256sum "$SRC/dropbear-$DROPBEAR_VER.tar.bz2"
+        echo 'Static musl, bundled libtomcrypt/libtommath, no zlib/syslog/login accounting.'
+        echo 'Authentication, user privilege changes and PTYs retain upstream defaults.'
+    } > "$PM_PREFIX/share/licenses/dropbear/PROVENANCE"
+}
+
 case ${1:-all} in
     musl)    build_musl ;;
     ncurses) build_ncurses ;;
     zsh)     build_zsh ;;
     busybox) build_busybox ;;
-    all)     build_musl; build_ncurses; build_zsh; build_busybox ;;
-    *)       echo "usage: $0 [musl|ncurses|zsh|busybox|all]" >&2; exit 2 ;;
+    dropbear) build_dropbear ;;
+    all)     build_musl; build_ncurses; build_zsh; build_busybox; build_dropbear ;;
+    *)       echo "usage: $0 [musl|ncurses|zsh|busybox|dropbear|all]" >&2; exit 2 ;;
 esac
