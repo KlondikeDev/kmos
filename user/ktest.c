@@ -176,6 +176,19 @@ static void test_fork_exec(void) {
     waitpid(pid, &st, 0);
     CHECK("execve passes argv", WIFEXITED(st) && WEXITSTATUS(st) == 0 && strcmp(buf, "exec works\n") == 0);
 
+    // Habilis starts every service as `sh -c "exec ..."`, so Kunix sh must
+    // implement the exec builtin (it learned it when the self-hosted image
+    // exposed its absence). Target sh.elf explicitly: /bin/sh is BusyBox on
+    // stock images and would pass without exercising this code.
+    pid = fork();
+    if (pid == 0) {
+        char* argv[] = { "sh", "-c", "exec /bin/true.elf", NULL };
+        execve("/bin/sh.elf", argv, environ);
+        _exit(126);
+    }
+    waitpid(pid, &st, 0);
+    CHECK("sh -c exec runs programs", WIFEXITED(st) && WEXITSTATUS(st) == 0);
+
     pid = fork();
     if (pid == 0) {
         char* argv[] = { "false", NULL };

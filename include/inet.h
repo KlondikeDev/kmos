@@ -12,7 +12,8 @@ typedef struct {
 } net_info_t;
 enum { INET_REUSEADDR=1, INET_NODELAY, INET_KEEPALIVE, INET_RCVTIMEO,
        INET_SNDTIMEO, INET_ERROR, INET_TYPE, INET_ACCEPTCONN, INET_SNDBUF,
-       INET_RCVBUF, INET_BROADCAST };
+       INET_RCVBUF, INET_BROADCAST, INET_TTL, INET_TOS,
+       INET_MULTICAST_TTL };
 void net_init(void);
 void net_poll(void);
 void net_info(net_info_t* out);

@@ -37,6 +37,7 @@
 #include <iwx200.h>
 #include <iwx200_station.h>
 
+const char* kernel_boot_commandline(void);
 void cpuid_vendor(char* vendor);
 void cpuid_brand(char* brand);
 
@@ -47,7 +48,7 @@ void cpuid_brand(char* brand);
 // pid << 8 and its files pid << 8 | kind.
 enum {
     P_ROOT = 1, P_SELF, P_MEMINFO, P_UPTIME, P_LOADAVG, P_STAT, P_VERSION,
-    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_BATTERY, P_CACHE, P_NETINFO, P_WIFI, P_GLOBAL_END,
+    P_MOUNTS, P_CPUINFO, P_FILESYSTEMS, P_KMSG, P_BATTERY, P_CACHE, P_NETINFO, P_WIFI, P_CMDLINE, P_GLOBAL_END,
 };
 enum { F_DIR = 0, F_STAT, F_STATUS, F_CMDLINE, F_COMM, F_FD, F_EXE, F_CWD, F_END };
 // .../fd/N nodes (opening them is file_open's job: it shares descriptor N).
@@ -58,7 +59,7 @@ static const char* const global_names[P_GLOBAL_END] = {
     [P_LOADAVG] = "loadavg", [P_STAT] = "stat", [P_VERSION] = "version",
     [P_MOUNTS] = "mounts", [P_CPUINFO] = "cpuinfo", [P_FILESYSTEMS] = "filesystems",
     [P_KMSG] = "kmsg",
-    [P_BATTERY] = "battery", [P_CACHE] = "cache", [P_NETINFO] = "netinfo", [P_WIFI] = "wifi",
+    [P_BATTERY] = "battery", [P_CACHE] = "cache", [P_NETINFO] = "netinfo", [P_WIFI] = "wifi", [P_CMDLINE] = "cmdline",
 };
 static const char* const proc_file_names[F_END] = {
     [F_STAT] = "stat", [F_STATUS] = "status", [F_CMDLINE] = "cmdline", [F_COMM] = "comm",
@@ -340,6 +341,8 @@ static u64 gen_global(u64 id, char* b) {
                 TO_HZ(busy), idle_cs, TO_HZ(busy), idle_cs,
                 rtc_now() - (u64)ticks / 250, procs, running, blocked);
         }
+        case P_CMDLINE:
+            return (u64)ksnprintf(b,GEN_MAX,"%s\n",kernel_boot_commandline());
         case P_VERSION:
             return (u64)ksnprintf(b, GEN_MAX,
                 "Linux version 6.1.0-primemeridian (" KUNIX_BUILD_DESCRIPTION ")\n");

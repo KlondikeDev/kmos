@@ -32,7 +32,7 @@ build(){
     x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi_aes.c -o wifi_aes.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     x86_64-elf-gcc -Ibuild/generated -Iinclude -Iinclude/klibc -c kernel/wifi_wpa.c -o wifi_wpa.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     # Keep the upstream stack isolated from syscall and driver interfaces.
-    for source in init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp dns; do
+    for source in init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp dns raw; do
         x86_64-elf-gcc -Iinclude/lwip-port -Ivendor/lwip/src/include -Ibuild/generated -Iinclude -Iinclude/klibc -c "vendor/lwip/src/core/$source.c" -o "lwip_$source.o" -std=gnu99 -ffreestanding -O2 -Wall -Wextra -mcmodel=kernel -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fstack-protector-strong
     done
     for source in acd dhcp etharp icmp ip4 ip4_addr ip4_frag; do
@@ -147,6 +147,8 @@ primemeridian(){
     # Habilis, the init system: an ordinary static program too.
     mkdir -p build/habilis
     "$MUSL_GCC" -static -O2 -Wall -Wextra -o build/habilis/habilis habilis/habilis.c
+    "$MUSL_GCC" -static -O2 -Wall -Wextra -o build/pm/netconfig network/netconfig.c
+    "$MUSL_GCC" -static -O2 -Wall -Wextra -o build/pm/kunix-update system/update.c
     # ...and the test scripts (#! zsh), installed without their extension.
     for src in compat/primemeridian/tests/*.zsh; do
         install -m 755 "$src" "build/pm/$(basename "$src" .zsh)"
@@ -286,6 +288,7 @@ ufs(){
         cp build/phase4-toolchain/share/licenses/dropbear/* build/ufsroot/usr/share/licenses/dropbear/
     fi
     cp -r etc/. build/ufsroot/etc/
+    install -m 755 etc/habilis/sshctl.sh build/ufsroot/bin/sshctl
     # Habilis is /sbin/init (the kernel's first choice) and /sbin/habilis.
     if [ -x build/habilis/habilis ]; then
         cp build/habilis/habilis build/ufsroot/sbin/init
@@ -302,7 +305,7 @@ ufs(){
     chmod -R go-w build/ufsroot                         # whatever the host's umask was
     # Root's home when there is no home disk to mount over /home (the live
     # image): where the accounts service then keeps its files, in memory.
-    mkdir -p build/ufsroot/home/root
+    mkdir -p build/ufsroot/home/root build/ufsroot/installed
     chmod 700 build/ufsroot/home/root
     # Pristine account files, for the accounts service to seed from.
     mkdir -p build/ufsroot/etc/defaults
@@ -316,6 +319,7 @@ ufs(){
     # Room to write in: 128 MiB, and at least 8192 inodes free (makefs would
     # otherwise size the inode table to exactly what is on the image).
     mkdir -p build/ufsroot/install build/home-template/root
+    chmod 755 build/home-template
     chmod 700 build/home-template/root
     makefs -t ffs -o version=2 -s 16m -f 1024 build/ufsroot/install/home.img build/home-template > /dev/null
     python3 buildutils/ufschown.py build/ufsroot/install/home.img 0 0
@@ -334,6 +338,7 @@ home(){
     info "Creating the home disk (home.img)..."
     rm -rf build/homeroot
     mkdir -p build/homeroot/root
+    chmod 755 build/homeroot
     chmod 700 build/homeroot/root
     makefs -t ffs -o version=2 -s 128m -f 16384 home.img build/homeroot > /dev/null
     python3 buildutils/ufschown.py home.img 0 0

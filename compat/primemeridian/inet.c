@@ -71,6 +71,7 @@ static i64 message(file_t* f,bool receive,u64 p,u32 flags){
  done:kfree(iov);return r;
 }
 static u32 option(u64 level,u64 name){
+ if(level==0){switch(name){case 1:return INET_TOS;case 2:return INET_TTL;case 33:return INET_MULTICAST_TTL;default:return 0;}}
  if(level==6&&name==1)return INET_NODELAY;
  if(level!=1)return 0;
  switch(name){case 2:return INET_REUSEADDR;case 3:return INET_TYPE;case 4:return INET_ERROR;case 7:return INET_SNDBUF;case 8:return INET_RCVBUF;case 9:return INET_KEEPALIVE;case 6:return INET_BROADCAST;case 20:return INET_RCVTIMEO;case 21:return INET_SNDTIMEO;case 30:return INET_ACCEPTCONN;default:return 0;}

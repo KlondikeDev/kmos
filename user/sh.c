@@ -321,7 +321,7 @@ static int builtin_bg(command_t* c) {
 
 static int builtin_help(void) {
     puts("ksh builtins: cd [dir], pwd, echo, export NAME=VALUE, unset NAME,");
-    puts("              jobs, fg [%n], bg [%n], wait, exit [n], help");
+    puts("              jobs, fg [%n], bg [%n], wait, exec [cmd], exit [n], help");
     puts("Keys: Ctrl+C interrupts, Ctrl+Z suspends, Ctrl+D at the prompt exits.");
     puts("Syntax: a | b, a > f, a >> f, a < f, a 2> f, a 2>&1, a; b, a && b,");
     puts("        a || b, a &, 'quotes', \"$VARS\", $? and $$.");
@@ -350,6 +350,16 @@ static int run_special_builtin(command_t* c) {
         for (int j = 0; j < MAX_JOBS; j++) jobs[j].npids = 0;
         return 0;
     }
+    // `exec` replaces the shell itself, which is how Habilis starts every
+    // service (`exec /bin/netconfig ...` through `sh -c`). It must run
+    // without forking, so it lives here and not with the plain builtins.
+    if (strcmp(n, "exec") == 0) {
+        if (c->argc < 2) return 0;      // redirections (if any) are already applied
+        execvp(c->argv[1], &c->argv[1]);
+        dprintf(STDERR_FILENO, "ksh: %s: %s\n", c->argv[1],
+                errno == ENOENT ? "command not found" : strerror(errno));
+        exit(errno == ENOENT ? 127 : 126);
+    }
     return -1;
 }
 
@@ -375,6 +385,16 @@ static int run_plain_builtin(command_t* c) {
     if (strcmp(n, "help") == 0) return builtin_help();
     if (strcmp(n, "true") == 0) return 0;
     if (strcmp(n, "false") == 0) return 1;
+    // In a pipeline the shell already forked, so replacing this child is
+    // still the right semantics; the parent-side case lives with the
+    // special builtins above.
+    if (strcmp(n, "exec") == 0) {
+        if (c->argc < 2) return 0;
+        execvp(c->argv[1], &c->argv[1]);
+        dprintf(STDERR_FILENO, "ksh: %s: %s\n", c->argv[1],
+                errno == ENOENT ? "command not found" : strerror(errno));
+        return errno == ENOENT ? 127 : 126;
+    }
     return -1;
 }
 

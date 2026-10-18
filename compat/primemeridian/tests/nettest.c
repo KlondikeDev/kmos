@@ -57,6 +57,31 @@ static void udp(void){
  iov[0]=(struct iovec){x,SIZE_MAX};iov[1]=(struct iovec){x,8};m.msg_name=NULL;CHECK("iov overflow bounded",sendmsg(b,&m,0)==-1&&errno==EMSGSIZE);
  done:if(a>=0)close(a);if(b>=0)close(b);
 }
+static void icmp(void){
+ int fd=socket(AF_INET,SOCK_RAW|SOCK_CLOEXEC,IPPROTO_ICMP);
+ CHECK("raw ICMP socket",fd>=0);if(fd<0)return;
+ deadline(fd);int type=0,ttl=42;socklen_t n=sizeof type;
+ CHECK("raw SO_TYPE",getsockopt(fd,SOL_SOCKET,SO_TYPE,&type,&n)==0&&type==SOCK_RAW);
+ CHECK("raw IP_TTL",setsockopt(fd,IPPROTO_IP,IP_TTL,&ttl,sizeof ttl)==0);
+ ttl=0;CHECK("raw invalid TTL",setsockopt(fd,IPPROTO_IP,IP_TTL,&ttl,sizeof ttl)==-1&&errno==EINVAL);
+ struct sockaddr_in addr=loop(),from;
+ CHECK("raw bind",bind(fd,(void*)&addr,sizeof addr)==0);
+ unsigned char request[8]={8,0,0xf7,0xfd,0,1,0,1},reply[64];
+ CHECK("raw echo send",sendto(fd,request,sizeof request,0,(void*)&addr,sizeof addr)==sizeof request);
+ int got=0,source=0;for(unsigned i=0;i<3;i++){
+  n=sizeof from;ssize_t count=recvfrom(fd,reply,sizeof reply,0,(void*)&from,&n);
+  if(count<0)break;
+  if(count>=28 && (reply[0]>>4)==4 && reply[9]==IPPROTO_ICMP){
+   unsigned off=(reply[0]&15)*4;
+   if(off+8<=(unsigned)count && reply[off]==0 && reply[off+4]==0 && reply[off+5]==1){got=1;source=n==16&&from.sin_family==AF_INET&&from.sin_addr.s_addr==addr.sin_addr.s_addr&&from.sin_port==0;break;}
+  }
+ }
+ CHECK("raw IPv4 echo reply",got);CHECK("raw receive source address",source);close(fd);
+ pid_t child=fork();CHECK("raw privilege test fork",child>=0);
+ if(child==0){if(setuid(65534))_exit(1);int raw=socket(AF_INET,SOCK_RAW,IPPROTO_ICMP);_exit(raw<0&&errno==EPERM?0:2);}
+ if(child>0){int status=0;CHECK("raw socket requires root",waitpid(child,&status,0)==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);}
+ CHECK("BusyBox ping loopback",system("ping -c 1 -W 2 -t 42 127.0.0.1 >/dev/serial 2>&1")==0);
+}
 static void interfaces(void){
  int s=socket(AF_INET,SOCK_DGRAM,0);if(s<0)return;
  struct ifconf conf={0};CHECK("interface size query",ioctl(s,SIOCGIFCONF,&conf)==0&&conf.ifc_len>=(int)sizeof(struct ifreq));
@@ -150,4 +175,4 @@ static void descriptor_errors(void){
  close(fd);
 }
 
-int main(int argc,char**argv){serial=fopen("/dev/serial","w");CHECK("IPv6 unsupported",socket(AF_INET6,SOCK_STREAM,0)==-1&&errno==EAFNOSUPPORT);udp();interfaces();tcp();if(argc>1&&!strcmp(argv[1],"external")){external();busy_external();}descriptor_errors();printf("nettest: %d passed, %d failed\n",passed,failed);if(serial){fprintf(serial,"nettest: %d passed, %d failed\n",passed,failed);fclose(serial);}return failed?1:0;}
+int main(int argc,char**argv){serial=fopen("/dev/serial","w");CHECK("IPv6 unsupported",socket(AF_INET6,SOCK_STREAM,0)==-1&&errno==EAFNOSUPPORT);udp();interfaces();icmp();tcp();if(argc>1&&!strcmp(argv[1],"external")){external();busy_external();}descriptor_errors();printf("nettest: %d passed, %d failed\n",passed,failed);if(serial){fprintf(serial,"nettest: %d passed, %d failed\n",passed,failed);fclose(serial);}return failed?1:0;}

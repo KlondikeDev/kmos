@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <lwip/timeouts.h>
 #include <lwip/sys.h>
+#include <lwip/inet_chksum.h>
 extern void* calloc(size_t,size_t);
 extern void free(void*);
 extern int printf(const char*,...);
@@ -42,11 +43,73 @@ int iwx200_link(void) { return wifi_link?3:0; }
 bool iwx200_send(const void* p,u32 n) { (void)p;(void)n;return false; }
 u32 iwx200_receive(void* p,u32 n) { (void)p;(void)n;return 0; }
 #define CHECK(x) do { if(!(x)) { printf("FAIL line %d: %s\n",__LINE__,#x); fflush(0); abort(); } } while(0)
+/* Real lwIP loopback exercises IP header delivery and the ICMP responder. */
+static void icmp_test(void) {
+ file_t *a,*b;inet_addr_t loop={0x0100007f,0,0},from;
+ process.euid=1000;CHECK(inet_create(3,O_NONBLOCK,1,&a)==-1);process.euid=0;
+ CHECK(inet_create(3,O_NONBLOCK,17,&a)==-93);
+ CHECK(inet_create(3,O_NONBLOCK,1,&a)==0);
+ CHECK(inet_create(3,O_NONBLOCK,1,&b)==0);
+ CHECK(inet_bind(a,&loop)==0);
+ CHECK(inet_connect(b,&loop)==0);
+ CHECK(inet_name(b,&from,true)==0 && from.address==loop.address && !from.port);
+ CHECK(inet_listen(a,1)==-95);
+ CHECK((a->ops->poll(a)&4)!=0);
+ i32 ttl=42,tos=16,got=0;u32 optlen=4;
+ CHECK(inet_option(a,true,INET_TTL,&ttl,&optlen)==0);
+ CHECK(inet_option(a,true,INET_TOS,&tos,&optlen)==0);
+ CHECK(inet_option(a,false,INET_TTL,&got,&optlen)==0 && got==42);
+ ttl=0;CHECK(inet_option(a,true,INET_TTL,&ttl,&optlen)==-22);
+ ttl=256;CHECK(inet_option(a,true,INET_TTL,&ttl,&optlen)==-22);
+ ttl=7;CHECK(inet_option(a,true,INET_MULTICAST_TTL,&ttl,&optlen)==0);
+ CHECK(inet_option(a,false,INET_MULTICAST_TTL,&got,&optlen)==0 && got==7);
+ u8 request[12]={8,0,0,0,0x12,0x34,0,1,'p','i','n','g'};
+ u16 checksum=inet_chksum(request,sizeof request);__builtin_memcpy(request+2,&checksum,2);
+ CHECK(inet_send(a,request,sizeof request,0,&loop)==sizeof request);
+ net_poll();
+ u8 reply[80];bool got_a=false,got_b=false;
+ for(u32 i=0;i<3;i++) {
+  i64 n=inet_recv(a,reply,sizeof reply,0,&from,0);if(n==-11)break;
+  CHECK(n==32 && (reply[0]>>4)==4 && reply[9]==1);
+  if(reply[20]==8)CHECK(reply[8]==42 && reply[1]==16);
+  CHECK(from.address==loop.address && from.port==0);
+  u32 off=(reply[0]&15)*4;
+  CHECK(inet_chksum(reply+off,n-off)==0);
+  if(reply[off]==0){CHECK(reply[off+4]==0x12 && reply[off+5]==0x34 && reply[n-1]=='g');got_a=true;}
+ }
+ for(u32 i=0;i<3;i++) {
+  i64 n=inet_recv(b,reply,sizeof reply,0,&from,0);if(n==-11)break;
+  CHECK(n==32);if(reply[20]==0)got_b=true;
+ }
+ CHECK(got_a && got_b);
+ /* Connected raw sockets receive only packets from the selected source. */
+ inet_addr_t other={0x0200007f,0,0};
+ CHECK(inet_connect(b,&other)==0);
+ CHECK(inet_send(a,request,sizeof request,0,&loop)==sizeof request);net_poll();
+ CHECK(inet_recv(b,reply,sizeof reply,0,0,0)==-11);
+ while(inet_recv(a,reply,sizeof reply,0,0,0)>=0){}
+ CHECK(inet_connect(b,&loop)==0);
+ /* A small queue drops whole packets without corrupting another socket. */
+ i32 limit=32;u32 length=4;CHECK(inet_option(a,true,INET_RCVBUF,&limit,&length)==0);
+ CHECK(inet_send(b,request,sizeof request,0,0)==sizeof request);net_poll();
+ u32 flags=0;CHECK(inet_recv(a,reply,4,2,&from,&flags)==4 && flags==32);
+ CHECK(inet_recv(a,reply,4,32,&from,&flags)==32 && flags==32);
+ CHECK(inet_recv(a,reply,sizeof reply,0,0,0)==-11);
+ CHECK(inet_send(a,request,65516,0,&loop)==-90);
+ a->ops->release(a);kfree(a);b->ops->release(b);kfree(b);
+ /* Raw PCB storage is finite, and close releases it for reuse. */
+ file_t* files[64];u32 count=0;
+ while(count<64 && inet_create(3,O_NONBLOCK,1,&files[count])==0)count++;
+ CHECK(count>0 && count<64);
+ for(u32 i=0;i<count;i++){files[i]->ops->release(files[i]);kfree(files[i]);}
+ CHECK(inet_create(3,O_NONBLOCK,1,&a)==0);a->ops->release(a);kfree(a);
+}
 int main(int argc,char** argv) {
  (void)argv;wired=argc>1;wired_link=wired;
  clock_ns=((1ULL<<32)-5)*1000000ULL;
  net_init();
  CHECK(early_wifi_probes==0);
+ icmp_test();
  CHECK(sys_now()==0xfffffffbU);
  bool timeout_fired=false;u32 old_ticks=ticks;
  sys_timeout(10,clock_timeout,&timeout_fired);
@@ -117,6 +180,6 @@ int main(int argc,char** argv) {
  wifi_link=true;net_poll();net_info(&info);CHECK(info.link);
  if(wired){wired_link=false;net_poll();net_info(&info);CHECK(info.link);net_ifname(name);CHECK(name[0]=='w');wired_link=true;net_poll();net_ifname(name);CHECK(name[0]=='e');wired_link=false;net_poll();}
  wifi_link=false;net_poll();net_info(&info);CHECK(!info.link && !info.address);
- printf("inet host: loopback UDP/TCP, peek/truncation, zero datagram, half-close, TSC timers/wrap/timeouts PASS\n");
+ printf("inet host: ICMP echo/privileges/demux/bounds/options, loopback UDP/TCP, peek/truncation, zero datagram, half-close, TSC timers/wrap/timeouts PASS\n");
  return 0;
 }

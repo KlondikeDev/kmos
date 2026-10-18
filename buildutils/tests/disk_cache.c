@@ -170,6 +170,20 @@ int main(void) {
     disk_set_mounted(DISK_PART0,true);
     assert(disk_in_use(0) && disk_rescan(0)==-EBUSY);
     disk_set_mounted(DISK_PART0,false);
+    // Only an unmounted EFI slice disjoint from every mount may be updated.
+    static const u8 esp_type[16]={0x28,0x73,0x2a,0xc1,0x1f,0xf8,0xd2,0x11,0xba,0x4b,0,0xa0,0xc9,0x3e,0xc9,0x3b};
+    partitions[1]=partitions[0]; partitions[1].p.start=21; partitions[1].p.count=10;
+    memcpy(partitions[1].p.type,esp_type,16); partitions[1].p.slot=2;
+    disk_set_mounted(DISK_PART0,true);
+    assert(!disk_raw_writable(0) && !disk_raw_writable(DISK_PART0));
+    assert(disk_is_esp(DISK_PART0+1) && disk_raw_writable(DISK_PART0+1));
+    partitions[1].p.start=20; assert(!disk_raw_writable(DISK_PART0+1));
+    partitions[1].p.start=21; disk_set_mounted(DISK_PART0+1,true);
+    assert(!disk_raw_writable(DISK_PART0+1));
+    disk_set_mounted(DISK_PART0+1,false); memset(partitions[1].p.type,0,16);
+    assert(!disk_raw_writable(DISK_PART0+1));
+    disk_set_mounted(DISK_PART0,false); partitions[1].valid=false;
+
     assert(disk_rescan(0)==1 && disk_generation(DISK_PART0)!=old_generation);
     printf("disk cache: passed (LRU, dirty eviction, retry, sectors, bounds, disks, periodic flush, ramdisk)\n");
     return 0;

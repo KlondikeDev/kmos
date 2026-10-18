@@ -47,15 +47,15 @@ Kunix is a hobby x86_64 kernel (codename Kodiak) with compatibility layers:
 
 Kunix follows a **rolling release** model: one continuously updated OS, without numbered OS releases. Images identify themselves as `rolling` with a UTC build timestamp, source revision and dirty marker. `SOURCE_DATE_EPOCH` can fix the timestamp for reproducible builds. Record the build ID when reporting failures.
 
-ABI, filesystem, firmware and package formats retain whatever version fields their compatibility contracts require. Prime Meridian still reports its Linux compatibility release; that is independent of the Kunix release model. Existing Kodiak artifact names remain valid. An automatic update mechanism is not implemented; transactional updates and recovery remain future work for arf.
+ABI, filesystem, firmware and package formats retain whatever version fields their compatibility contracts require. Prime Meridian still reports its Linux compatibility release; that is independent of the Kunix release model. Existing Kodiak artifact names remain valid. Automatic update discovery is not implemented. A manual SSH-delivered base generation updater is being tested ahead of desktop work; see `docs/remote-updates.md` for its retained-data layout and recovery limits. arf remains future work.
 
-### AX200 bring-up in progress
+### AX200 internet access confirmed
 
-The T14 has a discrete Intel AX200. The original `wifitest` only established firmware packaging and interface queries; passing it did not establish association or data transfer. A hardware audit found premature probing before root mount, firmware queue layout errors, and WPA/CCMP interoperability defects. Corrections are being integrated and have not yet been validated on the physical card.
+The T14 has a discrete Intel AX200. The original `wifitest` only established firmware packaging and interface queries; passing it did not establish association or data transfer. A hardware audit found premature probing before root mount, firmware queue layout errors, and WPA/CCMP interoperability defects. The owner confirmed AX200 internet connectivity on the physical T14 on 2026-10-17. Throughput, reconnect after AP loss, reboot persistence and long-term stability remain separate hardware checks.
 
 The new `/proc/wifi` (`wifi status`) reports the failing bootstrap stage and errno. Read the complete retained boot log with `cat /proc/kmsg > /tmp/boot.log`, then `more /tmp/boot.log`; filter with `grep -iE 'iwx|wifi|wlan' /tmp/boot.log`. `dmesg -s 65536` also requests the full current log capacity. Messages about ACPI VGA firmware notifications are unrelated to the Wi-Fi driver.
 
-The control commands are `wifi scan`, `wifi join "SSID"` (prompts without echo), `wifi join "SSID" --open`, and `wifi disconnect`, run as root. Operations are serviced by PID 0; the device control ABI is Kunix's and works through either syscall personality. No credentials are saved. The first station implementation uses legacy rates and passive scanning; WPA2-PSK with CCMP and open networks are supported candidates. WPA3, enterprise authentication, hidden-SSID probing, roaming and seamless pairwise-key renewal are not implemented. A fresh pairwise rekey disconnects and wipes keys; reconnect explicitly. Association, DHCP, DNS and sustained traffic still need physical validation; unsupported operations return an error.
+The control commands are `wifi scan`, `wifi join "SSID"` (prompts without echo), `wifi join "SSID" --open`, and `wifi disconnect`, run as root. Operations are serviced by PID 0; the device control ABI is Kunix's and works through either syscall personality. Successful joins now save one protected profile on the separate home filesystem; the Habilis manager reconnects at boot and after link loss. `wifi disconnect` pauses reconnection and `wifi reconnect` resumes it. `wifi forget` removes the profile. The first station implementation uses legacy rates and passive scanning; WPA2-PSK with CCMP and open networks are supported by the station implementation. WPA3, enterprise authentication, hidden-SSID probing, roaming and seamless pairwise-key renewal are not implemented. A fresh pairwise rekey disconnects and wipes keys; reconnect explicitly. The owner has confirmed internet access; sustained traffic and reconnect behavior still need hardware validation. Unsupported operations return an error.
 
 ### What works today
 
@@ -82,7 +82,7 @@ The control commands are `wifi scan`, `wifi join "SSID"` (prompts without echo),
   - `/dev/fb0` with Linux fbdev ioctls and mmap.
   - The PS/2 keyboard (raw and keycode modes) and `/dev/input/mice` (PS/2 mouse).
   - KD/VT ioctls; the console hands the screen to X and takes it back.
-- **IPv4 networking:** lwIP 2.2.1, QEMU e1000, loopback, DHCP/DNS, TCP/UDP sockets through the native Kunix and Linux ABIs. Host and QEMU traffic tests pass; the AX200 candidate still needs physical verification.
+- **IPv4 networking:** lwIP 2.2.1, QEMU e1000, loopback, DHCP/DNS, TCP/UDP and privileged raw ICMP sockets through the native Kunix and Linux ABIs. Host and QEMU traffic tests pass; the owner confirmed AX200 internet access.
 - **X11:** xorg-server 1.19.7 Xfbdev, twm and xterm, all static against musl. `startx` works on QEMU and on the T14.
 - **Live image:** `build/binaries/kunix-live.iso` boots any BIOS/UEFI PC with the root filesystem in memory.
 
@@ -90,7 +90,7 @@ The control commands are `wifi scan`, `wifi join "SSID"` (prompts without echo),
 
 | Missing | What it blocks |
 |---|---|
-| T14 network validation and SSH terminal fix | AX200 scanning/association/traffic on hardware; usable SSH sessions |
+| T14 persistence/reconnect validation | Wi-Fi boot recovery and inbound SSH service on the laptop |
 | Shared libraries | Large software stacks |
 | Threads | `clone(CLONE_THREAD)` returns ENOSYS |
 | epoll, eventfd, timerfd | Modern event loops |
@@ -255,7 +255,7 @@ How the harness works:
 
 ## 4. The roadmap
 
-The phases follow the owner's chosen order: T14 basics, disk cache and demand paging, NVMe and the installer, networking and SSH, self-hosting, desktop, USB, threads and supporting kernel capabilities, Claude Code/Codex, and finally arf. Each lists what "done" means. Sizes are rough, in focused working sessions.
+The phases follow the owner's chosen order: T14 basics, disk cache and demand paging, NVMe and the installer, networking and inbound SSH, self-hosting, remote updates that retain installed data, desktop, USB, threads and supporting kernel capabilities, Claude Code/Codex, and finally arf. Each lists what "done" means. Sizes are rough, in focused working sessions.
 
 ### Phase 1: T14 hardware basics (about 1 session)
 
@@ -404,7 +404,7 @@ pass (378 checks), including reboot verification and a clean root `fsck_ffs`.
 
 ### Phase 4: networking (about 3–4 sessions; the biggest single item)
 
-**Chosen approach:** port lwIP first, as authorized by the owner; a separate native stack can be considered later. lwIP 2.2.1, e1000, IPv4 sockets and DHCP/DNS are integrated in the working tree and pass host/QEMU traffic tests. AX200 firmware/station support and its `wifi` controls are now an unverified hardware candidate. SSH authenticates but the current terminal setup regression is being investigated. See the bring-up notes and `docs/wifi-testing.md`.
+**Chosen approach:** port lwIP first, as authorized by the owner; a separate native stack can be considered later. lwIP 2.2.1, e1000, IPv4 sockets and DHCP/DNS are integrated in the working tree and pass host/QEMU traffic tests. The owner confirms AX200 internet access. Privileged ICMP sockets and BusyBox ping pass QEMU tests. OpenSSH inbound authentication, PTY and remote commands pass. The earlier PTY failure was an SSH test fixture sending premature stdin EOF, now fixed. Persistent Wi-Fi and an inbound SSH Habilis service are implemented and undergoing two-boot integration tests. See the bring-up notes and `docs/wifi-testing.md`.
 
 1. **e1000 driver** (QEMU's `build.sh` already attaches `-device e1000`; PCI 8086:100e), for development.
 2. **The stack:**
@@ -419,13 +419,13 @@ pass (378 checks), including reboot verification and a clean root `fsck_ffs`.
 6. **Dropbear SSH** (client and server), static against musl, added to `pm-toolchain.sh`. It needs `/dev/urandom` or `getrandom` (present), ptys (present) and shadow passwords (present).
 
 **Done when:**
-- `ping`, `wget http://...` and `ssh user@host` work from Kunix in QEMU and on the T14.
+- `ping` and `wget http://...` work in QEMU and on the T14; inbound SSH is the owner's priority.
 - `ssh root@kunix` works from another machine.
 - New `nettest` suite passes.
 
 ### Phase 5: self-hosting
 
-Build Kunix from inside Kunix through Prime Meridian.
+Build Kunix from inside Kunix through Prime Meridian. A static musl-hosted GCC/binutils/make development kit and generated build commands now exist; host builds pass and full guest builds/image construction are in progress. See `docs/self-hosting.md`. Keep the kit and sources under `/home` on an installed system.
 
 1. **Development tools.** Bring up a musl-hosted C compiler, assembler, linker and `make`, plus the shell and utilities needed by the build scripts.
 2. **Kernel build.** Provide an `x86_64-elf` toolchain that runs on Kunix and adapt the build scripts to use it.
@@ -433,6 +433,12 @@ Build Kunix from inside Kunix through Prime Meridian.
 4. **Build workflow.** Use persistent storage from Phase 3 and networking/SSH from Phase 4 to keep sources, fetch dependencies and transfer builds.
 
 **Done when:** Kunix can build its kernel, userland and bootable image from source, and the resulting image boots and passes the test suites when tested from the development machine.
+
+### Remote updates: brought forward after self-hosting
+
+The owner explicitly requests remote updates that preserve installed data before desktop work. `kunix-update` stages two kernel/root generations in the existing Bernard ESP, verifies SHA256 and readback, retains the original installed root and shares persistent home. It does not format or rewrite mounted UFS partitions. Boot generation checks prevent a second update from consuming the fallback before the selected generation boots; rollback rechecks the complete payload.
+
+This is a bootstrap path with a RAM root, not a complete persistent root upgrade: new work belongs under `/home`, original root data remains at `/installed`, and custom original `/etc` files are retained but not automatically merged. FAT metadata/boot-selection writes are not power-loss atomic; the recovery USB remains necessary if those writes tear. See `docs/remote-updates.md`. Host tests cover malformed/crosslinked EFI metadata, 512/4096 geometry and interrupted staging. Disposable update/reboot/rollback integration is in progress.
 
 ### Phase 6: desktop — Trinity target
 
@@ -533,7 +539,7 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 
 ## 5. Open decisions (ask the owner)
 
-1. Write our own TCP/IP stack or port lwIP? (Phase 4)
+1. lwIP was selected and ported first; revisit an independent stack only if the owner requests it.
 2. Trinity is the selected desktop target; decide the initial bundled applications after the core session works.
 3. The fourth breed's name and purpose.
 4. Whether future installer versions should offer a shared root/home layout; the current installer creates a separate home.
@@ -547,6 +553,6 @@ Owner's choice: the name is **arf**, packages are **`.pkg`** files.
 | Display | Radeon (Renoir); the GOP framebuffer from Limine works. Probably 1920×1080. |
 | Keyboard, TrackPoint | PS/2 through the embedded controller: working. The touchpad likely works as a PS/2 mouse. |
 | Disk | NVMe, 256 GB (Windows may be erased). |
-| Ethernet | Very likely Realtek RTL8111 (r8169). Wi-Fi is Realtek or Intel. |
+| Ethernet | Very likely Realtek RTL8111 (r8169), still needs identification. Wi-Fi is confirmed Intel AX200. |
 | Debugging | No serial port: debug with the screen (photos) and, after Phase 1, `dmesg`. |
 | Write the live USB | `sudo dd if=build/binaries/kunix-live.iso of=/dev/sdX bs=4M status=progress conv=fsync` |

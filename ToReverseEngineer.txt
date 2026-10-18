@@ -1,0 +1,60 @@
+This file has been generated in whole or in part by a Large Language Model.
+
+Proprietary components of Kunix
+===============================
+
+Everything in the source tree is open source except ONE file. Platform
+firmware the OS runs on top of is listed separately for completeness.
+
+
+1. Intel AX200 WiFi firmware  (the only proprietary file in the repo)
+---------------------------------------------------------------------
+  File:     vendor/firmware/iwlwifi/iwlwifi-cc-a0-71.ucode
+  Size:     1,322,288 bytes, API 71
+  SHA-256:  1561efa63710678be1392b0a572b9b5d021b529e71463346a7a05129294ddfa6
+  Source:   Intel, via linux-firmware (Ubuntu linux-firmware_1.187.39)
+  License:  vendor/firmware/iwlwifi/LICENCE.iwlwifi_firmware
+  Used by:  drivers/iwx200.c (loaded into the card at probe)
+
+  !! Read before doing anything with this one:
+  - The licence that lets Kunix redistribute this blob says:
+    "No reverse engineering, decompilation, or disassembly of this
+    software is permitted." Disassembling it breaks the terms Kunix
+    relies on to ship it. Get legal advice before touching it.
+  - Even a full clean-room rewrite could not run: the AX200 only boots
+    firmware signed by Intel, so replacement firmware would be rejected
+    by the hardware.
+  - What IS fine and already done: the driver side. drivers/iwx200*.c
+    talks to the firmware using the public command interface, documented
+    by the open OpenBSD iwx(4) and Linux iwlwifi drivers. Nothing more
+    needs reverse engineering to keep WiFi working.
+  - Realistic open alternative: support a WiFi chip with open firmware
+    (e.g. Qualcomm Atheros AR9271 / ath9k_htc, whose firmware is open
+    source) as a second driver.
+
+
+2. Platform firmware (not in the repo, runs underneath Kunix)
+-------------------------------------------------------------
+  These are proprietary but belong to the machine, not to Kunix. Kunix
+  only uses their documented interfaces; none of them need reverse
+  engineering for Kunix to work.
+
+  - UEFI/BIOS firmware (Lenovo, on the T14)  - Kunix boots via Limine.
+  - ACPI tables (DSDT/SSDT) from the BIOS     - interpreted by uACPI
+                                                (open, vendor/uacpi).
+  - AMD PSP / SMU firmware and CPU microcode  - opaque, signed, not
+                                                touched by Kunix.
+  - NVMe SSD controller firmware              - accessed via standard
+                                                NVMe commands.
+  - Embedded controller firmware (keyboard, battery, fans)
+                                              - accessed via ACPI.
+
+
+Open-source components (checked, nothing to do)
+-----------------------------------------------
+  - Limine bootloader (iso_root/boot/limine)    BSD-2-Clause
+  - lwIP TCP/IP stack (vendor/lwip)             BSD-3-Clause
+  - uACPI (vendor/uacpi)                        MIT
+  - BusyBox (downloaded by pm-toolchain.sh)     GPL-2.0
+  - Dropbear SSH                                MIT
+  - All Kunix kernel, driver and userland source.

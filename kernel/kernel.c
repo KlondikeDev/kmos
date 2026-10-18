@@ -63,6 +63,9 @@ volatile struct limine_framebuffer_request fb_request = {
 static volatile struct limine_kernel_file_request boot_file = {
     .id=LIMINE_KERNEL_FILE_REQUEST,.revision=0
 };
+const char* kernel_boot_commandline(void) {
+    return boot_file.response && boot_file.response->kernel_file && boot_file.response->kernel_file->cmdline ? boot_file.response->kernel_file->cmdline : "";
+}
 // -1 means no selector; -2 is an explicit invalid/missing root. Never silently
 // boot a different filesystem after the operator named one.
 static i32 boot_disk(const char* key) {
@@ -158,6 +161,15 @@ void kernel_main(void) {
     void* home=home_disk>=0 ? ufs2_mount((u8)home_disk) : NULL;
     if(home) { vfs_mount_with("/home",&ufs2_vfs_ops,home);disk_set_mounted((u8)home_disk,true); }
     else if(home_disk==-2)klog(LOG_WARN,"boot: invalid home PARTUUID selector\n");
+    // EFI generations boot a pristine RAM root. Keep the installed filesystem
+    // available in full; updates never format or replace its user data.
+    i32 installed_disk=boot_disk("installed=");
+    if(installed_disk>=0 && root_disk>=DISK_RAM0 && root_disk<DISK_NVME0 &&
+       (home_disk<0 || !disk_overlaps((u8)installed_disk,(u8)home_disk))) {
+        void* installed=ufs2_mount((u8)installed_disk);
+        if(installed) { vfs_mount_with("/installed",&ufs2_vfs_ops,installed);disk_set_mounted((u8)installed_disk,true); }
+        else klog(LOG_ERROR,"boot: cannot mount retained installed data\n");
+    } else if(installed_disk!=-1) klog(LOG_ERROR,"boot: refusing invalid or overlapping installed data selector\n");
     vfs_mount("/dev", &devfs_vfs_ops);
     vfs_mount("/proc", &procfs_vfs_ops);
     vfs_mount("/tmp", &tmpfs_vfs_ops);

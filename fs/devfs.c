@@ -206,7 +206,7 @@ static i64 raw_transfer(vnode_t* node,u64 off,void* buf,u64 len,bool write) {
     i32 d=raw_disk(node); if(d<0) return -ENXIO;
     bool original=node->id==DEV_INSTALL_SOURCE;
     if(write && original) return -EROFS;
-    if(write && disk_in_use((u8)d)) return -EBUSY;
+    if(write && !disk_raw_writable((u8)d)) return -EBUSY;
     u64 size=disk_sectors((u8)d)*512;
     if(off>=size) return write && len ? -ENOSPC : 0;
     if(len>size-off) { if(write) return -ENOSPC; len=size-off; }
@@ -239,7 +239,7 @@ i64 devfs_disk_ioctl(vnode_t* node,u32 req,void* arg) {
         struct kdisk_info info={0}; info.sectors=disk_sectors((u8)d);info.block_size=disk_block_size((u8)d);
         info.parent=disk_parent((u8)d);info.slot=disk_partition_slot((u8)d);
         info.flags=(!info.slot?KDISK_WHOLE:0)|(disk_in_use((u8)d)?KDISK_MOUNTED:0)|
-            (info.parent>=DISK_NVME0?KDISK_NVME:0)|
+            (info.parent>=DISK_NVME0?KDISK_NVME:0)|(disk_is_esp((u8)d)?KDISK_ESP:0)|
             (info.parent>=DISK_RAM0 && info.parent<DISK_NVME0?KDISK_RAM:0)|
             (node->id==DEV_INSTALL_SOURCE?KDISK_READONLY:0);
         disk_partition_guid((u8)d,info.guid);memcpy(arg,&info,sizeof(info));return 0;
@@ -312,7 +312,7 @@ static i32 devfs_open(vnode_t* node, u32 flags) {
         if(proc_current()->euid) return -EACCES;
         i32 d=raw_disk(node); if(d<0)return -ENXIO;
         if((flags&3) && node->id==DEV_INSTALL_SOURCE) return -EROFS;
-        if((flags&3) && disk_in_use((u8)d)) return -EBUSY;
+        if((flags&3) && !disk_raw_writable((u8)d)) return -EBUSY;
         return 0;
     }
     i32 n = devfs_pts_number(node);

@@ -1,0 +1,5 @@
+# No profile or home disk leaves the manager idle. Link loss retries with backoff.
+description=Wi-Fi manager
+exec=exec /bin/netconfig wifi-daemon
+type=daemon
+after=home var

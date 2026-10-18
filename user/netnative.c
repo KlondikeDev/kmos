@@ -4,7 +4,26 @@
 // Literal syscall values deliberately check the published native ABI contract.
 static int passed,failed,serial;
 static void check(const char* name,int ok){passed+=!!ok;failed+=!ok;printf("%s %s\n",ok?"PASS":"FAIL",name);char line[160];snprintf(line,sizeof line,"%s %s\n",ok?"PASS":"FAIL",name);write(serial,line,strlen(line));}
-int main(void){serial=open("/dev/serial",O_WRONLY,0);struct knet_info info;
+static void icmp(void){
+ long fd=syscall6(48,KNET_IPV4,KNET_RAW,1,0,0,0);
+ check("native raw ICMP socket",fd>=0);if(fd<0)return;
+ unsigned long long timeout=2000;unsigned int n=sizeof timeout;
+ check("native raw receive timeout",syscall6(57,fd,KNET_RCVTIMEO,(long)&timeout,(long)&n,1,0)==0);
+ int ttl=42;n=sizeof ttl;
+ check("native raw TTL option",syscall6(57,fd,KNET_TTL,(long)&ttl,(long)&n,1,0)==0);
+ struct knet_addr dest={.address=0x0100007f},from;
+ unsigned char request[8]={8,0,0xf7,0xfd,0,1,0,1},data[64];
+ check("native raw echo send",syscall6(53,fd,(long)request,sizeof request,0,(long)&dest,0)==sizeof request);
+ int got=0,source=0;for(unsigned int i=0;i<3;i++){
+  long count=syscall6(54,fd,(long)data,sizeof data,0,(long)&from,0);
+  if(count<0)break;
+  if(count>=28&&(data[0]>>4)==4&&data[9]==1){unsigned int off=(data[0]&15)*4;
+   if(off+8<=(unsigned long)count&&data[off]==0&&data[off+5]==1){got=1;source=from.address==dest.address&&!from.port;break;}
+  }
+ }
+ check("native raw IPv4 echo reply",got);check("native raw source address",source);close(fd);
+}
+int main(void){serial=open("/dev/serial",O_WRONLY,0);icmp();struct knet_info info;
  check("native netinfo",syscall3(58,(long)&info,0,0)==0&&info.mtu>=1500);
  check("native bad netinfo pointer",syscall3(58,1,0,0)==-EFAULT);
  check("native domain is independent",syscall6(48,2,KNET_DGRAM,0,0,0,0)==-97);

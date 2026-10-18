@@ -122,6 +122,22 @@ bool disk_in_use(u8 disk) {
         if(partitions[i].valid && partitions[i].p.parent==parent && partitions[i].mounted) return true;
     return false;
 }
+bool disk_is_esp(u8 disk) {
+    static const u8 type[16]={0x28,0x73,0x2a,0xc1,0x1f,0xf8,0xd2,0x11,0xba,0x4b,0,0xa0,0xc9,0x3e,0xc9,0x3b};
+    if(disk<DISK_PART0 || disk>=DISK_MAX || !partitions[disk-DISK_PART0].valid)return false;
+    for(u32 i=0;i<16;i++)if(partitions[disk-DISK_PART0].p.type[i]!=type[i])return false;
+    return true;
+}
+bool disk_raw_writable(u8 disk) {
+    if(!disk_in_use(disk))return true;
+    // Keep whole disks and every ordinary mounted sibling protected. EFI
+    // updates only need the unmounted boot slice, never the GPT or UFS data.
+    if(!disk_is_esp(disk))return false;
+    for(u32 d=0;d<DISK_WHOLE_MAX;d++)if(mounted_disks[d] && disk_overlaps(disk,(u8)d))return false;
+    for(u32 i=0;i<DISK_MAX-DISK_PART0;i++)
+        if(partitions[i].valid && partitions[i].mounted && disk_overlaps(disk,(u8)(i+DISK_PART0)))return false;
+    return true;
+}
 u32 disk_block_size(u8 disk) {
     disk=disk_parent(disk);
     return disk>=DISK_NVME0 && disk<DISK_PART0 ? nvme_block_size(disk-DISK_NVME0) : 512;

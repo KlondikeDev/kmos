@@ -4,6 +4,8 @@
 #define KNET_IPV4 1
 #define KNET_STREAM 1
 #define KNET_DGRAM 2
+// Raw IPv4 ICMP requires effective uid zero. Protocol is IPPROTO_ICMP (1).
+#define KNET_RAW 3
 #define KNET_NONBLOCK 1
 #define KNET_CLOEXEC 2
 #define KNET_PEEK 1
@@ -22,6 +24,9 @@
 #define KNET_SNDBUF 9
 #define KNET_RCVBUF 10
 #define KNET_BROADCAST 11
+#define KNET_TTL 12
+#define KNET_TOS 13
+#define KNET_MULTICAST_TTL 14
 struct knet_addr { unsigned int address; unsigned short port, reserved; };
 struct knet_info {
  unsigned int address, netmask, gateway, dns, mtu, up, link;

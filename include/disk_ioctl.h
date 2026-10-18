@@ -8,6 +8,7 @@
 #define KDISK_RAM 4u
 #define KDISK_READONLY 8u
 #define KDISK_NVME 16u
+#define KDISK_ESP 32u
 #define KDISK_BLKGETSIZE64 0x80081272u
 #define KDISK_BLKSSZGET 0x1268u
 struct kdisk_info {

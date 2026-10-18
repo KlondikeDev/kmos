@@ -1,0 +1,5 @@
+# Waits for explicit sshctl enable; never accepts the shipped empty root password.
+description=SSH manager
+exec=exec /bin/netconfig ssh-daemon
+type=daemon
+after=home accounts var

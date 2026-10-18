@@ -6,7 +6,7 @@ export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1}"
 cd "$(dirname "$0")/../../.."
 sources=""
-for name in init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp dns; do
+for name in init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp dns raw; do
  sources="$sources vendor/lwip/src/core/$name.c"
 done
 for name in acd dhcp etharp icmp ip4 ip4_addr ip4_frag; do

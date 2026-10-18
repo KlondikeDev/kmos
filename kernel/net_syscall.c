@@ -45,7 +45,7 @@ bool net_native_call(u64 nr,u64 a,u64 b,u64 c,u64 d,u64 e,u64 f6,i64* result){
  case SYS_SHUTDOWN:r=inet_shutdown(file,(i32)b);break;
  case SYS_SOCKNAME:{if(!valid(b,sizeof(inet_addr_t),true)){r=-EFAULT;break;}inet_addr_t address;r=inet_name(file,&address,c!=0);if(!r)memcpy((void*)b,&address,sizeof address);break;}
  case SYS_SOCKOPT:{
-  if(b<1||b>INET_BROADCAST){r=-92;break;}
+  if(b<1||b>INET_MULTICAST_TTL){r=-92;break;}
   if(e>1)break;
   if(!valid(d,4,!e)){r=-EFAULT;break;}u32 length=*(u32*)d;u64 storage=0;u8* value=(u8*)&storage;
   if(e&&length>sizeof storage){r=-EINVAL;break;}u32 copy=length<sizeof storage?length:sizeof storage;

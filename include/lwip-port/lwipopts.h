@@ -9,7 +9,9 @@
 #define LWIP_TCP 1
 #define LWIP_UDP 1
 #define LWIP_ICMP 1
-#define LWIP_RAW 0
+#define LWIP_RAW 1
+#define LWIP_MULTICAST_TX_OPTIONS 1
+#define MEMP_NUM_RAW_PCB 16
 #define LWIP_DHCP 1
 #define LWIP_DNS 1
 #define LWIP_DHCP_MAX_DNS_SERVERS 2

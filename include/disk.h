@@ -53,3 +53,7 @@ i32 disk_install_source(void);
 bool ramdisk_original_read(u8 disk, u64 lba, u32 count, void* out);
 
 bool disk_overlaps(u8 a,u8 b);
+
+// An unmounted, nonoverlapping EFI slice can be updated beside mounted UFS.
+bool disk_is_esp(u8 disk);
+bool disk_raw_writable(u8 disk);

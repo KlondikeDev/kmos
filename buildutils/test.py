@@ -72,6 +72,16 @@ def check_ufs_image(root, img=None, quiet=False):
 KEYS = {" ": "spc", "\n": "ret", ".": "dot", "/": "slash", "-": "minus"}
 
 
+def validate_home_image(root, image):
+    """An explicit disposable fixture survives test boots; never attach the user's home."""
+    if not stat.S_ISREG(os.lstat(image).st_mode):
+        raise ValueError("--home-image requires a regular file, not a symlink or device")
+    actual = os.path.join(root, "home.img")
+    if os.path.exists(actual) and os.path.samefile(actual, image):
+        raise ValueError("--home-image refuses the repository's real home.img; create a disposable fixture")
+    return os.path.abspath(image)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--mem", default="256M", help="guest RAM (default 256M)")
@@ -89,6 +99,7 @@ def main():
     ap.add_argument("--acpi-table", action="append", default=[], help="add an ACPI table to QEMU (repeatable)")
     ap.add_argument("--nvme", action="append", default=[], help="attach a disposable raw NVMe image")
     ap.add_argument("--nvme-block-size", type=int, choices=[512,4096], default=512)
+    ap.add_argument("--home-image", help="attach this disposable home image read/write, preserving it across boots")
     ap.add_argument("--no-ata", action="store_true", help="omit legacy disk images")
     ap.add_argument("--boot-nvme", action="store_true", help="boot firmware from NVMe without the ISO")
     ap.add_argument("--install-answer", choices=["YES","NO"], help="answer the installer in this disposable VM")
@@ -115,6 +126,7 @@ def main():
         if args.firmware_vars: extra += ["--firmware-vars", args.firmware_vars]
         for image in args.nvme: extra += ["--nvme",image]
         extra += ["--nvme-block-size",str(args.nvme_block_size)]
+        if args.home_image: extra += ["--home-image", args.home_image]
         if args.no_ata: extra += ["--no-ata"]
         if args.boot_nvme: extra += ["--boot-nvme"]
         for table in args.acpi_table: extra += ["--acpi-table", table]
@@ -157,7 +169,13 @@ def main():
         drives += ["-drive", f"file={root}/ufs.img,format=raw,if=ide,index=1"]
     # The home disk is yours, not the tests': they get a copy, checked after.
     home = None
-    if not args.no_ata and os.path.exists(os.path.join(root, "home.img")):
+    if args.home_image:
+        try:
+            home = validate_home_image(root, args.home_image)
+        except (ValueError, OSError) as error:
+            ap.error(str(error))
+        drives += ["-drive", f"file={home},format=raw,if=ide,index=3"]
+    elif not args.no_ata and os.path.exists(os.path.join(root, "home.img")):
         home = os.path.join(work, "home.img")
         shutil.copyfile(os.path.join(root, "home.img"), home)
         drives += ["-drive", f"file={home},format=raw,if=ide,index=3"]

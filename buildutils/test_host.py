@@ -41,3 +41,14 @@ with tempfile.TemporaryDirectory(prefix="kunix-host-tests-") as work:
             subprocess.run([binary], env=dict(env, KUNIX_HOST_LARGE_CACHE="1"), check=True)
 
 subprocess.run(["sh", "buildutils/tests/inet-host/run.sh"],cwd=root,check=True)
+
+# Persistent settings and fixed-ESP update invariants use ordinary host libc.
+with tempfile.TemporaryDirectory(prefix="kunix-remote-tests-") as work:
+    for name in ("network_settings", "update_fat", "update_ownership", "update_interrupt", "update_live"):
+        binary = str(Path(work) / name)
+        subprocess.run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-fsanitize=address,undefined", "buildutils/tests/" + name + ".c",
+                        "-o", binary], cwd=root, check=True)
+        subprocess.run([binary], env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"), check=True)
+for name in ("update_bundle.py", "selfhost_bundle.py"):
+    subprocess.run(["python3", "buildutils/tests/" + name], cwd=root, check=True)

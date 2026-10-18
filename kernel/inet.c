@@ -15,6 +15,7 @@
 #include <lwip/timeouts.h>
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
+#include <lwip/raw.h>
 #include <lwip/dhcp.h>
 #include <lwip/dns.h>
 #include <lwip/etharp.h>
@@ -23,6 +24,7 @@
 
 #define N_STREAM 1
 #define N_DGRAM 2
+#define N_RAW 3
 #define N_PEEK 2
 #define N_TRUNC 32
 #define N_DONTWAIT 64
@@ -51,6 +53,7 @@ typedef struct endpoint {
     u32 type;
     struct tcp_pcb* tcp;
     struct udp_pcb* udp;
+    struct raw_pcb* raw;
     inet_addr_t local_name,peer_name;
     bool listening, connecting, connected, eof, rd, wr;
     i32 error;
@@ -359,6 +362,7 @@ static void destroy(endpoint_t*s) {
         s->tcp=0;
     }
     if(s->udp)udp_remove(s->udp);
+    if(s->raw)raw_remove(s->raw);
     clear_packets(s);
     kfree(s);
 }
@@ -382,6 +386,19 @@ static void udp_receive(void*arg,struct udp_pcb*p,struct pbuf*b,const ip_addr_t*
     inet_addr_t from={ip4_addr_get_u32(ip_2_ip4(a)),lwip_htons(port),0};
     if(s->rd||!enqueue(s,b,&from))pbuf_free(b);
 }
+/* The raw callback sees the IPv4 header. Keep a separate copy: lwIP
+ * subsequently removes headers and changes echo requests into replies. A
+ * socket must not consume the packet before the normal ICMP responder. */
+static u8_t icmp_receive(void*arg,struct raw_pcb*pcb,struct pbuf*p,const ip_addr_t*a) {
+    (void)pcb;
+    endpoint_t*s=arg;
+    if(s->rd||s->packets>=QUEUE_LIMIT||p->tot_len>s->rlimit-s->bytes)return 0;
+    struct pbuf*copy=pbuf_clone(PBUF_RAW,PBUF_RAM,p);
+    if(copy){inet_addr_t from={ip4_addr_get_u32(ip_2_ip4(a)),0,0};
+        if(!enqueue(s,copy,&from))pbuf_free(copy);
+    }
+    return 0;
+}
 static file_t* make_file(endpoint_t*s,u32 flags) {file_t*f=kmalloc(sizeof(*f));
     if(f){memset(f,0,sizeof(*f));
         f->priv=s;
@@ -391,8 +408,12 @@ static file_t* make_file(endpoint_t*s,u32 flags) {file_t*f=kmalloc(sizeof(*f));
     }return f;
 }
 i32 inet_create(u32 type,u32 flags,u32 protocol,file_t**out) {
-    if(type!=1&&type!=2)return -94;
-    if(protocol && protocol!=(type==1?6:17))return -93;
+    if(type!=N_STREAM&&type!=N_DGRAM&&type!=N_RAW)return -94;
+    if(type==N_RAW){
+        if(protocol!=1)return -93;
+        process_t*p=proc_current();
+        if(p&&p->euid)return -EPERM;
+    }else if(protocol && protocol!=(type==N_STREAM?6:17))return -93;
     if(flags&~(O_NONBLOCK|O_CLOEXEC))return -EINVAL;
     u64 q=irq_save();
     endpoint_t*s=alloc_ep(type);
@@ -401,10 +422,12 @@ i32 inet_create(u32 type,u32 flags,u32 protocol,file_t**out) {
     }
     if(type==1){struct tcp_pcb*p=tcp_new();
         if(p)attach(s,p);
+    }else if(type==N_RAW){s->raw=raw_new(1);
+        if(s->raw)raw_recv(s->raw,icmp_receive,s);
     }else{s->udp=udp_new();
         if(s->udp)udp_recv(s->udp,udp_receive,s);
     }
-    file_t*f=(s->tcp||s->udp)?make_file(s,flags):0;
+    file_t*f=(s->tcp||s->udp||s->raw)?make_file(s,flags):0;
     if(!f){destroy(s);
         irq_restore(q);
         return -ENOMEM;
@@ -422,14 +445,14 @@ i32 inet_bind(file_t*f,const inet_addr_t*a) {
     endpoint_t*s=ep(f);
     u16 port=lwip_ntohs(a->port);
     process_t*p=proc_current();
-    if(port&&port<1024&&p&&p->euid){irq_restore(q);
+    if(s->type!=N_RAW&&port&&port<1024&&p&&p->euid){irq_restore(q);
         return -EACCES;
     }
     if(s->listening||s->connected||s->connecting){irq_restore(q);
         return -EINVAL;
     }
     ip_addr_t ip=ip_address(a->address);
-    err_t e=s->type==1?tcp_bind(s->tcp,&ip,port):udp_bind(s->udp,&ip,port);
+    err_t e=s->raw?raw_bind(s->raw,&ip):s->type==1?tcp_bind(s->tcp,&ip,port):udp_bind(s->udp,&ip,port);
     if(e==ERR_OK&&s->tcp)cache_names(s,s->tcp);
     irq_restore(q);
     return -error_code(e);
@@ -465,6 +488,11 @@ i32 inet_connect(file_t*f,const inet_addr_t*a) {
     }
     ip_addr_t ip=ip_address(a->address);
     err_t e;
+    if(s->raw){e=raw_connect(s->raw,&ip);
+        s->connected=e==ERR_OK;
+        irq_restore(q);
+        return -error_code(e);
+    }
     if(s->type==2){e=udp_connect(s->udp,&ip,lwip_ntohs(a->port));
         s->connected=e==ERR_OK;
 
@@ -550,6 +578,7 @@ i32 inet_name(file_t*f,inet_addr_t*out,bool peer) {
         cache_names(s,s->tcp);
         out->address=ip4_addr_get_u32(ip_2_ip4(peer?&s->tcp->remote_ip:&s->tcp->local_ip));
         out->port=lwip_htons(peer?s->tcp->remote_port:s->tcp->local_port);
+    }else if(s->raw){out->address=ip4_addr_get_u32(ip_2_ip4(peer?&s->raw->remote_ip:&s->raw->local_ip));
     }else{out->address=ip4_addr_get_u32(ip_2_ip4(peer?&s->udp->remote_ip:&s->udp->local_ip));
         out->port=lwip_htons(peer?s->udp->remote_port:s->udp->local_port);
     }
@@ -590,7 +619,7 @@ i64 inet_send(file_t*f,const void*buf,u64 len,u32 flags,const inet_addr_t*to) {
             irq_restore(q);
             return -e;
         }
-        if(s->type==2){if(len>65507){irq_restore(q);
+        if(s->type!=N_STREAM){if(len>(s->raw?65515:65507)){irq_restore(q);
                 return -EMSGSIZE;
             }if(!to&&!s->connected){irq_restore(q);
                 return -EDESTADDRREQ;
@@ -600,7 +629,8 @@ i64 inet_send(file_t*f,const void*buf,u64 len,u32 flags,const inet_addr_t*to) {
                 return -ENOMEM;
             }pbuf_take(p,buf,(u16)len);
             ip_addr_t ip=ip_address(to?to->address:0);
-            err_t e=to?udp_sendto(s->udp,p,&ip,lwip_ntohs(to->port)):udp_send(s->udp,p);
+            err_t e=s->raw?(to?raw_sendto(s->raw,p,&ip):raw_send(s->raw,p)):
+                to?udp_sendto(s->udp,p,&ip,lwip_ntohs(to->port)):udp_send(s->udp,p);
             pbuf_free(p);
             irq_restore(q);
             return e?-error_code(e):(i64)len;
@@ -641,15 +671,15 @@ i64 inet_recv(file_t*f,void*buf,u64 len,u32 flags,inet_addr_t*from,u32*out_flags
         if(m){u32 left=m->p->tot_len-m->off;
             u32 n=len-done<left?(u32)(len-done):left;
             pbuf_copy_partial(m->p,(u8*)buf+done,(u16)n,(u16)m->off);
-            if(from){if(s->type==2)*from=m->from;
+            if(from){if(s->type!=N_STREAM)*from=m->from;
                 else inet_name(f,from,true);
             }
-            if(s->type==2&&n<left&&out_flags)*out_flags|=N_TRUNC;
-            u32 result=s->type==2&&(flags&N_TRUNC)?left:n;
-            if(!(flags&N_PEEK)){s->bytes-=s->type==2?left:n;
+            if(s->type!=N_STREAM&&n<left&&out_flags)*out_flags|=N_TRUNC;
+            u32 result=s->type!=N_STREAM&&(flags&N_TRUNC)?left:n;
+            if(!(flags&N_PEEK)){s->bytes-=s->type!=N_STREAM?left:n;
                 m->off+=n;
                 if(s->type==1&&s->tcp)tcp_recved(s->tcp,(u16)n);
-                if(s->type==2||m->off==m->p->tot_len){s->head=m->next;
+                if(s->type!=N_STREAM||m->off==m->p->tot_len){s->head=m->next;
                     if(!s->head)s->tail=0;
                     s->packets--;
                     pbuf_free(m->p);
@@ -657,7 +687,7 @@ i64 inet_recv(file_t*f,void*buf,u64 len,u32 flags,inet_addr_t*from,u32*out_flags
                 }}
             done+=result;
             irq_restore(q);
-            if(s->type==2||done==len||(flags&N_PEEK)||!(flags&N_WAITALL))return (i64)done;
+            if(s->type!=N_STREAM||done==len||(flags&N_PEEK)||!(flags&N_WAITALL))return (i64)done;
             continue;
         }
         if(s->rd){irq_restore(q);
@@ -694,7 +724,7 @@ static u32 inet_poll(file_t*f) {
     u32 r=0;
     if(s->error)r|=POLLERR;
     if(s->head||s->count||s->eof||s->rd)r|=POLLIN;
-    if(s->type==2||(!s->listening&&!s->connecting&&(s->error||s->eof||s->wr||(s->connected&&(!s->tcp||(tcp_sndbuf(s->tcp)&&(u32)TCP_SND_BUF-tcp_sndbuf(s->tcp)<s->slimit))))))r|=POLLOUT;
+    if(s->type!=N_STREAM||(!s->listening&&!s->connecting&&(s->error||s->eof||s->wr||(s->connected&&(!s->tcp||(tcp_sndbuf(s->tcp)&&(u32)TCP_SND_BUF-tcp_sndbuf(s->tcp)<s->slimit))))))r|=POLLOUT;
     if(s->eof&&s->wr)r|=POLLHUP;
     irq_restore(q);
     return r;
@@ -708,7 +738,7 @@ i32 inet_option(file_t*f,bool set,u32 option,void*value,u32*length) {
     i32 v=0;
     memcpy(&v,value,4);
     i32 result=0;
-    struct ip_pcb*p=s->type==1?(struct ip_pcb*)s->tcp:(struct ip_pcb*)s->udp;
+    struct ip_pcb*p=s->raw?(struct ip_pcb*)s->raw:s->type==1?(struct ip_pcb*)s->tcp:(struct ip_pcb*)s->udp;
     if(need==8){u64*t=option==INET_RCVTIMEO?&s->rtime:&s->stime;
         if(set){u64 n;
             memcpy(&n,value,8);
@@ -716,6 +746,20 @@ i32 inet_option(file_t*f,bool set,u32 option,void*value,u32*length) {
         }else memcpy(value,t,8);
     }
     else switch(option){
+        case INET_TTL:case INET_TOS:case INET_MULTICAST_TTL:{
+            if(!p){result=-ENOTCONN;break;}
+            u8*field=option==INET_TTL?&p->ttl:option==INET_TOS?&p->tos:0;
+            if(!field){
+                if(s->raw)field=&s->raw->mcast_ttl;
+                else if(s->udp)field=&s->udp->mcast_ttl;
+                else {result=-EOPNOTSUPP;break;}
+            }
+            if(set){if(v<(option==INET_TTL?1:0)||v>255)result=-EINVAL;
+                else *field=(u8)v;
+            }else v=*field;
+            break;
+        }
+
         case INET_TYPE:if(set)result=-EINVAL;
         else v=s->type;
         break;
